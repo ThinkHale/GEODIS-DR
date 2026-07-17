@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Badge Crosscheck — Beeline / CRM Reconciliation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --navy:#0B2545; --navy-2:#14365e; --navy-3:#1d4a7a;
+    --orange:#F26A21; --orange-soft:#FDEEE4;
+    --paper:#EEF1F5; --card:#FFFFFF; --line:#D9DFE7;
+    --ink:#14202E; --muted:#61718A;
+    --ok:#1E8A5A; --ok-bg:#E4F4EC;
+    --crm:#C8791A; --crm-bg:#FBEED6;
+    --bee:#5B54C9; --bee-bg:#EAE9FB;
+    --dup:#C4362F; --dup-bg:#FBE6E4;
+    --radius:10px;
+    --shadow:0 1px 2px rgba(11,37,69,.06), 0 6px 20px rgba(11,37,69,.06);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{font-family:'Inter',system-ui,sans-serif;background:var(--paper);color:var(--ink);-webkit-font-smoothing:antialiased;line-height:1.45;}
+  .mono{font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums;}
+  .cond{font-family:'Barlow Semi Condensed',sans-serif;}
+
+  header{background:var(--navy);background-image:linear-gradient(180deg,#0B2545 0%,#0a1f3d 100%);color:#fff;border-bottom:3px solid var(--orange);}
+  .bar{max-width:1280px;margin:0 auto;padding:18px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;}
+  .mark{width:40px;height:40px;border-radius:9px;flex:0 0 auto;background:var(--orange);position:relative;display:grid;place-items:center;box-shadow:0 0 0 4px rgba(242,106,33,.18);}
+  .mark svg{width:24px;height:24px;display:block}
+  .title h1{font-family:'Barlow Semi Condensed',sans-serif;font-weight:700;font-size:22px;letter-spacing:.3px;margin:0;line-height:1;text-transform:uppercase;}
+  .title p{margin:3px 0 0;font-size:12.5px;color:#aebfd6;letter-spacing:.2px;}
+  .bar .spacer{flex:1}
+  .privacy{font-size:11.5px;color:#9fb2cc;display:flex;align-items:center;gap:7px;border:1px solid rgba(255,255,255,.14);padding:6px 11px;border-radius:20px;}
+  .privacy b{color:#dfe8f4;font-weight:600}
+  .dot{width:7px;height:7px;border-radius:50%;background:#39d98a;box-shadow:0 0 0 3px rgba(57,217,138,.22)}
+
+  main{max-width:1280px;margin:0 auto;padding:24px;}
+  .eyebrow{font-family:'Barlow Semi Condensed',sans-serif;font-weight:600;font-size:12px;letter-spacing:1.4px;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:10px;margin:0 0 12px;}
+  .eyebrow .num{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--orange);border:1px solid var(--line);border-radius:5px;padding:1px 6px;background:#fff;}
+  .eyebrow .rule{flex:1;height:1px;background:var(--line)}
+
+  .uploads{display:grid;grid-template-columns:1fr 56px 1fr;gap:0;align-items:stretch;margin-bottom:8px;}
+  .drop{background:var(--card);border:1.5px dashed var(--line);border-radius:var(--radius);padding:22px;cursor:pointer;transition:.15s;position:relative;min-height:150px;display:flex;flex-direction:column;}
+  .drop:hover{border-color:var(--navy-3);background:#fbfcfe}
+  .drop.dragover{border-color:var(--orange);background:var(--orange-soft)}
+  .drop.loaded{border-style:solid;border-color:var(--line);cursor:default}
+  .drop .src{font-family:'Barlow Semi Condensed',sans-serif;font-weight:700;font-size:15px;letter-spacing:.4px;text-transform:uppercase;display:flex;align-items:center;gap:9px;}
+  .tag{font-size:10.5px;font-weight:600;letter-spacing:.5px;padding:2px 8px;border-radius:20px;text-transform:uppercase;}
+  .tag.vms{background:var(--bee-bg);color:var(--bee)}
+  .tag.ats{background:var(--crm-bg);color:var(--crm)}
+  .drop .hint{color:var(--muted);font-size:13px;margin-top:8px;}
+  .drop .cta{margin-top:auto;display:inline-flex;align-items:center;gap:7px;align-self:flex-start;font-size:12.5px;font-weight:600;color:var(--navy);border:1px solid var(--line);border-radius:7px;padding:7px 12px;background:#fff;}
+  .drop.loaded .cta{display:none}
+  .crosslink{display:flex;align-items:center;justify-content:center;}
+  .crosslink svg{width:30px;height:30px;color:var(--navy-3)}
+  .filecard{display:none;flex-direction:column;gap:10px;margin-top:2px}
+  .drop.loaded .filecard{display:flex}
+  .drop.loaded .src-desc{display:none}
+  .fileline{display:flex;align-items:center;gap:9px}
+  .fileicon{width:30px;height:30px;border-radius:7px;background:var(--navy);display:grid;place-items:center;flex:0 0 auto}
+  .fileicon svg{width:16px;height:16px;color:#fff}
+  .fname{font-weight:600;font-size:13.5px;word-break:break-all;line-height:1.25}
+  .fmeta{font-size:11.5px;color:var(--muted);margin-top:1px}
+  .fmeta .mono{color:var(--navy);font-weight:500}
+  .replace{margin-left:auto;font-size:11.5px;color:var(--navy-3);background:none;border:none;cursor:pointer;text-decoration:underline;flex:0 0 auto}
+
+  .maprow{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:flex-end;padding-top:10px;border-top:1px dashed var(--line)}
+  .mapfield{display:flex;flex-direction:column;gap:3px}
+  .mapfield label{font-size:10.5px;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);font-weight:600}
+  select{font-family:'Inter',sans-serif;font-size:12.5px;padding:6px 26px 6px 9px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2361718A' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 9px center;max-width:210px;}
+  select:focus{outline:2px solid var(--navy-3);outline-offset:1px}
+  .chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none;padding-bottom:6px}
+  .chk input{accent-color:var(--orange);width:15px;height:15px}
+
+  .ms{position:relative}
+  .ms-btn{font-family:'Inter';font-size:12.5px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);cursor:pointer;display:inline-flex;align-items:center;gap:8px;min-width:150px;justify-content:space-between}
+  .ms-btn:hover{border-color:var(--navy-3)}
+  .ms-btn .ms-label{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px}
+  .ms-btn svg{width:11px;height:7px;flex:0 0 auto;color:var(--muted)}
+  .ms-panel{position:absolute;z-index:30;top:calc(100% + 5px);left:0;width:288px;background:#fff;border:1px solid var(--line);border-radius:9px;box-shadow:0 10px 30px rgba(11,37,69,.16);padding:8px;}
+  .ms-actions{display:flex;gap:6px;padding:2px 2px 8px;border-bottom:1px solid var(--line);margin-bottom:6px}
+  .ms-actions button{flex:1;font-family:'Inter';font-size:11px;font-weight:600;padding:5px 6px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--navy);cursor:pointer}
+  .ms-actions button:hover{background:#f4f7fb;border-color:var(--navy-3)}
+  .ms-actions button.accent{background:var(--orange-soft);border-color:#f3cbb0;color:#a24d17}
+  .ms-list{max-height:240px;overflow:auto;display:flex;flex-direction:column;gap:1px}
+  .ms-item{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:12.5px;user-select:none}
+  .ms-item:hover{background:#f6f8fb}
+  .ms-item input{accent-color:var(--orange);width:15px;height:15px;flex:0 0 auto}
+  .ms-item .reg{font-weight:500;flex:1}
+  .ms-item .rc{font-family:'IBM Plex Mono';font-size:11px;color:var(--muted)}
+  .ms-item .inbadge{font-size:9.5px;font-weight:700;letter-spacing:.4px;color:var(--ok);background:var(--ok-bg);padding:1px 5px;border-radius:4px;text-transform:uppercase}
+
+  .tip{display:flex;gap:8px;align-items:flex-start;margin-top:10px;background:var(--orange-soft);border:1px solid #f6d5bf;border-radius:8px;padding:9px 12px;font-size:12px;color:#8a4a17;line-height:1.4;}
+  .tip svg{flex:0 0 auto;width:15px;height:15px;margin-top:1px}
+  .tip.alt{background:#EEF3FC;border-color:#cddbf3;color:#1d4a7a}
+  .tip + .tip{margin-top:8px}
+
+  .stats{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:4px 0 4px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px 15px;box-shadow:var(--shadow);position:relative;overflow:hidden}
+  .stat::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--navy-3)}
+  .stat.ok::before{background:var(--ok)} .stat.crm::before{background:var(--crm)}
+  .stat.bee::before{background:var(--bee)} .stat.dup::before{background:var(--dup)}
+  .stat .k{font-size:10.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);font-weight:600;line-height:1.3;min-height:26px}
+  .stat .v{font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:27px;line-height:1;margin-top:6px;letter-spacing:-.5px}
+  .stat.ok .v{color:var(--ok)} .stat.crm .v{color:var(--crm)}
+  .stat.bee .v{color:var(--bee)} .stat.dup .v{color:var(--dup)}
+
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden;margin-top:8px}
+  .toolbar{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff}
+  .seg button{font-family:'Inter';font-size:12.5px;font-weight:600;padding:8px 14px;border:none;background:#fff;color:var(--muted);cursor:pointer;transition:.12s;position:relative}
+  .seg button+button{border-left:1px solid var(--line)}
+  .seg button.active{background:var(--navy);color:#fff}
+  .seg button .cnt{font-family:'IBM Plex Mono';font-size:11px;margin-left:6px;opacity:.75}
+  .search{position:relative;flex:1;min-width:180px;max-width:320px}
+  .search input{width:100%;font-family:'Inter';font-size:13px;padding:8px 12px 8px 32px;border:1px solid var(--line);border-radius:8px;color:var(--ink)}
+  .search input:focus{outline:2px solid var(--navy-3);outline-offset:0}
+  .search svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:15px;height:15px;color:var(--muted)}
+  .tb-spacer{flex:1}
+  .btn{font-family:'Inter';font-size:12.5px;font-weight:600;padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:#fff;color:var(--navy);cursor:pointer;display:inline-flex;align-items:center;gap:7px;transition:.12s;white-space:nowrap}
+  .btn:hover{background:#f4f7fb;border-color:var(--navy-3)}
+  .btn svg{width:15px;height:15px}
+  .btn.primary{background:var(--orange);border-color:var(--orange);color:#fff}
+  .btn.primary:hover{background:#e05d17;border-color:#e05d17}
+
+  .tablewrap{overflow:auto;max-height:62vh}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  thead th{position:sticky;top:0;z-index:2;background:#f6f8fb;text-align:left;font-family:'Barlow Semi Condensed';font-weight:600;font-size:12px;letter-spacing:.6px;text-transform:uppercase;color:var(--muted);padding:11px 14px;border-bottom:1px solid var(--line);white-space:nowrap;cursor:pointer;user-select:none;}
+  thead th:hover{color:var(--navy)}
+  thead th .arrow{font-size:9px;margin-left:4px;color:var(--orange)}
+  tbody td{padding:10px 14px;border-bottom:1px solid #eef1f5;vertical-align:middle;white-space:nowrap}
+  tbody tr:hover{background:#fafbfd}
+  td.badge{font-family:'IBM Plex Mono';font-weight:600;font-size:13px;letter-spacing:.2px;color:var(--navy)}
+  td.market{font-size:12.5px;color:var(--muted)}
+  td.datecell{font-size:12.5px}
+  .age{font-family:'IBM Plex Mono';font-size:10.5px;color:var(--muted);margin-left:5px}
+  .age.stale{color:var(--dup);font-weight:600}
+  .name-empty{color:#b6c0cf;font-style:italic;font-size:12px}
+  .chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;white-space:nowrap;letter-spacing:.2px}
+  .chip::before{content:"";width:6px;height:6px;border-radius:50%}
+  .chip.ok{background:var(--ok-bg);color:var(--ok)} .chip.ok::before{background:var(--ok)}
+  .chip.crm{background:var(--crm-bg);color:var(--crm)} .chip.crm::before{background:var(--crm)}
+  .chip.bee{background:var(--bee-bg);color:var(--bee)} .chip.bee::before{background:var(--bee)}
+  .duptag{display:inline-block;margin-left:7px;font-family:'IBM Plex Mono';font-size:10px;font-weight:600;color:var(--dup);background:var(--dup-bg);padding:1px 6px;border-radius:4px}
+  tr.is-dup td.badge{color:var(--dup)}
+
+  .empty{padding:70px 24px;text-align:center;color:var(--muted)}
+  .empty svg{width:46px;height:46px;color:#c3ccd8;margin-bottom:14px}
+  .empty h3{font-family:'Barlow Semi Condensed';font-weight:600;font-size:18px;color:var(--ink);margin:0 0 6px;letter-spacing:.3px}
+  .empty p{margin:0;font-size:13.5px;max-width:440px;margin-inline:auto}
+
+  .foot{max-width:1280px;margin:0 auto;padding:8px 24px 40px;color:var(--muted);font-size:11.5px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .foot .mono{color:var(--navy-3)}
+  .hidden{display:none !important}
+
+  @media(max-width:920px){
+    .stats{grid-template-columns:repeat(3,1fr)}
+    .uploads{grid-template-columns:1fr;gap:12px}
+    .crosslink{transform:rotate(90deg);height:20px}
+  }
+  @media(max-width:560px){
+    .stats{grid-template-columns:repeat(2,1fr)}
+    .bar{padding:14px 16px}
+    main{padding:16px}
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M4 7.5l5 4.5-5 4.5M20 7.5l-5 4.5 5 4.5M13.5 4l-3 16" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div class="title">
+      <h1>Badge Crosscheck</h1>
+      <p>Beeline &nbsp;&#8646;&nbsp; CRM active-assignment reconciliation</p>
+    </div>
+    <div class="spacer"></div>
+    <div class="privacy"><span class="dot"></span><span><b>Private.</b> Files are read in your browser only — nothing is uploaded.</span></div>
+  </div>
+</header>
+
+<main>
+  <p class="eyebrow"><span class="num">01</span> Load both reports <span class="rule"></span></p>
+  <div class="uploads">
+    <!-- BEELINE -->
+    <div class="drop" id="drop-beeline" data-side="beeline">
+      <input type="file" class="file-input hidden" accept=".xlsx,.xls,.csv" />
+      <div class="src-desc">
+        <div class="src"><span class="tag vms">VMS</span> Beeline — All Assignments</div>
+        <div class="hint">Export from Beeline. Badge = <b>Assignment&nbsp;ID</b>, name = <b>Contractor Name</b>, start = <b>Current Start Date</b>. Filter markets below.</div>
+      </div>
+      <div class="filecard">
+        <div class="fileline">
+          <div class="fileicon"><svg viewBox="0 0 24 24" fill="none"><path d="M13 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V9l-6-6z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M13 3v6h6" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></div>
+          <div><div class="fname"></div><div class="fmeta"></div></div>
+          <button class="replace" type="button">Replace</button>
+        </div>
+        <div class="maprow">
+          <div class="mapfield"><label>Badge column</label><select class="sel-badge"></select></div>
+          <div class="mapfield"><label>Name column</label><select class="sel-name"></select></div>
+          <div class="mapfield"><label>Start date column</label><select class="sel-start"></select></div>
+          <div class="mapfield"><label>Status column</label><select class="sel-status"></select></div>
+          <label class="chk"><input type="checkbox" class="chk-active" checked> Active only</label>
+        </div>
+        <div class="maprow pc-row hidden" style="border-top:none;padding-top:2px">
+          <div class="mapfield"><label>Profit center column</label><select class="sel-pc"></select></div>
+          <div class="mapfield region-field">
+            <label>Markets / regions</label>
+            <div class="ms">
+              <button class="ms-btn" type="button"><span class="ms-label">All regions</span><svg viewBox="0 0 10 6" fill="none"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+              <div class="ms-panel hidden">
+                <div class="ms-actions">
+                  <button type="button" data-act="crm" class="accent">In CRM</button>
+                  <button type="button" data-act="all">All</button>
+                  <button type="button" data-act="none">None</button>
+                </div>
+                <div class="ms-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <span class="cta"><svg viewBox="0 0 24 24" fill="none" width="15" height="15"><path d="M12 16V4m0 0L7 9m5-5l5 5M4 20h16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>Drop file or browse</span>
+    </div>
+
+    <div class="crosslink" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M4 8h13m0 0l-4-4m4 4l-4 4M20 16H7m0 0l4-4m-4 4l4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+
+    <!-- CRM -->
+    <div class="drop" id="drop-crm" data-side="crm">
+      <input type="file" class="file-input hidden" accept=".xlsx,.xls,.csv" />
+      <div class="src-desc">
+        <div class="src"><span class="tag ats">CRM / RC</span> Active GEODIS Assignments</div>
+        <div class="hint">Export from your ATS. Badge = <b>Badge Number</b>, name = <b>Person Placed Name</b>, start = optional <b>Start Date</b> column.</div>
+      </div>
+      <div class="filecard">
+        <div class="fileline">
+          <div class="fileicon"><svg viewBox="0 0 24 24" fill="none"><path d="M13 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V9l-6-6z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M13 3v6h6" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></div>
+          <div><div class="fname"></div><div class="fmeta"></div></div>
+          <button class="replace" type="button">Replace</button>
+        </div>
+        <div class="maprow">
+          <div class="mapfield"><label>Badge column</label><select class="sel-badge"></select></div>
+          <div class="mapfield"><label>Name column</label><select class="sel-name"></select></div>
+          <div class="mapfield"><label>Start date column</label><select class="sel-start"></select></div>
+          <div class="mapfield"><label>Status column</label><select class="sel-status"></select></div>
+          <label class="chk"><input type="checkbox" class="chk-active" checked> Active only</label>
+        </div>
+        <div class="maprow pc-row hidden" style="border-top:none;padding-top:2px">
+          <div class="mapfield"><label>Profit center column</label><select class="sel-pc"></select></div>
+          <div class="mapfield region-field">
+            <label>Markets / regions</label>
+            <div class="ms">
+              <button class="ms-btn" type="button"><span class="ms-label">All regions</span><svg viewBox="0 0 10 6" fill="none"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+              <div class="ms-panel hidden">
+                <div class="ms-actions">
+                  <button type="button" data-act="crm" class="accent">In CRM</button>
+                  <button type="button" data-act="all">All</button>
+                  <button type="button" data-act="none">None</button>
+                </div>
+                <div class="ms-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <span class="cta"><svg viewBox="0 0 24 24" fill="none" width="15" height="15"><path d="M12 16V4m0 0L7 9m5-5l5 5M4 20h16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>Drop file or browse</span>
+    </div>
+  </div>
+  <div class="tip">
+    <svg viewBox="0 0 24 24" fill="none"><path d="M12 9v4m0 4h.01M10.3 3.9l-8 13.9A2 2 0 004 21h16a2 2 0 001.7-3.2l-8-13.9a2 2 0 00-3.4 0z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span>Beeline exports every market and is filtered by <b>start date</b>. The tool defaults the market filter to whatever regions appear in your CRM file (so Chicago selects itself), and drops non-active rows. Enter a start date early enough in Beeline to capture everyone currently on assignment.</span>
+  </div>
+  <div class="tip alt">
+    <svg viewBox="0 0 24 24" fill="none"><path d="M12 8v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span>Once both files carry a start date, discrepancy rows show <b>CRM Start</b> and <b>Beeline Start</b> side by side, with days-elapsed for quick triage. As a rule of thumb: an old start date sitting only in Beeline usually means the assignment should be ended there; a recent start date on either side usually just means the record hasn't been added to the other system yet.</span>
+  </div>
+
+  <div id="results-section" class="hidden">
+    <p class="eyebrow" style="margin-top:26px"><span class="num">02</span> Reconciliation <span class="rule"></span></p>
+    <div class="stats" id="stats"></div>
+
+    <div class="panel">
+      <div class="toolbar">
+        <div class="seg">
+          <button id="view-all" class="active">All records <span class="cnt" id="cnt-all">0</span></button>
+          <button id="view-disc">Discrepancies only <span class="cnt" id="cnt-disc">0</span></button>
+        </div>
+        <div class="search">
+          <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.7"/><path d="M21 21l-4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          <input type="text" id="search" placeholder="Search badge, name, or market…" />
+        </div>
+        <div class="tb-spacer"></div>
+        <button class="btn" id="btn-full"><svg viewBox="0 0 24 24" fill="none"><path d="M12 15V3m0 12l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>Full reconciliation</button>
+        <button class="btn primary" id="btn-disc"><svg viewBox="0 0 24 24" fill="none"><path d="M12 15V3m0 12l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>Export discrepancies</button>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr>
+            <th data-sort="badge">Badge Number<span class="arrow"></span></th>
+            <th data-sort="crmName">CRM Name<span class="arrow"></span></th>
+            <th data-sort="crmStart">CRM Start<span class="arrow"></span></th>
+            <th data-sort="beeName">Beeline Name<span class="arrow"></span></th>
+            <th data-sort="beeStart">Beeline Start<span class="arrow"></span></th>
+            <th data-sort="market">Market<span class="arrow"></span></th>
+            <th data-sort="status">Status<span class="arrow"></span></th>
+          </tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+        <div class="empty hidden" id="empty-rows">
+          <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.6"/><path d="M21 21l-4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <h3>No matching rows</h3>
+          <p>Nothing here for the current filter and search. Clear the search or switch views.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="await-state" class="empty" style="margin-top:20px">
+    <svg viewBox="0 0 24 24" fill="none"><path d="M4 7.5l5 4.5-5 4.5M20 7.5l-5 4.5 5 4.5M13.5 4l-3 16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <h3>Load both reports to run the crosscheck</h3>
+    <p>Drop the Beeline export on the left and the CRM export on the right. Matching runs on badge numbers, so name differences between systems don't matter.</p>
+  </div>
+</main>
+
+<div class="foot">
+  <span>Matches on normalized badge numbers.</span>
+  <span class="mono">Beeline: Assignment&nbsp;ID</span><span>·</span><span class="mono">CRM: Badge&nbsp;Number</span>
+  <span>·</span><span>Market filter reads the 3rd segment of the profit-center path.</span>
+</div>
+
+<script>
+"use strict";
+
+const S = { beeline:null, crm:null, records:[], view:'all', search:'', sortKey:'badge', sortDir:1, _counts:null };
+
+const DETECT = {
+  beeline:{
+    badge:[/^assignment id$/i,/assignment\s*id/i,/badge/i,/kronos/i,/\bid\b/i],
+    name:[/contractor name/i,/^name$/i,/full name/i,/name/i],
+    status:[/assignment status/i,/status/i],
+    pc:[/profit center/i,/profit/i,/cost center/i],
+    start:[/current start date/i,/^start date$/i,/start\s*date/i,/^start$/i]
+  },
+  crm:{
+    badge:[/^badge number$/i,/badge\s*number/i,/badge/i,/assignment id/i],
+    name:[/person placed name/i,/placed name/i,/^name$/i,/candidate/i,/name/i],
+    status:[/assignment status/i,/status/i],
+    pc:[/profit center/i,/profit/i,/cost center/i],
+    start:[/^start date$/i,/start\s*date/i,/assignment start/i,/^start$/i]
+  }
+};
+const HEADER_KEYWORDS = /badge|assignment id|contractor name|person placed|status|name|kronos|profit|start date/i;
+
+/* ---------- parse ---------- */
+function readFile(file, side){
+  const reader = new FileReader();
+  reader.onload = e => {
+    try{
+      const wb = XLSX.read(e.target.result, {type:'array', cellDates:true});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const aoa = XLSX.utils.sheet_to_json(ws, {header:1, raw:true, defval:null});
+      const headerRow = detectHeaderRow(aoa);
+      const headers = (aoa[headerRow]||[]).map((h,i)=> h==null||String(h).trim()==='' ? `Column ${i+1}` : String(h).trim());
+      const st = {fileName:file.name, aoa, headerRow, headers, activeOnly:true, selectedRegions:null, regionsTouched:false};
+      st.badgeCol  = pickCol(headers, DETECT[side].badge);
+      st.nameCol   = pickCol(headers, DETECT[side].name);
+      st.statusCol = pickCol(headers, DETECT[side].status);
+      st.pcCol     = pickCol(headers, DETECT[side].pc);
+      st.startCol  = pickCol(headers, DETECT[side].start);
+      S[side] = st;
+      renderFileCard(side);
+      recompute();
+    }catch(err){
+      alert('Could not read "'+file.name+'". Make sure it is a valid .xlsx or .csv export.\n\n'+err.message);
+      console.error(err);
+    }
+  };
+  reader.onerror = ()=> alert('Failed to read the file. Try again.');
+  reader.readAsArrayBuffer(file);
+}
+function detectHeaderRow(aoa){
+  const limit=Math.min(25,aoa.length); let best=0,bestScore=-1;
+  for(let r=0;r<limit;r++){
+    const row=aoa[r]||[]; let filled=0,kw=0,strings=0;
+    row.forEach(c=>{ if(c!==null&&String(c).trim()!==''){ filled++; if(typeof c==='string'){ strings++; if(HEADER_KEYWORDS.test(c)) kw++; } } });
+    const score=kw*10+strings*1.5+filled*0.5;
+    if(score>bestScore){ bestScore=score; best=r; }
+  }
+  return best;
+}
+function pickCol(headers, patterns){
+  for(const p of patterns){ const i=headers.findIndex(h=>p.test(h)); if(i!==-1) return i; }
+  return -1;
+}
+
+/* ---------- normalize ---------- */
+function normBadge(v){
+  if(v==null) return ''; let s=String(v).trim(); if(s==='') return '';
+  if(/^\d+\.0+$/.test(s)) s=s.split('.')[0];
+  return s.replace(/,/g,'').replace(/\s+/g,'');
+}
+function isActive(v){ return v!=null && String(v).trim().toLowerCase()==='active'; }
+function regionOf(v){
+  if(v==null) return ''; const s=String(v).trim(); if(s==='') return '';
+  const parts=s.split(';').map(x=>x.trim());
+  return parts.length>=3 ? parts[2] : s;
+}
+/* Excel serial epoch: Dec 30 1899, UTC. cellDates:true already gives Date for true date cells. */
+function parseDateVal(v){
+  if(v==null) return null;
+  if(v instanceof Date) return isNaN(v.getTime()) ? null : v;
+  if(typeof v === 'number'){
+    if(!isFinite(v)) return null;
+    const ms = Math.round((v - 25569) * 86400000); // 25569 = days between 1899-12-30 and 1970-01-01
+    const d = new Date(ms);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  if(typeof v === 'string'){
+    const s=v.trim(); if(s==='') return null;
+    let m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+    if(m){ let [,mo,da,yr]=m; yr = yr.length===2 ? ('20'+yr) : yr; const d=new Date(Date.UTC(+yr,+mo-1,+da)); return isNaN(d.getTime())?null:d; }
+    m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if(m){ const d=new Date(Date.UTC(+m[1],+m[2]-1,+m[3])); return isNaN(d.getTime())?null:d; }
+    const d2 = new Date(s);
+    return isNaN(d2.getTime()) ? null : d2;
+  }
+  return null;
+}
+function fmtDate(d){
+  if(!d) return '';
+  const mm=d.getUTCMonth()+1, dd=d.getUTCDate(), yy=d.getUTCFullYear();
+  return mm+'/'+dd+'/'+yy;
+}
+function daysAgo(d){
+  if(!d) return null;
+  const todayUTC = Date.UTC(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
+  const dUTC = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  return Math.round((todayUTC - dUTC) / 86400000);
+}
+function dateCell(d){
+  if(!d) return '<span class="name-empty">—</span>';
+  const age = daysAgo(d);
+  const staleClass = (age!==null && age>180) ? ' stale' : '';
+  return esc(fmtDate(d)) + '<span class="age'+staleClass+'">'+ (age>=0? age+'d':'') +'</span>';
+}
+
+function regionsFor(st){
+  if(!st || st.pcCol===-1) return [];
+  const counts=new Map();
+  for(const row of st.aoa.slice(st.headerRow+1)){
+    if(!row) continue;
+    if(st.activeOnly && st.statusCol!==-1 && !isActive(row[st.statusCol])) continue;
+    if(normBadge(row[st.badgeCol])==='') continue;
+    const reg=regionOf(row[st.pcCol]); if(reg==='') continue;
+    counts.set(reg, (counts.get(reg)||0)+1);
+  }
+  return [...counts.entries()].map(([region,count])=>({region,count})).sort((a,b)=>b.count-a.count);
+}
+function indexSide(st){
+  const map=new Map(), dups=new Set();
+  for(const row of st.aoa.slice(st.headerRow+1)){
+    if(!row) continue;
+    const badge=normBadge(row[st.badgeCol]); if(badge==='') continue;
+    if(st.activeOnly && st.statusCol!==-1 && !isActive(row[st.statusCol])) continue;
+    const region=st.pcCol!==-1 ? regionOf(row[st.pcCol]) : '';
+    if(st.pcCol!==-1 && st.selectedRegions && !st.selectedRegions.has(region)) continue;
+    const name=st.nameCol!==-1 && row[st.nameCol]!=null ? String(row[st.nameCol]).trim() : '';
+    const start=st.startCol!==-1 ? parseDateVal(row[st.startCol]) : null;
+    if(map.has(badge)){ map.get(badge).count++; dups.add(badge); }
+    else map.set(badge, {name, region, start, count:1});
+  }
+  return {map, dups};
+}
+function otherBadgeSet(otherSt){
+  const set=new Set(); if(!otherSt) return set;
+  for(const row of otherSt.aoa.slice(otherSt.headerRow+1)){
+    if(!row) continue;
+    if(otherSt.activeOnly && otherSt.statusCol!==-1 && !isActive(row[otherSt.statusCol])) continue;
+    const b=normBadge(row[otherSt.badgeCol]); if(b!=='') set.add(b);
+  }
+  return set;
+}
+function regionsOverlapping(st, badgeSet){
+  const out=new Set(); if(!st || st.pcCol===-1) return out;
+  for(const row of st.aoa.slice(st.headerRow+1)){
+    if(!row) continue;
+    if(st.activeOnly && st.statusCol!==-1 && !isActive(row[st.statusCol])) continue;
+    const b=normBadge(row[st.badgeCol]); if(b==='' || !badgeSet.has(b)) continue;
+    const reg=regionOf(row[st.pcCol]); if(reg!=='') out.add(reg);
+  }
+  return out;
+}
+
+/* ---------- recompute ---------- */
+function recompute(){
+  const awaitEl=document.getElementById('await-state'), resEl=document.getElementById('results-section');
+
+  ['beeline','crm'].forEach(side=>{
+    const st=S[side]; if(!st || st.pcCol===-1) return;
+    const other = side==='beeline' ? S.crm : S.beeline;
+    if(!st.regionsTouched){
+      let sel=null;
+      if(other){ const overlap=regionsOverlapping(st, otherBadgeSet(other)); if(overlap.size>0) sel=overlap; }
+      if(!sel){ sel=new Set(regionsFor(st).map(r=>r.region)); }
+      st.selectedRegions=sel;
+    }
+    renderRegions(side);
+  });
+
+  if(!S.beeline || !S.crm){ awaitEl.classList.remove('hidden'); resEl.classList.add('hidden'); return; }
+  awaitEl.classList.add('hidden'); resEl.classList.remove('hidden');
+
+  const bi=indexSide(S.beeline), ci=indexSide(S.crm);
+  const all=new Set([...bi.map.keys(), ...ci.map.keys()]);
+  const records=[];
+  for(const badge of all){
+    const inBee=bi.map.has(badge), inCrm=ci.map.has(badge);
+    let status='matched'; if(inCrm&&!inBee) status='onlyCrm'; else if(inBee&&!inCrm) status='onlyBee';
+    const region = (inBee && bi.map.get(badge).region) || (inCrm && ci.map.get(badge).region) || '';
+    records.push({
+      badge,
+      crmName: inCrm ? ci.map.get(badge).name : '',
+      crmStart: inCrm ? ci.map.get(badge).start : null,
+      beeName: inBee ? bi.map.get(badge).name : '',
+      beeStart: inBee ? bi.map.get(badge).start : null,
+      market: region,
+      status,
+      dup: (bi.dups.has(badge) || ci.dups.has(badge))
+    });
+  }
+  S.records=records;
+  S._counts={
+    beeTotal:bi.map.size, crmTotal:ci.map.size,
+    matched:records.filter(r=>r.status==='matched').length,
+    onlyCrm:records.filter(r=>r.status==='onlyCrm').length,
+    onlyBee:records.filter(r=>r.status==='onlyBee').length,
+    dups:new Set([...bi.dups,...ci.dups]).size
+  };
+  renderStats(); renderTable();
+}
+
+/* ---------- render ---------- */
+function renderStats(){
+  const c=S._counts;
+  const cards=[
+    {cls:'',k:'Beeline in scope',v:c.beeTotal},
+    {cls:'',k:'CRM in scope',v:c.crmTotal},
+    {cls:'ok',k:'Matched (in both)',v:c.matched},
+    {cls:'crm',k:'In CRM · missing from Beeline',v:c.onlyCrm},
+    {cls:'bee',k:'In Beeline · missing from CRM',v:c.onlyBee},
+    {cls:'dup',k:'Duplicate badges',v:c.dups},
+  ];
+  document.getElementById('stats').innerHTML = cards.map(s=>
+    `<div class="stat ${s.cls}"><div class="k">${s.k}</div><div class="v">${s.v.toLocaleString()}</div></div>`).join('');
+  document.getElementById('cnt-all').textContent=S.records.length;
+  document.getElementById('cnt-disc').textContent=c.onlyCrm+c.onlyBee;
+}
+function statusChip(s){
+  if(s==='matched') return '<span class="chip ok">Matched</span>';
+  if(s==='onlyCrm') return '<span class="chip crm">Only in CRM</span>';
+  return '<span class="chip bee">Only in Beeline</span>';
+}
+function currentRows(){
+  let rows=S.records;
+  if(S.view==='disc') rows=rows.filter(r=>r.status!=='matched');
+  if(S.search){
+    const q=S.search.toLowerCase();
+    rows=rows.filter(r=>r.badge.toLowerCase().includes(q)||r.crmName.toLowerCase().includes(q)||r.beeName.toLowerCase().includes(q)||(r.market||'').toLowerCase().includes(q));
+  }
+  const dir=S.sortDir, key=S.sortKey;
+  rows=rows.slice().sort((a,b)=>{
+    if(key==='crmStart' || key==='beeStart'){
+      const at=a[key]?a[key].getTime():null, bt=b[key]?b[key].getTime():null;
+      if(at===null && bt===null) return 0;
+      if(at===null) return 1;
+      if(bt===null) return -1;
+      return (at-bt)*dir;
+    }
+    let av=a[key],bv=b[key];
+    if(key==='badge'){ av=Number(av)||av; bv=Number(bv)||bv; }
+    if(typeof av==='string') av=av.toLowerCase();
+    if(typeof bv==='string') bv=bv.toLowerCase();
+    if(av<bv) return -1*dir; if(av>bv) return 1*dir; return 0;
+  });
+  return rows;
+}
+function renderTable(){
+  const rows=currentRows(), tbody=document.getElementById('tbody'), empty=document.getElementById('empty-rows');
+  if(rows.length===0){ tbody.innerHTML=''; empty.classList.remove('hidden'); }
+  else{
+    empty.classList.add('hidden');
+    tbody.innerHTML = rows.map(r=>{
+      const crmN=r.crmName?esc(r.crmName):'<span class="name-empty">— not in CRM —</span>';
+      const beeN=r.beeName?esc(r.beeName):'<span class="name-empty">— not in Beeline —</span>';
+      const dupTag=r.dup?'<span class="duptag">DUP</span>':'';
+      const mkt=r.market?esc(r.market):'<span class="name-empty">—</span>';
+      return `<tr class="${r.dup?'is-dup':''}">
+        <td class="badge">${esc(r.badge)}${dupTag}</td>
+        <td>${crmN}</td>
+        <td class="datecell">${dateCell(r.crmStart)}</td>
+        <td>${beeN}</td>
+        <td class="datecell">${dateCell(r.beeStart)}</td>
+        <td class="market">${mkt}</td>
+        <td>${statusChip(r.status)}</td>
+      </tr>`;
+    }).join('');
+  }
+  document.querySelectorAll('thead th').forEach(th=>{
+    th.querySelector('.arrow').textContent = (th.dataset.sort===S.sortKey)?(S.sortDir===1?'▲':'▼'):'';
+  });
+}
+function esc(s){ return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+
+function renderFileCard(side){
+  const drop=document.getElementById('drop-'+side), st=S[side];
+  drop.classList.add('loaded');
+  drop.querySelector('.fname').textContent=st.fileName;
+  const dataRows=Math.max(st.aoa.length-(st.headerRow+1),0);
+  drop.querySelector('.fmeta').innerHTML=`<span class="mono">${dataRows.toLocaleString()}</span> rows · header on line <span class="mono">${st.headerRow+1}</span>`;
+  const opts=st.headers.map((h,i)=>`<option value="${i}">${esc(h)}</option>`).join('');
+  const withNone=`<option value="-1">— none —</option>`+opts;
+  const q=s=>drop.querySelector(s);
+  q('.sel-badge').innerHTML=opts;  q('.sel-badge').value=st.badgeCol;
+  q('.sel-name').innerHTML=withNone; q('.sel-name').value=st.nameCol;
+  q('.sel-status').innerHTML=withNone; q('.sel-status').value=st.statusCol;
+  q('.sel-start').innerHTML=withNone; q('.sel-start').value=st.startCol;
+  q('.sel-pc').innerHTML=withNone; q('.sel-pc').value=st.pcCol;
+  q('.chk-active').checked=st.activeOnly;
+  q('.pc-row').classList.toggle('hidden', st.pcCol===-1);
+}
+function renderRegions(side){
+  const drop=document.getElementById('drop-'+side), st=S[side];
+  if(!st || st.pcCol===-1) return;
+  const list=drop.querySelector('.ms-list'), label=drop.querySelector('.ms-label');
+  const regions=regionsFor(st);
+  const sel=st.selectedRegions || new Set(regions.map(r=>r.region));
+  const other = side==='beeline' ? S.crm : S.beeline;
+  const inOther = other ? regionsOverlapping(st, otherBadgeSet(other)) : new Set();
+  list.innerHTML = regions.map(r=>{
+    const on=sel.has(r.region)?'checked':'';
+    const badge = inOther.has(r.region) ? '<span class="inbadge">in CRM</span>' : '';
+    return `<label class="ms-item"><input type="checkbox" data-reg="${esc(r.region)}" ${on}><span class="reg">${esc(r.region)}</span>${badge}<span class="rc">${r.count}</span></label>`;
+  }).join('');
+  const chosen=regions.filter(r=>sel.has(r.region)).map(r=>r.region);
+  if(chosen.length===0) label.textContent='No markets';
+  else if(chosen.length===regions.length) label.textContent='All regions';
+  else if(chosen.length===1) label.textContent=chosen[0];
+  else label.textContent=chosen[0]+' +'+(chosen.length-1);
+}
+
+/* ---------- export ---------- */
+function download(wb,name){ XLSX.writeFile(wb,name); }
+function stamp(){ const d=new Date(),p=x=>String(x).padStart(2,'0'); return d.getFullYear()+p(d.getMonth()+1)+p(d.getDate()); }
+function splitName(full){
+  const s=(full||'').trim(); if(!s) return ['',''];
+  if(s.includes(',')){ const p=s.split(','); return [p.slice(1).join(',').trim(), p[0].trim()]; }
+  const parts=s.split(/\s+/); if(parts.length===1) return [parts[0],''];
+  return [parts[0], parts.slice(1).join(' ')];
+}
+function exportDiscrepancies(){
+  const disc=S.records.filter(r=>r.status!=='matched').sort((a,b)=>(Number(a.badge)||0)-(Number(b.badge)||0));
+  const aoa=[['Badge Number','Status','CRM Name','CRM Start','Beeline Name','Beeline Start','Market','Duplicate?']];
+  disc.forEach(r=>aoa.push([
+    r.badge,
+    r.status==='onlyCrm' ? 'In CRM · missing from Beeline' : 'In Beeline · missing from CRM',
+    r.crmName, fmtDate(r.crmStart),
+    r.beeName, fmtDate(r.beeStart),
+    r.market||'', r.dup?'YES':''
+  ]));
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:15},{wch:32},{wch:26},{wch:13},{wch:26},{wch:13},{wch:16},{wch:12}];
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Discrepancies');
+  download(wb,'Badge_Discrepancies_'+stamp()+'.xlsx');
+}
+function exportFull(){
+  const crmRows=S.records.filter(r=>r.status!=='onlyBee').map(r=>({badge:r.badge,name:r.crmName,start:r.crmStart})).sort((a,b)=>a.name.toLowerCase()<b.name.toLowerCase()?-1:1);
+  const beeRows=S.records.filter(r=>r.status!=='onlyCrm').map(r=>({badge:r.badge,name:r.beeName,start:r.beeStart})).sort((a,b)=>a.name.toLowerCase()<b.name.toLowerCase()?-1:1);
+  const crmNotBee=S.records.filter(r=>r.status==='onlyCrm').map(r=>r.badge).sort((a,b)=>(Number(a)||0)-(Number(b)||0));
+  const beeNotCrm=S.records.filter(r=>r.status==='onlyBee').map(r=>r.badge).sort((a,b)=>(Number(a)||0)-(Number(b)||0));
+  const n=Math.max(crmRows.length,beeRows.length,crmNotBee.length,beeNotCrm.length);
+  const aoa=[
+    ['CRM','','','','Beeline','','','Discrepancies',''],
+    ['First Name','Last Name','Badge Number','Start Date','Badge Number','Name','Start Date','CRM Badge Not In Beeline','Beeline Badge Not In CRM']
+  ];
+  for(let i=0;i<n;i++){
+    const c=crmRows[i], b=beeRows[i]; const nm=splitName(c?c.name:'');
+    aoa.push([
+      nm[0], nm[1], c?c.badge:'', c?fmtDate(c.start):'',
+      b?b.badge:'', b?b.name:'', b?fmtDate(b.start):'',
+      crmNotBee[i]??'', beeNotCrm[i]??''
+    ]);
+  }
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:16},{wch:20},{wch:15},{wch:13},{wch:15},{wch:26},{wch:13},{wch:24},{wch:24}];
+  ws['!merges']=[{s:{r:0,c:0},e:{r:0,c:3}},{s:{r:0,c:4},e:{r:0,c:6}},{s:{r:0,c:7},e:{r:0,c:8}}];
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Reconciliation');
+  download(wb,'Full_Reconciliation_'+stamp()+'.xlsx');
+}
+
+/* ---------- events ---------- */
+document.querySelectorAll('.drop').forEach(drop=>{
+  const side=drop.dataset.side, input=drop.querySelector('.file-input');
+  drop.addEventListener('click', e=>{
+    if(e.target.closest('.maprow')||e.target.closest('.replace')||e.target.closest('.ms')) return;
+    if(!drop.classList.contains('loaded')||e.target.closest('.cta')) input.click();
+  });
+  drop.querySelector('.replace').addEventListener('click', e=>{ e.stopPropagation(); input.click(); });
+  input.addEventListener('change', e=>{ if(e.target.files[0]) readFile(e.target.files[0], side); });
+  ['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('dragover');}));
+  ['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('dragover');}));
+  drop.addEventListener('drop', e=>{ const f=e.dataTransfer.files[0]; if(f) readFile(f,side); });
+
+  drop.querySelector('.sel-badge').addEventListener('change', e=>{ S[side].badgeCol=+e.target.value; recompute(); });
+  drop.querySelector('.sel-name').addEventListener('change', e=>{ S[side].nameCol=+e.target.value; recompute(); });
+  drop.querySelector('.sel-status').addEventListener('change', e=>{ S[side].statusCol=+e.target.value; recompute(); });
+  drop.querySelector('.sel-start').addEventListener('change', e=>{ S[side].startCol=+e.target.value; recompute(); });
+  drop.querySelector('.sel-pc').addEventListener('change', e=>{ S[side].pcCol=+e.target.value; S[side].regionsTouched=false; S[side].selectedRegions=null; drop.querySelector('.pc-row').classList.toggle('hidden', S[side].pcCol===-1); recompute(); });
+  drop.querySelector('.chk-active').addEventListener('change', e=>{ S[side].activeOnly=e.target.checked; recompute(); });
+
+  const msBtn=drop.querySelector('.ms-btn'), msPanel=drop.querySelector('.ms-panel');
+  msBtn.addEventListener('click', e=>{ e.stopPropagation(); document.querySelectorAll('.ms-panel').forEach(p=>{ if(p!==msPanel) p.classList.add('hidden'); }); msPanel.classList.toggle('hidden'); });
+  msPanel.addEventListener('click', e=>e.stopPropagation());
+  drop.querySelector('.ms-list').addEventListener('change', e=>{
+    if(e.target.matches('input[data-reg]')){
+      const st=S[side]; st.regionsTouched=true;
+      if(!st.selectedRegions) st.selectedRegions=new Set(regionsFor(st).map(r=>r.region));
+      const reg=e.target.dataset.reg;
+      if(e.target.checked) st.selectedRegions.add(reg); else st.selectedRegions.delete(reg);
+      recompute();
+    }
+  });
+  drop.querySelectorAll('.ms-actions button').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      const st=S[side]; st.regionsTouched=true; const act=b.dataset.act;
+      if(act==='all') st.selectedRegions=new Set(regionsFor(st).map(r=>r.region));
+      else if(act==='none') st.selectedRegions=new Set();
+      else if(act==='crm'){ const other=side==='beeline'?S.crm:S.beeline; st.selectedRegions = other?regionsOverlapping(st, otherBadgeSet(other)):new Set(regionsFor(st).map(r=>r.region)); }
+      recompute();
+    });
+  });
+});
+document.addEventListener('click', ()=>document.querySelectorAll('.ms-panel').forEach(p=>p.classList.add('hidden')));
+
+document.getElementById('view-all').addEventListener('click', ()=>{ S.view='all'; document.getElementById('view-all').classList.add('active'); document.getElementById('view-disc').classList.remove('active'); renderTable(); });
+document.getElementById('view-disc').addEventListener('click', ()=>{ S.view='disc'; document.getElementById('view-disc').classList.add('active'); document.getElementById('view-all').classList.remove('active'); renderTable(); });
+document.getElementById('search').addEventListener('input', e=>{ S.search=e.target.value.trim(); renderTable(); });
+document.querySelectorAll('thead th').forEach(th=>th.addEventListener('click', ()=>{ const k=th.dataset.sort; if(S.sortKey===k) S.sortDir*=-1; else { S.sortKey=k; S.sortDir=1; } renderTable(); }));
+document.getElementById('btn-disc').addEventListener('click', exportDiscrepancies);
+document.getElementById('btn-full').addEventListener('click', exportFull);
+</script>
+</body>
+</html>

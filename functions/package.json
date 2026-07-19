@@ -2,7 +2,7 @@
   "name": "badge-crosscheck-functions",
   "description": "Ingest endpoint that turns daily Beeline/CRM report emails into a computed reconciliation snapshot in Firebase Storage.",
   "engines": {
-    "node": "20"
+    "node": "24"
   },
   "main": "index.js",
   "dependencies": {

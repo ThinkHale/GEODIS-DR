@@ -24,10 +24,15 @@
  * (See SETUP.md in the project root for the full walkthrough.)
  */
 
-const functions = require('firebase-functions');
+const { onRequest } = require('firebase-functions/v2/https');
+const { defineSecret } = require('firebase-functions/params');
 const admin = require('firebase-admin');
 const XLSX = require('xlsx');
 const Core = require('./reconcile-core.js');
+
+// Shared secret proving a request came from our Power Automate flow.
+// Set with: firebase functions:secrets:set SYNC_KEY
+const SYNC_KEY = defineSecret('SYNC_KEY');
 
 admin.initializeApp();
 const bucket = admin.storage().bucket();
@@ -52,12 +57,12 @@ function parseToState(buffer, side) {
   return Core.buildState(aoa, side);
 }
 
-exports.syncReport = functions.https.onRequest(async (req, res) => {
+exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, async (req, res) => {
   try {
     if (req.method !== 'POST') { res.status(405).send('POST only'); return; }
 
     const key = req.get('x-sync-key');
-    const expected = process.env.SYNC_KEY || (functions.config().sync && functions.config().sync.key);
+    const expected = SYNC_KEY.value();
     if (!expected || key !== expected) { res.status(401).send('Unauthorized'); return; }
 
     const type = String(req.query.type || '').toLowerCase();

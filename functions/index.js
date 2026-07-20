@@ -110,6 +110,7 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
         reason: r.reason,
         market: r.market,
         marketVerified: r.marketVerified,
+        marketRaw: r.marketRaw || '',
         newBadge: r.newBadge || null,
         crmStart: Core.fmtDate(r.crmStart),
         beeStart: Core.fmtDate(r.beeStart),

@@ -429,16 +429,19 @@
       var status = 'matched';
       if (inCrm && !inBee) status = 'onlyCrm'; else if (inBee && !inCrm) status = 'onlyBee';
       // Market: Beeline is authoritative when the badge is active there; otherwise
-      // infer it from the RC account location (learned market, else the raw city).
+      // infer it from the RC account location. Locations we can't learn a market
+      // for (no active Beeline worker there) go into a single "Other" bucket, with
+      // the raw location kept in marketRaw so they can be triaged later.
       var crmRec = inCrm ? ci.map.get(badge) : null;
-      var market, marketVerified;
+      var market, marketVerified, marketRaw = '';
       if (inBee) {
         market = bi.map.get(badge).region;
         marketVerified = true;
       } else {
         var learned = crmRec ? cityMarkets[crmRec.cityKey] : '';
-        market = learned || (crmRec ? crmRec.city : '') || '';
-        marketVerified = !!learned; // false when only the raw city was available
+        marketVerified = !!learned;
+        market = learned || 'Other';
+        if (!learned && crmRec) marketRaw = crmRec.city;
       }
       records.push({
         badge: badge,
@@ -448,6 +451,7 @@
         beeStart: inBee ? bi.map.get(badge).start : null,
         market: market,
         marketVerified: marketVerified,
+        marketRaw: marketRaw,
         status: status,
         dup: bi.dups.has(badge) || ci.dups.has(badge)
       });

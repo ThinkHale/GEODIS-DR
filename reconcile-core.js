@@ -34,7 +34,8 @@
       status: [/assignment status/i, /status/i],
       pc:     [/profit center/i, /profit/i, /cost center/i],
       start:  [/current start date/i, /^start date$/i, /start\s*date/i, /^start$/i],
-      end:    [/current end date/i, /^end date$/i, /end\s*date/i, /^end$/i]
+      end:    [/current end date/i, /^end date$/i, /end\s*date/i, /^end$/i],
+      account: []
     },
     crm: {
       badge:  [/^badge number$/i, /badge\s*number/i, /badge/i, /assignment id/i],
@@ -42,31 +43,34 @@
       status: [/assignment status/i, /status/i],
       pc:     [/profit center/i, /profit/i, /cost center/i],
       start:  [/^start date$/i, /start\s*date/i, /assignment start/i, /^start$/i],
-      end:    [/^end date$/i, /end\s*date/i, /^end$/i]
+      end:    [/^end date$/i, /end\s*date/i, /^end$/i],
+      // CRM has no clean market column; the market is inferred from the location
+      // embedded in the Account path (see parseCrmAccount / learnCityMarkets).
+      account: [/^account$/i, /^account name$/i, /\baccount\b/i]
     }
   };
   var HEADER_KEYWORDS = /badge|assignment id|contractor name|person placed|status|name|kronos|profit|start date|end date/i;
 
   var ACTIONS = {
-    endCrm:      { label: 'End in CRM',          cls: 'act-dup' },
-    updateBadge: { label: 'Update Badge in CRM', cls: 'act-upd' },
+    endCrm:      { label: 'End in RC',          cls: 'act-dup' },
+    updateBadge: { label: 'Update Badge in RC', cls: 'act-upd' },
     addBeeline:  { label: 'Add to Beeline',      cls: 'act-bee' },
-    addBadge:    { label: 'Add Badge in CRM',    cls: 'act-info' },
-    addCrm:      { label: 'Add to CRM',          cls: 'act-crm' },
+    addBadge:    { label: 'Add Badge in RC',    cls: 'act-info' },
+    addCrm:      { label: 'Add to RC',          cls: 'act-crm' },
     checkRegion: { label: 'Check Region',        cls: 'act-neutral' },
     matched:     { label: 'Matched',             cls: 'act-ok' }
   };
   var ACTION_ORDER = { endCrm: 0, updateBadge: 1, addBeeline: 2, addBadge: 3, addCrm: 4, checkRegion: 5, matched: 6 };
   var ACTION_STAT_CARD = {
-    endCrm:      { cls: 'dup',     k: 'End in CRM' },
-    updateBadge: { cls: 'upd',     k: 'Update Badge in CRM' },
+    endCrm:      { cls: 'dup',     k: 'End in RC' },
+    updateBadge: { cls: 'upd',     k: 'Update Badge in RC' },
     addBeeline:  { cls: 'bee',     k: 'Add to Beeline' },
-    addBadge:    { cls: 'info',    k: 'Add Badge in CRM' },
-    addCrm:      { cls: 'crm',     k: 'Add to CRM' },
+    addBadge:    { cls: 'info',    k: 'Add Badge in RC' },
+    addCrm:      { cls: 'crm',     k: 'Add to RC' },
     checkRegion: { cls: 'neutral', k: 'Check Region' }
   };
 
-  // Confidence rule for treating an "End in CRM" row and an active Beeline row as
+  // Confidence rule for treating an "End in RC" row and an active Beeline row as
   // the SAME person under a re-issued badge (rehire / reassignment).
   var BADGE_CHANGE_NAME_THRESHOLD = 0.90;
 
@@ -112,6 +116,7 @@
     st.pcCol     = pickCol(headers, DETECT[side].pc);
     st.startCol  = pickCol(headers, DETECT[side].start);
     st.endCol    = pickCol(headers, DETECT[side].end);
+    st.accountCol = pickCol(headers, DETECT[side].account || []);
     if (overrides) { for (var k in overrides) { if (overrides[k] !== undefined) st[k] = overrides[k]; } }
     return st;
   }
@@ -131,6 +136,20 @@
     if (s === '') return '';
     var parts = s.split(';').map(function (x) { return x.trim(); });
     return parts.length >= 3 ? parts[2] : s;
+  }
+  /* The RC "Account" path embeds the physical location, e.g.
+     "GEODIS/Beeline/1101 Taylor/Romeoville, IL/1502" -> facility "1101 Taylor",
+     city "Romeoville, IL". The city (not the facility) is the reliable market key
+     -- facility labels like "Multi"/"Post2" repeat across markets, whereas a city
+     belongs to exactly one market. cityKey strips punctuation/case so
+     "Wilmington, IL" and "WilmingtonIL" collapse to the same key. */
+  function parseCrmAccount(v) {
+    if (v == null) return { facility: '', city: '', cityKey: '' };
+    var parts = String(v).split('/').map(function (x) { return x.trim(); });
+    var facility = parts.length >= 3 ? parts[2] : '';
+    var city = parts.length >= 4 ? parts[3] : (parts.length ? parts[parts.length - 1] : '');
+    var cityKey = city.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return { facility: facility, city: city, cityKey: cityKey };
   }
   function parseDateVal(v) {
     if (v == null) return null;
@@ -305,10 +324,41 @@
       if (st.pcCol !== -1 && st.selectedRegions && !st.selectedRegions.has(region)) return;
       var name = st.nameCol !== -1 && row[st.nameCol] != null ? String(row[st.nameCol]).trim() : '';
       var start = st.startCol !== -1 ? parseDateVal(row[st.startCol]) : null;
+      var acct = st.accountCol !== -1 ? parseCrmAccount(row[st.accountCol]) : null;
       if (map.has(badge)) { map.get(badge).count++; dups.add(badge); }
-      else map.set(badge, { name: name, region: region, start: start, count: 1 });
+      else map.set(badge, {
+        name: name, region: region, start: start, count: 1,
+        city: acct ? acct.city : '', cityKey: acct ? acct.cityKey : ''
+      });
     });
     return { map: map, dups: dups };
+  }
+  /* Learn cityKey -> Beeline market from badges present in BOTH systems, so RC-only
+     rows (which carry no market) can be labeled with the same market names Beeline
+     uses. Majority vote per city tolerates the odd mis-tagged row. */
+  function learnCityMarkets(crmSt, beeFull) {
+    var tally = {};
+    if (!crmSt || crmSt.accountCol === -1 || crmSt.badgeCol === -1) return {};
+    crmSt.aoa.slice(crmSt.headerRow + 1).forEach(function (row) {
+      if (!row) return;
+      var badge = normBadge(row[crmSt.badgeCol]);
+      if (badge === '') return;
+      var acct = parseCrmAccount(row[crmSt.accountCol]);
+      if (!acct.cityKey) return;
+      var bee = beeFull.get(badge);
+      if (!bee || !bee.region) return;
+      (tally[acct.cityKey] = tally[acct.cityKey] || {})[bee.region] =
+        (tally[acct.cityKey][bee.region] || 0) + 1;
+    });
+    var map = {};
+    Object.keys(tally).forEach(function (ck) {
+      var best = '', bestN = -1;
+      Object.keys(tally[ck]).forEach(function (m) {
+        if (tally[ck][m] > bestN) { bestN = tally[ck][m]; best = m; }
+      });
+      map[ck] = best;
+    });
+    return map;
   }
   /* Full Beeline history, ignoring active/region filters */
   function buildFullBeelineLookup(st) {
@@ -369,26 +419,40 @@
      already set on beeSt (use autoSelectRegions() if you don't have your own UI). */
   function reconcile(beeSt, crmSt) {
     var bi = indexSide(beeSt), ci = indexSide(crmSt);
+    var beeFull = buildFullBeelineLookup(beeSt);
+    // Map each RC location to the Beeline market name, learned from shared badges.
+    var cityMarkets = learnCityMarkets(crmSt, beeFull);
     var all = new Set(Array.from(bi.map.keys()).concat(Array.from(ci.map.keys())));
     var records = [];
     all.forEach(function (badge) {
       var inBee = bi.map.has(badge), inCrm = ci.map.has(badge);
       var status = 'matched';
       if (inCrm && !inBee) status = 'onlyCrm'; else if (inBee && !inCrm) status = 'onlyBee';
-      var region = (inBee && bi.map.get(badge).region) || (inCrm && ci.map.get(badge).region) || '';
+      // Market: Beeline is authoritative when the badge is active there; otherwise
+      // infer it from the RC account location (learned market, else the raw city).
+      var crmRec = inCrm ? ci.map.get(badge) : null;
+      var market, marketVerified;
+      if (inBee) {
+        market = bi.map.get(badge).region;
+        marketVerified = true;
+      } else {
+        var learned = crmRec ? cityMarkets[crmRec.cityKey] : '';
+        market = learned || (crmRec ? crmRec.city : '') || '';
+        marketVerified = !!learned; // false when only the raw city was available
+      }
       records.push({
         badge: badge,
         crmName: inCrm ? ci.map.get(badge).name : '',
         crmStart: inCrm ? ci.map.get(badge).start : null,
         beeName: inBee ? bi.map.get(badge).name : '',
         beeStart: inBee ? bi.map.get(badge).start : null,
-        market: region,
+        market: market,
+        marketVerified: marketVerified,
         status: status,
         dup: bi.dups.has(badge) || ci.dups.has(badge)
       });
     });
 
-    var beeFull = buildFullBeelineLookup(beeSt);
     var unbadgedCrm = collectUnbadgedCrm(crmSt);
     var onlyBeeRecords = records.filter(function (r) { return r.status === 'onlyBee'; });
     var nameMatches = matchUnbadgedToOnlyBee(unbadgedCrm, onlyBeeRecords, NAME_MATCH_THRESHOLD);
@@ -404,24 +468,24 @@
           r.action = 'endCrm';
           r.reason = 'Beeline shows this assignment as ' + full.status +
             (full.end ? (' (ended ' + fmtDate(full.end) + ')') : (full.start ? (' (started ' + fmtDate(full.start) + ')') : '')) +
-            '. Recommend ending it in CRM.';
+            '. Recommend ending it in RC.';
         } else if (full && full.status && full.status.toLowerCase() === 'active' && beeSt.pcCol !== -1 && selRegions && !selRegions.has(full.region)) {
           r.action = 'checkRegion';
-          r.reason = 'Active in Beeline under "' + full.region + '", outside the selected market(s). Confirm this is the right market or update CRM.';
+          r.reason = 'Active in Beeline under "' + full.region + '", outside the selected market(s). Confirm this is the right market or update RC.';
         } else {
           r.action = 'addBeeline';
-          r.reason = 'No record of this badge in Beeline (any status or market). Confirm still active and add to Beeline, or end in CRM if the placement ended.';
+          r.reason = 'No record of this badge in Beeline (any status or market). Confirm still active and add to Beeline, or end in RC if the placement ended.';
           var age1 = daysAgo(r.crmStart);
-          if (age1 != null && age1 > CRM_STALE_DAYS) r.reason += ' CRM start date is ' + age1 + ' days old, worth verifying.';
+          if (age1 != null && age1 > CRM_STALE_DAYS) r.reason += ' RC start date is ' + age1 + ' days old, worth verifying.';
         }
       } else { // onlyBee
         var m = nameMatches.get(r.badge);
         if (m) {
           r.action = 'addBadge';
-          r.reason = 'Likely already in CRM as "' + m.crmName + '" with no badge on file (' + Math.round(m.score * 100) + '% name match). Suggested badge: ' + r.badge + '.';
+          r.reason = 'Likely already in RC as "' + m.crmName + '" with no badge on file (' + Math.round(m.score * 100) + '% name match). Suggested badge: ' + r.badge + '.';
         } else {
           r.action = 'addCrm';
-          r.reason = 'Active in Beeline, no matching CRM record found by badge or name. Add as a new placement.';
+          r.reason = 'Active in Beeline, no matching RC record found by badge or name. Add as a new placement.';
           var age2 = daysAgo(r.beeStart);
           if (age2 != null && age2 <= BEE_RECENT_DAYS) r.reason += ' Recently started, may just be pending entry.';
         }
@@ -445,9 +509,9 @@
       c.reason = 'Active in Beeline under badge ' + b.badge +
         (b.market ? (' (' + b.market + ')') : '') +
         (b.beeStart ? (', started ' + fmtDate(b.beeStart)) : '') +
-        ', but CRM still has badge ' + c.badge +
+        ', but RC still has badge ' + c.badge +
         (oldFull && oldFull.end ? (' which expired in Beeline ' + fmtDate(oldFull.end)) : '') +
-        '. Same person (' + Math.round(p.score * 100) + '% name match) — update the badge in CRM from ' +
+        '. Same person (' + Math.round(p.score * 100) + '% name match) — update the badge in RC from ' +
         c.badge + ' to ' + b.badge + '.';
       mergedBeeBadges[b.badge] = 1;
     });
@@ -498,6 +562,8 @@
     matchUnbadgedToOnlyBee: matchUnbadgedToOnlyBee,
     BADGE_CHANGE_NAME_THRESHOLD: BADGE_CHANGE_NAME_THRESHOLD,
     matchBadgeChanges: matchBadgeChanges,
+    parseCrmAccount: parseCrmAccount,
+    learnCityMarkets: learnCityMarkets,
     reconcile: reconcile
   };
 });

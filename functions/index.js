@@ -109,6 +109,8 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
         actionLabel: Core.ACTIONS[r.action].label,
         reason: r.reason,
         market: r.market,
+        marketVerified: r.marketVerified,
+        newBadge: r.newBadge || null,
         crmStart: Core.fmtDate(r.crmStart),
         beeStart: Core.fmtDate(r.beeStart),
         dup: r.dup

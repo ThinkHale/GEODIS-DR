@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Badge Crosscheck: Beeline / CRM Reconciliation</title>
+<title>Badge Crosscheck: Beeline / RC Reconciliation</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -214,7 +214,7 @@
     </div>
     <div class="title">
       <h1>Badge Crosscheck</h1>
-      <p>Beeline &nbsp;&#8646;&nbsp; CRM active-assignment reconciliation</p>
+      <p>Beeline &nbsp;&#8646;&nbsp; RC active-assignment reconciliation</p>
     </div>
     <div class="spacer"></div>
     <div class="privacy"><span class="dot"></span><span><b>Private.</b> Files are read in your browser only, nothing is uploaded.</span></div>
@@ -267,7 +267,7 @@
                 <button class="ms-btn" type="button"><span class="ms-label">All regions</span><svg viewBox="0 0 10 6" fill="none"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
                 <div class="ms-panel hidden">
                   <div class="ms-actions">
-                    <button type="button" data-act="crm" class="accent">In CRM</button>
+                    <button type="button" data-act="crm" class="accent">In RC</button>
                     <button type="button" data-act="all">All</button>
                     <button type="button" data-act="none">None</button>
                   </div>
@@ -289,7 +289,7 @@
     <div class="drop" id="drop-crm" data-side="crm">
       <input type="file" class="file-input hidden" accept=".xlsx,.xls,.csv" />
       <div class="src-desc">
-        <div class="src"><span class="tag ats">CRM / RC</span> Active GEODIS Assignments</div>
+        <div class="src"><span class="tag ats">RC</span> Active GEODIS Assignments</div>
         <div class="hint">Export from your ATS. Rows with no badge number are checked by name automatically.</div>
       </div>
       <div class="filecard">
@@ -317,7 +317,7 @@
                 <button class="ms-btn" type="button"><span class="ms-label">All regions</span><svg viewBox="0 0 10 6" fill="none"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
                 <div class="ms-panel hidden">
                   <div class="ms-actions">
-                    <button type="button" data-act="crm" class="accent">In CRM</button>
+                    <button type="button" data-act="crm" class="accent">In RC</button>
                     <button type="button" data-act="all">All</button>
                     <button type="button" data-act="none">None</button>
                   </div>
@@ -361,7 +361,7 @@
             <th data-sort="badge">Badge<span class="arrow"></span></th>
             <th data-sort="person">Person<span class="arrow"></span></th>
             <th data-sort="action">Recommended Action<span class="arrow"></span></th>
-            <th data-sort="crmStart" class="detail-col">CRM Start<span class="arrow"></span></th>
+            <th data-sort="crmStart" class="detail-col">RC Start<span class="arrow"></span></th>
             <th data-sort="beeStart" class="detail-col">Beeline Start<span class="arrow"></span></th>
             <th data-sort="market" class="detail-col">Market<span class="arrow"></span></th>
           </tr></thead>
@@ -379,13 +379,13 @@
   <div id="await-state" class="empty" style="margin-top:20px">
     <svg viewBox="0 0 24 24" fill="none"><path d="M4 7.5l5 4.5-5 4.5M20 7.5l-5 4.5 5 4.5M13.5 4l-3 16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
     <h3>Load both reports to run the crosscheck</h3>
-    <p>Drop the Beeline export on the left and the CRM export on the right. Matching runs on badge numbers, so name differences between systems don't matter.</p>
+    <p>Drop the Beeline export on the left and the RC export on the right. Matching runs on badge numbers, so name differences between systems don't matter.</p>
   </div>
 </main>
 
 <div class="foot">
   <span>Matches on normalized badge numbers.</span>
-  <span class="mono">Beeline: Assignment&nbsp;ID</span><span>·</span><span class="mono">CRM: Badge&nbsp;Number</span>
+  <span class="mono">Beeline: Assignment&nbsp;ID</span><span>·</span><span class="mono">RC: Badge&nbsp;Number</span>
   <span>·</span><span>Recommendations are a starting point, always a good idea to double check anything unusual.</span>
 </div>
 
@@ -595,7 +595,7 @@ function renderRegions(side){
   const inOther = other ? regionsOverlapping(st, otherBadgeSet(other)) : new Set();
   list.innerHTML = regions.map(r=>{
     const on=sel.has(r.region)?'checked':'';
-    const badge = inOther.has(r.region) ? '<span class="inbadge">in CRM</span>' : '';
+    const badge = inOther.has(r.region) ? '<span class="inbadge">in RC</span>' : '';
     return `<label class="ms-item"><input type="checkbox" data-reg="${esc(r.region)}" ${on}><span class="reg">${esc(r.region)}</span>${badge}<span class="rc">${r.count}</span></label>`;
   }).join('');
   const chosen=regions.filter(r=>sel.has(r.region)).map(r=>r.region);
@@ -620,7 +620,7 @@ function exportActionList(){
     if(aw!==bw) return aw-bw;
     return (Number(a.badge)||0)-(Number(b.badge)||0);
   });
-  const aoa=[['Badge Number','Person','Recommended Action','Reason','Market','CRM Start','Beeline Start','Duplicate?']];
+  const aoa=[['Badge Number','Person','Recommended Action','Reason','Market','RC Start','Beeline Start','Duplicate?']];
   rows.forEach(r=>aoa.push([
     r.badge, r.person, ACTIONS[r.action].label, r.reason, r.market||'',
     fmtDate(r.crmStart), fmtDate(r.beeStart), r.dup?'YES':''
@@ -637,8 +637,8 @@ function exportFull(){
   const beeNotCrm=S.records.filter(r=>r.status==='onlyBee').map(r=>r.badge).sort((a,b)=>(Number(a)||0)-(Number(b)||0));
   const n=Math.max(crmRows.length,beeRows.length,crmNotBee.length,beeNotCrm.length);
   const aoa=[
-    ['CRM','','','','Beeline','','','Discrepancies',''],
-    ['First Name','Last Name','Badge Number','Start Date','Badge Number','Name','Start Date','CRM Badge Not In Beeline','Beeline Badge Not In CRM']
+    ['RC','','','','Beeline','','','Discrepancies',''],
+    ['First Name','Last Name','Badge Number','Start Date','Badge Number','Name','Start Date','RC Badge Not In Beeline','Beeline Badge Not In RC']
   ];
   for(let i=0;i<n;i++){
     const c=crmRows[i], b=beeRows[i]; const nm=splitName(c?c.name:'');

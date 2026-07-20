@@ -48,21 +48,27 @@
   var HEADER_KEYWORDS = /badge|assignment id|contractor name|person placed|status|name|kronos|profit|start date|end date/i;
 
   var ACTIONS = {
-    endCrm:      { label: 'End in CRM',       cls: 'act-dup' },
-    addBeeline:  { label: 'Add to Beeline',   cls: 'act-bee' },
-    addBadge:    { label: 'Add Badge in CRM', cls: 'act-info' },
-    addCrm:      { label: 'Add to CRM',       cls: 'act-crm' },
-    checkRegion: { label: 'Check Region',     cls: 'act-neutral' },
-    matched:     { label: 'Matched',          cls: 'act-ok' }
+    endCrm:      { label: 'End in CRM',          cls: 'act-dup' },
+    updateBadge: { label: 'Update Badge in CRM', cls: 'act-upd' },
+    addBeeline:  { label: 'Add to Beeline',      cls: 'act-bee' },
+    addBadge:    { label: 'Add Badge in CRM',    cls: 'act-info' },
+    addCrm:      { label: 'Add to CRM',          cls: 'act-crm' },
+    checkRegion: { label: 'Check Region',        cls: 'act-neutral' },
+    matched:     { label: 'Matched',             cls: 'act-ok' }
   };
-  var ACTION_ORDER = { endCrm: 0, addBeeline: 1, addBadge: 2, addCrm: 3, checkRegion: 4, matched: 5 };
+  var ACTION_ORDER = { endCrm: 0, updateBadge: 1, addBeeline: 2, addBadge: 3, addCrm: 4, checkRegion: 5, matched: 6 };
   var ACTION_STAT_CARD = {
     endCrm:      { cls: 'dup',     k: 'End in CRM' },
+    updateBadge: { cls: 'upd',     k: 'Update Badge in CRM' },
     addBeeline:  { cls: 'bee',     k: 'Add to Beeline' },
     addBadge:    { cls: 'info',    k: 'Add Badge in CRM' },
     addCrm:      { cls: 'crm',     k: 'Add to CRM' },
     checkRegion: { cls: 'neutral', k: 'Check Region' }
   };
+
+  // Confidence rule for treating an "End in CRM" row and an active Beeline row as
+  // the SAME person under a re-issued badge (rehire / reassignment).
+  var BADGE_CHANGE_NAME_THRESHOLD = 0.90;
 
   /* ---------- header / column detection ---------- */
   function detectHeaderRow(aoa) {
@@ -197,6 +203,47 @@
     var dist = levenshtein(na, nb);
     var maxLen = Math.max(na.length, nb.length);
     return maxLen === 0 ? 1 : 1 - dist / maxLen;
+  }
+
+  /* ---------- badge-change (rehire) detection ---------- */
+  function sameDay(a, b) {
+    if (!a || !b) return false;
+    return a.getUTCFullYear() === b.getUTCFullYear() &&
+           a.getUTCMonth() === b.getUTCMonth() &&
+           a.getUTCDate() === b.getUTCDate();
+  }
+  /* A name match alone isn't enough to merge two different badges; require a
+     second signal that it's the same placement: same market, or the CRM
+     assignment starting on the same day as the new Beeline assignment. */
+  function badgeChangeCorroborated(crmRec, beeRec) {
+    var rc = (crmRec.market || '').trim().toLowerCase();
+    var rb = (beeRec.market || '').trim().toLowerCase();
+    if (rc && rb && rc === rb) return true;
+    if (sameDay(crmRec.crmStart, beeRec.beeStart)) return true;
+    return false;
+  }
+  /* Greedy 1:1 pairing of onlyCrm records (CRM has an outdated badge) to active
+     onlyBee records (same person under a new badge). Returns [{crm, bee, score}]. */
+  function matchBadgeChanges(crmRecs, beeRecs, threshold) {
+    threshold = threshold || BADGE_CHANGE_NAME_THRESHOLD;
+    var pairs = [];
+    crmRecs.forEach(function (c) {
+      beeRecs.forEach(function (b) {
+        if (c.badge === b.badge) return;
+        var score = nameSimilarity(c.crmName, b.beeName);
+        if (score >= threshold && badgeChangeCorroborated(c, b)) {
+          pairs.push({ crm: c, bee: b, score: score });
+        }
+      });
+    });
+    pairs.sort(function (a, b) { return b.score - a.score; });
+    var usedCrm = {}, usedBee = {}, result = [];
+    pairs.forEach(function (p) {
+      if (usedCrm[p.crm.badge] || usedBee[p.bee.badge]) return;
+      usedCrm[p.crm.badge] = 1; usedBee[p.bee.badge] = 1;
+      result.push(p);
+    });
+    return result;
   }
 
   /* ---------- region helpers ---------- */
@@ -383,6 +430,33 @@
       r.altName = (r.crmName && r.beeName && r.crmName !== r.beeName) ? r.beeName : '';
     });
 
+    /* Badge-change / rehire detection: a person whose CRM badge looks like it
+       should be ended, but who is actually active in Beeline under a NEW badge.
+       Collapse the two false rows (endCrm + addCrm) into one "Update Badge" row. */
+    var onlyCrmRecs = records.filter(function (r) { return r.status === 'onlyCrm'; });
+    var onlyBeeActive = records.filter(function (r) { return r.status === 'onlyBee'; });
+    var badgeChanges = matchBadgeChanges(onlyCrmRecs, onlyBeeActive, BADGE_CHANGE_NAME_THRESHOLD);
+    var mergedBeeBadges = {};
+    badgeChanges.forEach(function (p) {
+      var c = p.crm, b = p.bee, oldFull = beeFull.get(c.badge);
+      c.action = 'updateBadge';
+      c.newBadge = b.badge;
+      if (!c.market && b.market) c.market = b.market; // show the new assignment's region
+      c.reason = 'Active in Beeline under badge ' + b.badge +
+        (b.market ? (' (' + b.market + ')') : '') +
+        (b.beeStart ? (', started ' + fmtDate(b.beeStart)) : '') +
+        ', but CRM still has badge ' + c.badge +
+        (oldFull && oldFull.end ? (' which expired in Beeline ' + fmtDate(oldFull.end)) : '') +
+        '. Same person (' + Math.round(p.score * 100) + '% name match) — update the badge in CRM from ' +
+        c.badge + ' to ' + b.badge + '.';
+      mergedBeeBadges[b.badge] = 1;
+    });
+    if (badgeChanges.length) {
+      records = records.filter(function (r) {
+        return !(r.status === 'onlyBee' && mergedBeeBadges[r.badge]);
+      });
+    }
+
     var counts = {};
     Object.keys(ACTIONS).forEach(function (k) { counts[k] = 0; });
     records.forEach(function (r) { counts[r.action]++; });
@@ -422,6 +496,8 @@
     buildFullBeelineLookup: buildFullBeelineLookup,
     collectUnbadgedCrm: collectUnbadgedCrm,
     matchUnbadgedToOnlyBee: matchUnbadgedToOnlyBee,
+    BADGE_CHANGE_NAME_THRESHOLD: BADGE_CHANGE_NAME_THRESHOLD,
+    matchBadgeChanges: matchBadgeChanges,
     reconcile: reconcile
   };
 });

@@ -56,7 +56,7 @@
     updateBadge: { label: 'Update Badge in RC', cls: 'act-upd' },
     addBeeline:  { label: 'Add to Beeline',      cls: 'act-bee' },
     addBadge:    { label: 'Add Badge in RC',    cls: 'act-info' },
-    addCrm:      { label: 'Add to RC',          cls: 'act-crm' },
+    addCrm:      { label: 'Beeline Active / No RC Data', cls: 'act-crm' },
     checkRegion: { label: 'Check Region',        cls: 'act-neutral' },
     matched:     { label: 'Matched',             cls: 'act-ok' }
   };
@@ -66,7 +66,7 @@
     updateBadge: { cls: 'upd',     k: 'Update Badge in RC' },
     addBeeline:  { cls: 'bee',     k: 'Add to Beeline' },
     addBadge:    { cls: 'info',    k: 'Add Badge in RC' },
-    addCrm:      { cls: 'crm',     k: 'Add to RC' },
+    addCrm:      { cls: 'crm',     k: 'Beeline Active / No RC Data' },
     checkRegion: { cls: 'neutral', k: 'Check Region' }
   };
 
@@ -485,9 +485,9 @@
           r.reason = 'Likely already in RC as "' + m.crmName + '" with no badge on file (' + Math.round(m.score * 100) + '% name match). Suggested badge: ' + r.badge + '.';
         } else {
           r.action = 'addCrm';
-          r.reason = 'Active in Beeline, no matching RC record found by badge or name. Add as a new placement.';
+          r.reason = 'Active in Beeline, but not in the RC active-assignment export. Because RC only lists active assignments, this is either a new placement to add to RC, or an assignment that has already ended in RC and should be ended in Beeline. Verify in RC.';
           var age2 = daysAgo(r.beeStart);
-          if (age2 != null && age2 <= BEE_RECENT_DAYS) r.reason += ' Recently started, may just be pending entry.';
+          if (age2 != null && age2 <= BEE_RECENT_DAYS) r.reason += ' Started recently, so it may just be pending entry in RC.';
         }
       }
       r.person = r.crmName || r.beeName;

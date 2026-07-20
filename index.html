@@ -167,6 +167,7 @@
   .preason{font-size:12px;color:var(--muted);margin-top:3px;max-width:440px;line-height:1.4}
   td.action{padding-top:12px}
   td.market{font-size:12.5px;color:var(--muted)}
+  .mkt-raw{color:var(--muted);opacity:.75;font-size:11px}
   td.datecell{font-size:12.5px}
   .age{font-family:'IBM Plex Mono';font-size:10.5px;color:var(--muted);margin-left:5px}
   .age.stale{color:var(--dup);font-weight:600}
@@ -345,6 +346,7 @@
 
     <div class="panel">
       <div class="toolbar">
+        <select class="filter" id="marketSelect" title="Filter by market / region"></select>
         <select class="filter" id="filterSelect"></select>
         <div class="search">
           <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.7"/><path d="M21 21l-4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
@@ -392,7 +394,8 @@
 <script>
 "use strict";
 
-const S = { beeline:null, crm:null, records:[], filterKey:'needsAction', search:'', sortKey:'action', sortDir:1, showDetails:false, _counts:null };
+const S = { beeline:null, crm:null, records:[], filterKey:'needsAction', search:'', sortKey:'action', sortDir:1, showDetails:false, _counts:null, marketFilter:'all' };
+try{ S.marketFilter = localStorage.getItem('badgeCrosscheck.market') || 'all'; }catch(e){}
 
 // Aliases into the shared reconciliation module (see reconcile-core.js).
 // All matching and recommendation logic lives there, in ONE file, so the
@@ -453,14 +456,44 @@ function recompute(){
   S.records = result.records;
   S._counts = result.counts;
 
+  populateMarketOptions();
   populateFilterOptions();
   renderStats();
   renderTable();
 }
 
 /* ---------- render ---------- */
+// Records limited to the selected market (branch view). Everything else — the
+// action filter, search, sort, and stat counts — operates within this subset.
+function recordsInMarket(){
+  if(!S.marketFilter || S.marketFilter==='all') return S.records;
+  return S.records.filter(r=>(r.market||'')===S.marketFilter);
+}
+function computeCounts(recs){
+  const c={}; Object.keys(ACTIONS).forEach(k=>c[k]=0);
+  const dupSet=new Set();
+  recs.forEach(r=>{ if(c[r.action]!=null) c[r.action]++; if(r.dup) dupSet.add(r.badge); });
+  c.total=recs.length; c.dups=dupSet.size; c.needsAction=recs.length-(c.matched||0);
+  return c;
+}
+function populateMarketOptions(){
+  const sel=document.getElementById('marketSelect');
+  if(!sel) return;
+  const counts={};
+  S.records.forEach(r=>{ const m=r.market||'—'; counts[m]=(counts[m]||0)+1; });
+  const markets=Object.keys(counts).sort((a,b)=>{
+    if(a==='Other') return 1; if(b==='Other') return -1;   // keep "Other" last
+    return a.localeCompare(b);
+  });
+  const opts=[`<option value="all">All regions (${S.records.length})</option>`];
+  markets.forEach(m=>opts.push(`<option value="${esc(m)}">${esc(m)} (${counts[m]})</option>`));
+  sel.innerHTML=opts.join('');
+  const valid=[...sel.options].some(o=>o.value===S.marketFilter);
+  sel.value = valid ? S.marketFilter : 'all';
+  S.marketFilter = sel.value;
+}
 function renderStats(){
-  const c=S._counts;
+  const c=computeCounts(recordsInMarket());
   document.getElementById('heroNum').textContent=c.needsAction.toLocaleString();
   document.getElementById('heroSub').textContent=c.matched.toLocaleString()+' already match · '+c.total.toLocaleString()+' badges total';
   const cards=[];
@@ -473,7 +506,7 @@ function renderStats(){
     `<div class="stat ${s.cls}"><div class="k">${s.k}</div><div class="v">${s.v.toLocaleString()}</div></div>`).join('');
 }
 function populateFilterOptions(){
-  const c=S._counts, sel=document.getElementById('filterSelect');
+  const c=computeCounts(recordsInMarket()), sel=document.getElementById('filterSelect');
   const prev=S.filterKey;
   const opts=[];
   opts.push(`<option value="needsAction">Needs action (${c.needsAction})</option>`);
@@ -491,7 +524,7 @@ function actionPill(action){
   return `<span class="chip ${a.cls}">${a.label}</span>`;
 }
 function currentRows(){
-  let rows=S.records;
+  let rows=recordsInMarket();
   if(S.filterKey==='needsAction') rows=rows.filter(r=>r.action!=='matched');
   else if(S.filterKey!=='all') rows=rows.filter(r=>r.action===S.filterKey);
   if(S.search){
@@ -501,6 +534,7 @@ function currentRows(){
       (r.person||'').toLowerCase().includes(q) ||
       (r.altName||'').toLowerCase().includes(q) ||
       (r.market||'').toLowerCase().includes(q) ||
+      (r.marketRaw||'').toLowerCase().includes(q) ||
       (r.reason||'').toLowerCase().includes(q));
   }
   const dir=S.sortDir, key=S.sortKey;
@@ -533,7 +567,10 @@ function renderTable(){
       const dupTag=r.dup?'<span class="duptag">DUP</span>':'';
       const altLine=r.altName?`<div class="palt">Beeline: ${esc(r.altName)}</div>`:'';
       const personLine=r.person?esc(r.person):'<span class="name-empty">Unknown</span>';
-      const mkt=r.market?esc(r.market):'<span class="name-empty">-</span>';
+      // For the "Other" bucket, show the raw RC location so it can be triaged.
+      const mkt = r.market
+        ? (r.marketRaw ? esc(r.market)+' <span class="mkt-raw">· '+esc(r.marketRaw)+'</span>' : esc(r.market))
+        : '<span class="name-empty">-</span>';
       return `<tr class="${r.dup?'is-dup':''}">
         <td class="badge">${esc(r.badge)}${dupTag}</td>
         <td class="person"><div class="pname">${personLine}</div>${altLine}<div class="preason">${esc(r.reason)}</div></td>
@@ -696,6 +733,11 @@ document.querySelectorAll('.drop').forEach(drop=>{
 });
 document.addEventListener('click', ()=>document.querySelectorAll('.ms-panel').forEach(p=>p.classList.add('hidden')));
 
+document.getElementById('marketSelect').addEventListener('change', e=>{
+  S.marketFilter=e.target.value;
+  try{ localStorage.setItem('badgeCrosscheck.market', S.marketFilter); }catch(err){}
+  populateFilterOptions(); renderStats(); renderTable();
+});
 document.getElementById('filterSelect').addEventListener('change', e=>{ S.filterKey=e.target.value; renderTable(); });
 document.getElementById('search').addEventListener('input', e=>{ S.search=e.target.value.trim(); renderTable(); });
 document.getElementById('chk-details').addEventListener('change', e=>{
@@ -742,6 +784,7 @@ function showSyncedResults(){
   document.getElementById('sync-banner-text').innerHTML =
     'Synced automatically. Updated <b>'+esc(new Date(syncedSnapshot.updatedAt).toLocaleString())+'</b>';
   document.getElementById('results-section').classList.remove('hidden');
+  populateMarketOptions();
   populateFilterOptions();
   renderStats();
   renderTable();

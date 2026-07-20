@@ -92,7 +92,9 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
 
     const beeSt = parseToState(beeBuf, 'beeline');
     const crmSt = parseToState(crmBuf, 'crm');
-    beeSt.selectedRegions = Core.autoSelectRegions(beeSt, crmSt);
+    // Include every market in the snapshot so one file serves all branches; each
+    // branch filters to its own market client-side (null = no region pre-filter).
+    beeSt.selectedRegions = null;
 
     const { records, counts } = Core.reconcile(beeSt, crmSt);
 

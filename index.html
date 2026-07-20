@@ -706,7 +706,8 @@ document.getElementById('btn-full').addEventListener('click', exportFull);
 // Fill this in once the Cloud Function + Storage bucket are deployed, e.g.
 // 'https://storage.googleapis.com/YOUR_BUCKET/snapshots/latest.json'
 // Left blank, the tool just behaves as a manual-upload tool (today's behavior).
-const SNAPSHOT_URL = '';
+// Firebase Storage download endpoint (honors the 'allow read: if true' rule on snapshots/).
+const SNAPSHOT_URL = 'https://firebasestorage.googleapis.com/v0/b/geodis-dr.firebasestorage.app/o/snapshots%2Flatest.json?alt=media';
 
 let syncedSnapshot = null;
 

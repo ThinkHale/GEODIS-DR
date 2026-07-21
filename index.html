@@ -355,7 +355,7 @@
         <div class="tb-spacer"></div>
         <label class="chk" style="padding-bottom:0"><input type="checkbox" id="chk-details"> Show dates &amp; market</label>
         <button class="btn ghost" id="btn-full">Full reconciliation (advanced)</button>
-        <button class="btn primary" id="btn-action"><svg viewBox="0 0 24 24" fill="none"><path d="M12 15V3m0 12l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>Export list</button>
+        <button class="btn primary" id="btn-action" title="Exports only the rows currently shown (market, filter, and search applied)"><svg viewBox="0 0 24 24" fill="none"><path d="M12 15V3m0 12l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>Export list</button>
       </div>
       <div class="tablewrap hide-details" id="tablewrap">
         <table>
@@ -652,20 +652,24 @@ function splitName(full){
   return [parts[0], parts.slice(1).join(' ')];
 }
 function exportActionList(){
-  const rows=S.records.filter(r=>r.action!=='matched').sort((a,b)=>{
-    const aw=ACTION_ORDER[a.action]??9, bw=ACTION_ORDER[b.action]??9;
-    if(aw!==bw) return aw-bw;
-    return (Number(a.badge)||0)-(Number(b.badge)||0);
-  });
+  // Export exactly what's visible: the current market, action filter, search, and sort.
+  const rows=currentRows();
   const aoa=[['Badge Number','Person','Recommended Action','Reason','Market','RC Start','Beeline Start','Duplicate?']];
   rows.forEach(r=>aoa.push([
-    r.badge, r.person, ACTIONS[r.action].label, r.reason, r.market||'',
+    r.badge, r.person, ACTIONS[r.action].label, r.reason,
+    r.market + (r.marketRaw ? ' ('+r.marketRaw+')' : ''),
     fmtDate(r.crmStart), fmtDate(r.beeStart), r.dup?'YES':''
   ]));
   const ws=XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols']=[{wch:13},{wch:24},{wch:20},{wch:64},{wch:14},{wch:12},{wch:12},{wch:11}];
+  ws['!cols']=[{wch:13},{wch:24},{wch:22},{wch:64},{wch:18},{wch:12},{wch:12},{wch:11}];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Action List');
-  download(wb,'Badge_Action_List_'+stamp()+'.xlsx');
+  // Reflect the current scope in the filename, e.g. Badge_List_StLouis_BeelineActiveNoRCData_...
+  const clean=s=>String(s).replace(/[^A-Za-z0-9]+/g,'');
+  const bits=[];
+  if(S.marketFilter && S.marketFilter!=='all') bits.push(clean(S.marketFilter));
+  if(S.filterKey && S.filterKey!=='needsAction' && S.filterKey!=='all') bits.push(clean(ACTIONS[S.filterKey].label));
+  const scope=bits.length ? bits.join('_')+'_' : '';
+  download(wb,'Badge_Action_List_'+scope+stamp()+'.xlsx');
 }
 function exportFull(){
   const crmRows=S.records.filter(r=>r.status!=='onlyBee').map(r=>({badge:r.badge,name:r.crmName,start:r.crmStart})).sort((a,b)=>a.name.toLowerCase()<b.name.toLowerCase()?-1:1);

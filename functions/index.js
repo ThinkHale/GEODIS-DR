@@ -73,8 +73,19 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
     const b64 = req.body && req.body.fileBase64;
     if (!b64) { res.status(400).send('Missing fileBase64 in request body'); return; }
 
-    // Save the raw file that just arrived (always overwrite "latest" for that type)
     const buffer = Buffer.from(b64, 'base64');
+
+    // Guard: a real .xlsx is a ZIP and must start with "PK\x03\x04". Power Automate
+    // intermittently mangles large attachments into a tiny ASCII skeleton; reject
+    // those BEFORE overwriting the last-good file, so one bad upload can't wipe good
+    // data and the failure is visible to the caller instead of silently breaking.
+    const isXlsx = buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4b && buffer[2] === 0x03 && buffer[3] === 0x04;
+    if (!isXlsx) {
+      res.status(400).json({ ok: false, error: 'Uploaded ' + type + ' file is not a valid .xlsx (got ' + buffer.length + ' bytes). It was not saved; the previous file is kept.' });
+      return;
+    }
+
+    // Save the raw file that just arrived (always overwrite "latest" for that type)
     await bucket.file(RAW_PATH[type]).save(buffer, { contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 
     // Pull the latest known copy of BOTH files (the one we just saved, plus whatever

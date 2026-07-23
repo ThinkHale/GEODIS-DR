@@ -37,7 +37,11 @@ const SYNC_KEY = defineSecret('SYNC_KEY');
 admin.initializeApp();
 const bucket = admin.storage().bucket();
 
-const RAW_PATH = { beeline: 'raw/beeline-latest.xlsx', crm: 'raw/crm-latest.xlsx' };
+const RAW_PATH = {
+  beeline: 'raw/beeline-latest.xlsx',
+  crm: 'raw/crm-latest.xlsx',
+  rcended: 'raw/rcended-latest.xlsx'   // optional RC "Ended Assignments" report
+};
 const SNAPSHOT_PATH = 'snapshots/latest.json';
 
 async function readRawFile(type) {
@@ -66,8 +70,8 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
     if (!expected || key !== expected) { res.status(401).send('Unauthorized'); return; }
 
     const type = String(req.query.type || '').toLowerCase();
-    if (type !== 'beeline' && type !== 'crm') {
-      res.status(400).send('Missing or invalid ?type= (expected "beeline" or "crm")');
+    if (type !== 'beeline' && type !== 'crm' && type !== 'rcended') {
+      res.status(400).send('Missing or invalid ?type= (expected "beeline", "crm", or "rcended")');
       return;
     }
     const b64 = req.body && req.body.fileBase64;
@@ -88,26 +92,27 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
     // Save the raw file that just arrived (always overwrite "latest" for that type)
     await bucket.file(RAW_PATH[type]).save(buffer, { contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 
-    // Pull the latest known copy of BOTH files (the one we just saved, plus whatever
-    // we already had for the other type) and recompute if we have both.
-    const otherType = type === 'beeline' ? 'crm' : 'beeline';
-    const otherBuf = await readRawFile(otherType);
+    // Gather all inputs: beeline + crm are REQUIRED to compute; the RC "ended"
+    // report is OPTIONAL enrichment. Use the file we just saved for its own type,
+    // and read the others from storage.
+    const beeBuf = type === 'beeline' ? buffer : await readRawFile('beeline');
+    const crmBuf = type === 'crm' ? buffer : await readRawFile('crm');
+    const endedBuf = type === 'rcended' ? buffer : await readRawFile('rcended');
 
-    if (!otherBuf) {
-      res.status(200).json({ ok: true, computed: false, message: 'Saved ' + type + '. Waiting on ' + otherType + ' before computing a snapshot.' });
+    if (!beeBuf || !crmBuf) {
+      const missing = !beeBuf ? 'beeline' : 'crm';
+      res.status(200).json({ ok: true, computed: false, message: 'Saved ' + type + '. Waiting on ' + missing + ' before computing a snapshot.' });
       return;
     }
 
-    const beeBuf = type === 'beeline' ? buffer : otherBuf;
-    const crmBuf = type === 'crm' ? buffer : otherBuf;
-
     const beeSt = parseToState(beeBuf, 'beeline');
     const crmSt = parseToState(crmBuf, 'crm');
+    const endedSt = endedBuf ? parseToState(endedBuf, 'crm') : null;
     // Include every market in the snapshot so one file serves all branches; each
     // branch filters to its own market client-side (null = no region pre-filter).
     beeSt.selectedRegions = null;
 
-    const { records, counts } = Core.reconcile(beeSt, crmSt);
+    const { records, counts } = Core.reconcile(beeSt, crmSt, endedSt);
 
     // Flatten to plain, render-ready values (dates as formatted strings) so the
     // browser can display the snapshot without re-running any date parsing.
@@ -127,6 +132,8 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
         newBadge: r.newBadge || null,
         crmStart: Core.fmtDate(r.crmStart),
         beeStart: Core.fmtDate(r.beeStart),
+        endDate: Core.fmtDate(r.endDate),
+        endReason: r.endReason || '',
         dup: r.dup
       }))
     };

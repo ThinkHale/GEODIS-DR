@@ -35,7 +35,8 @@
       pc:     [/profit center/i, /profit/i, /cost center/i],
       start:  [/current start date/i, /^start date$/i, /start\s*date/i, /^start$/i],
       end:    [/current end date/i, /^end date$/i, /end\s*date/i, /^end$/i],
-      account: []
+      account: [],
+      endReason: []
     },
     crm: {
       badge:  [/^badge number$/i, /badge\s*number/i, /badge/i, /assignment id/i],
@@ -43,16 +44,20 @@
       status: [/assignment status/i, /status/i],
       pc:     [/profit center/i, /profit/i, /cost center/i],
       start:  [/^start date$/i, /start\s*date/i, /assignment start/i, /^start$/i],
-      end:    [/^end date$/i, /end\s*date/i, /^end$/i],
+      end:    [/actual end date/i, /^end date$/i, /end\s*date/i, /^end$/i],
       // CRM has no clean market column; the market is inferred from the location
       // embedded in the Account path (see parseCrmAccount / learnCityMarkets).
-      account: [/^account$/i, /^account name$/i, /\baccount\b/i]
+      account: [/^account$/i, /^account name$/i, /\baccount\b/i],
+      // Only present on the RC "Ended Assignments" report (identical to the active
+      // report plus Actual End Date + End Reason).
+      endReason: [/end reason/i, /termination reason/i, /^reason$/i]
     }
   };
-  var HEADER_KEYWORDS = /badge|assignment id|contractor name|person placed|status|name|kronos|profit|start date|end date/i;
+  var HEADER_KEYWORDS = /badge|assignment id|contractor name|person placed|status|name|kronos|profit|start date|end date|end reason/i;
 
   var ACTIONS = {
     endCrm:      { label: 'End in RC',          cls: 'act-dup' },
+    endBeeline:  { label: 'End in Beeline',      cls: 'act-endb' },
     updateBadge: { label: 'Update Badge in RC', cls: 'act-upd' },
     addBeeline:  { label: 'Add to Beeline',      cls: 'act-bee' },
     addBadge:    { label: 'Add Badge in RC',    cls: 'act-info' },
@@ -60,9 +65,10 @@
     checkRegion: { label: 'Check Region',        cls: 'act-neutral' },
     matched:     { label: 'Matched',             cls: 'act-ok' }
   };
-  var ACTION_ORDER = { endCrm: 0, updateBadge: 1, addBeeline: 2, addBadge: 3, addCrm: 4, checkRegion: 5, matched: 6 };
+  var ACTION_ORDER = { endCrm: 0, endBeeline: 1, updateBadge: 2, addBeeline: 3, addBadge: 4, addCrm: 5, checkRegion: 6, matched: 7 };
   var ACTION_STAT_CARD = {
     endCrm:      { cls: 'dup',     k: 'End in RC' },
+    endBeeline:  { cls: 'endb',    k: 'End in Beeline' },
     updateBadge: { cls: 'upd',     k: 'Update Badge in RC' },
     addBeeline:  { cls: 'bee',     k: 'Add to Beeline' },
     addBadge:    { cls: 'info',    k: 'Add Badge in RC' },
@@ -117,6 +123,7 @@
     st.startCol  = pickCol(headers, DETECT[side].start);
     st.endCol    = pickCol(headers, DETECT[side].end);
     st.accountCol = pickCol(headers, DETECT[side].account || []);
+    st.endReasonCol = pickCol(headers, DETECT[side].endReason || []);
     if (overrides) { for (var k in overrides) { if (overrides[k] !== undefined) st[k] = overrides[k]; } }
     return st;
   }
@@ -360,6 +367,29 @@
     });
     return map;
   }
+  /* Index the optional RC "Ended Assignments" report (people ended in RC in the
+     last ~30 days) by badge and by normalized name, keeping the most recent end
+     per person. Used to reclassify "Beeline Active / No RC Data" rows to
+     "End in Beeline" when the person was recently terminated in RC. */
+  function buildEndedIndex(endedSt) {
+    var byBadge = {}, byName = {};
+    if (!endedSt || endedSt.badgeCol === -1) return { byBadge: byBadge, byName: byName, has: false };
+    endedSt.aoa.slice(endedSt.headerRow + 1).forEach(function (row) {
+      if (!row) return;
+      var badge = normBadge(row[endedSt.badgeCol]);
+      var name = endedSt.nameCol !== -1 && row[endedSt.nameCol] != null ? String(row[endedSt.nameCol]).trim() : '';
+      var end = endedSt.endCol !== -1 ? parseDateVal(row[endedSt.endCol]) : null;
+      var reason = endedSt.endReasonCol !== -1 && row[endedSt.endReasonCol] != null ? String(row[endedSt.endReasonCol]).trim() : '';
+      var rec = { endDate: end, endReason: reason, name: name };
+      var newer = function (existing) {
+        return !existing || (end && (!existing.endDate || end > existing.endDate));
+      };
+      if (badge && newer(byBadge[badge])) byBadge[badge] = rec;
+      var nk = normalizeNameForMatch(name);
+      if (nk && newer(byName[nk])) byName[nk] = rec;
+    });
+    return { byBadge: byBadge, byName: byName, has: true };
+  }
   /* Full Beeline history, ignoring active/region filters */
   function buildFullBeelineLookup(st) {
     var map = new Map();
@@ -417,11 +447,12 @@
   /* ---------- top-level reconciliation ---------- */
   /* beeSt, crmSt: state objects built via buildState(), with selectedRegions
      already set on beeSt (use autoSelectRegions() if you don't have your own UI). */
-  function reconcile(beeSt, crmSt) {
+  function reconcile(beeSt, crmSt, endedSt) {
     var bi = indexSide(beeSt), ci = indexSide(crmSt);
     var beeFull = buildFullBeelineLookup(beeSt);
     // Map each RC location to the Beeline market name, learned from shared badges.
     var cityMarkets = learnCityMarkets(crmSt, beeFull);
+    var endedIndex = buildEndedIndex(endedSt);   // optional RC "Ended" report
     var all = new Set(Array.from(bi.map.keys()).concat(Array.from(ci.map.keys())));
     var records = [];
     all.forEach(function (badge) {
@@ -453,6 +484,8 @@
         marketVerified: marketVerified,
         marketRaw: marketRaw,
         status: status,
+        endDate: null,
+        endReason: '',
         dup: bi.dups.has(badge) || ci.dups.has(badge)
       });
     });
@@ -525,6 +558,29 @@
       });
     }
 
+    /* Ended-report cross-reference: a "Beeline Active / No RC Data" person who
+       appears in the RC "Ended" report was recently terminated in RC, so the real
+       action is to END them in Beeline. Match by badge first, then exact name. */
+    if (endedIndex.has) {
+      records.forEach(function (r) {
+        if (r.action !== 'addCrm') return;
+        var hit = endedIndex.byBadge[r.badge], via = 'badge';
+        if (!hit) {
+          var nk = normalizeNameForMatch(r.person || r.beeName);
+          if (nk && endedIndex.byName[nk]) { hit = endedIndex.byName[nk]; via = 'name'; }
+        }
+        if (!hit) return;
+        r.action = 'endBeeline';
+        r.endDate = hit.endDate;
+        r.endReason = hit.endReason;
+        r.reason = 'Active in Beeline, but ended in RC' +
+          (hit.endDate ? (' on ' + fmtDate(hit.endDate)) : '') +
+          (hit.endReason ? (' (reason: ' + hit.endReason + ')') : '') +
+          '. Recommend ending it in Beeline.' +
+          (via === 'name' ? ' (matched by name)' : '');
+      });
+    }
+
     var counts = {};
     Object.keys(ACTIONS).forEach(function (k) { counts[k] = 0; });
     records.forEach(function (r) { counts[r.action]++; });
@@ -568,6 +624,7 @@
     matchBadgeChanges: matchBadgeChanges,
     parseCrmAccount: parseCrmAccount,
     learnCityMarkets: learnCityMarkets,
+    buildEndedIndex: buildEndedIndex,
     reconcile: reconcile
   };
 });

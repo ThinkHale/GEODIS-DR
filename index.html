@@ -22,6 +22,7 @@
     --info:#2467C4; --info-bg:#E3EEFC;
     --neutral:#5B6472; --neutral-bg:#EDEFF2;
     --upd:#0E8E8E; --upd-bg:#DDF1F0;
+    --endb:#9C3587; --endb-bg:#F6E4F1;
     --radius:10px;
     --shadow:0 1px 2px rgba(11,37,69,.06), 0 6px 20px rgba(11,37,69,.06);
   }
@@ -129,12 +130,14 @@
   .stat.bee::before{background:var(--bee)} .stat.dup::before{background:var(--dup)}
   .stat.info::before{background:var(--info)} .stat.neutral::before{background:var(--neutral)}
   .stat.upd::before{background:var(--upd)}
+  .stat.endb::before{background:var(--endb)}
   .stat .k{font-size:10.5px;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);font-weight:600;line-height:1.3;min-height:26px}
   .stat .v{font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:25px;line-height:1;margin-top:6px;letter-spacing:-.5px}
   .stat.ok .v{color:var(--ok)} .stat.crm .v{color:var(--crm)}
   .stat.bee .v{color:var(--bee)} .stat.dup .v{color:var(--dup)}
   .stat.info .v{color:var(--info)} .stat.neutral .v{color:var(--neutral)}
   .stat.upd .v{color:var(--upd)}
+  .stat.endb .v{color:var(--endb)}
   .stat.muted{opacity:.7}
 
   .panel{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden;margin-top:10px}
@@ -181,6 +184,7 @@
   .chip.act-info{background:var(--info-bg);color:var(--info)} .chip.act-info::before{background:var(--info)}
   .chip.act-neutral{background:var(--neutral-bg);color:var(--neutral)} .chip.act-neutral::before{background:var(--neutral)}
   .chip.act-upd{background:var(--upd-bg);color:var(--upd)} .chip.act-upd::before{background:var(--upd)}
+  .chip.act-endb{background:var(--endb-bg);color:var(--endb)} .chip.act-endb::before{background:var(--endb)}
   .duptag{display:inline-block;margin-left:7px;font-family:'IBM Plex Mono';font-size:10px;font-weight:600;color:var(--dup);background:var(--dup-bg);padding:1px 6px;border-radius:4px}
   tr.is-dup td.badge{color:var(--dup)}
   .detail-col{}
@@ -654,14 +658,14 @@ function splitName(full){
 function exportActionList(){
   // Export exactly what's visible: the current market, action filter, search, and sort.
   const rows=currentRows();
-  const aoa=[['Badge Number','Person','Recommended Action','Reason','Market','RC Start','Beeline Start','Duplicate?']];
+  const aoa=[['Badge Number','Person','Recommended Action','Reason','Market','RC Start','Beeline Start','RC End Date','End Reason','Duplicate?']];
   rows.forEach(r=>aoa.push([
     r.badge, r.person, ACTIONS[r.action].label, r.reason,
     r.market + (r.marketRaw ? ' ('+r.marketRaw+')' : ''),
-    fmtDate(r.crmStart), fmtDate(r.beeStart), r.dup?'YES':''
+    fmtDate(r.crmStart), fmtDate(r.beeStart), fmtDate(r.endDate), r.endReason||'', r.dup?'YES':''
   ]));
   const ws=XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols']=[{wch:13},{wch:24},{wch:22},{wch:64},{wch:18},{wch:12},{wch:12},{wch:11}];
+  ws['!cols']=[{wch:13},{wch:24},{wch:22},{wch:64},{wch:18},{wch:12},{wch:12},{wch:12},{wch:28},{wch:11}];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Action List');
   // Reflect the current scope in the filename, e.g. Badge_List_StLouis_BeelineActiveNoRCData_...
   const clean=s=>String(s).replace(/[^A-Za-z0-9]+/g,'');
@@ -779,7 +783,8 @@ function showSyncedResults(){
   S.records = syncedSnapshot.records.map(r=>({
     ...r,
     crmStart: r.crmStart ? new Date(r.crmStart) : null,
-    beeStart: r.beeStart ? new Date(r.beeStart) : null
+    beeStart: r.beeStart ? new Date(r.beeStart) : null,
+    endDate: r.endDate ? new Date(r.endDate) : null
   }));
   S._counts = syncedSnapshot.counts;
   document.getElementById('upload-section').classList.add('hidden');

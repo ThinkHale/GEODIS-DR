@@ -171,6 +171,10 @@
   td.action{padding-top:12px}
   td.market{font-size:12.5px;color:var(--muted)}
   .mkt-raw{color:var(--muted);opacity:.75;font-size:11px}
+  td.empnum{font-size:12px;color:var(--muted)}
+  .notes-col{width:210px}
+  .note-input{width:100%;min-width:150px;min-height:30px;max-height:120px;font-family:inherit;font-size:12px;line-height:1.35;border:1px solid var(--line);border-radius:6px;padding:5px 7px;resize:vertical;background:#fff;color:var(--ink)}
+  .note-input:focus{outline:none;border-color:var(--navy-3);box-shadow:0 0 0 2px rgba(11,37,69,.08)}
   td.datecell{font-size:12.5px}
   .age{font-family:'IBM Plex Mono';font-size:10.5px;color:var(--muted);margin-left:5px}
   .age.stale{color:var(--dup);font-weight:600}
@@ -364,12 +368,14 @@
       <div class="tablewrap hide-details" id="tablewrap">
         <table>
           <thead><tr>
+            <th data-sort="empNumber">Emp #<span class="arrow"></span></th>
             <th data-sort="badge">Badge<span class="arrow"></span></th>
             <th data-sort="person">Person<span class="arrow"></span></th>
             <th data-sort="action">Recommended Action<span class="arrow"></span></th>
             <th data-sort="crmStart" class="detail-col">RC Start<span class="arrow"></span></th>
             <th data-sort="beeStart" class="detail-col">Beeline Start<span class="arrow"></span></th>
             <th data-sort="market" class="detail-col">Market<span class="arrow"></span></th>
+            <th class="notes-col">Notes</th>
           </tr></thead>
           <tbody id="tbody"></tbody>
         </table>
@@ -398,7 +404,7 @@
 <script>
 "use strict";
 
-const S = { beeline:null, crm:null, records:[], filterKey:'needsAction', search:'', sortKey:'action', sortDir:1, showDetails:false, _counts:null, marketFilter:'all' };
+const S = { beeline:null, crm:null, records:[], filterKey:'needsAction', search:'', sortKey:'action', sortDir:1, showDetails:false, _counts:null, marketFilter:'all', notes:{} };
 try{ S.marketFilter = localStorage.getItem('badgeCrosscheck.market') || 'all'; }catch(e){}
 
 // Aliases into the shared reconciliation module (see reconcile-core.js).
@@ -464,6 +470,7 @@ function recompute(){
   populateFilterOptions();
   renderStats();
   renderTable();
+  loadNotes();
 }
 
 /* ---------- render ---------- */
@@ -575,13 +582,17 @@ function renderTable(){
       const mkt = r.market
         ? (r.marketRaw ? esc(r.market)+' <span class="mkt-raw">· '+esc(r.marketRaw)+'</span>' : esc(r.market))
         : '<span class="name-empty">-</span>';
+      const empCell = r.empNumber ? esc(r.empNumber) : '<span class="name-empty">-</span>';
+      const noteVal = (S.notes && S.notes[r.badge] && S.notes[r.badge].note) ? S.notes[r.badge].note : '';
       return `<tr class="${r.dup?'is-dup':''}">
+        <td class="empnum mono">${empCell}</td>
         <td class="badge">${esc(r.badge)}${dupTag}</td>
         <td class="person"><div class="pname">${personLine}</div>${altLine}<div class="preason">${esc(r.reason)}</div></td>
         <td class="action">${actionPill(r.action)}</td>
         <td class="datecell detail-col">${dateCell(r.crmStart)}</td>
         <td class="datecell detail-col">${dateCell(r.beeStart)}</td>
         <td class="market detail-col">${mkt}</td>
+        <td class="notes-col"><textarea class="note-input" rows="1" data-badge="${esc(r.badge)}" placeholder="Add a note…">${esc(noteVal)}</textarea></td>
       </tr>`;
     }).join('');
   }
@@ -658,14 +669,17 @@ function splitName(full){
 function exportActionList(){
   // Export exactly what's visible: the current market, action filter, search, and sort.
   const rows=currentRows();
-  const aoa=[['Badge Number','Person','Recommended Action','Reason','Market','RC Start','Beeline Start','RC End Date','End Reason','Duplicate?']];
-  rows.forEach(r=>aoa.push([
-    r.badge, r.person, ACTIONS[r.action].label, r.reason,
-    r.market + (r.marketRaw ? ' ('+r.marketRaw+')' : ''),
-    fmtDate(r.crmStart), fmtDate(r.beeStart), fmtDate(r.endDate), r.endReason||'', r.dup?'YES':''
-  ]));
+  const aoa=[['Employee #','Badge Number','Person','Recommended Action','Reason','Market','RC Start','Beeline Start','RC End Date','End Reason','Notes','Duplicate?']];
+  rows.forEach(r=>{
+    const note = (S.notes && S.notes[r.badge] && S.notes[r.badge].note) ? S.notes[r.badge].note : '';
+    aoa.push([
+      r.empNumber||'', r.badge, r.person, ACTIONS[r.action].label, r.reason,
+      r.market + (r.marketRaw ? ' ('+r.marketRaw+')' : ''),
+      fmtDate(r.crmStart), fmtDate(r.beeStart), fmtDate(r.endDate), r.endReason||'', note, r.dup?'YES':''
+    ]);
+  });
   const ws=XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols']=[{wch:13},{wch:24},{wch:22},{wch:64},{wch:18},{wch:12},{wch:12},{wch:12},{wch:28},{wch:11}];
+  ws['!cols']=[{wch:12},{wch:13},{wch:24},{wch:22},{wch:64},{wch:18},{wch:12},{wch:12},{wch:12},{wch:28},{wch:30},{wch:11}];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Action List');
   // Reflect the current scope in the filename, e.g. Badge_List_StLouis_BeelineActiveNoRCData_...
   const clean=s=>String(s).replace(/[^A-Za-z0-9]+/g,'');
@@ -762,8 +776,41 @@ document.getElementById('btn-full').addEventListener('click', exportFull);
 // Left blank, the tool just behaves as a manual-upload tool (today's behavior).
 // Firebase Storage download endpoint (honors the 'allow read: if true' rule on snapshots/).
 const SNAPSHOT_URL = 'https://firebasestorage.googleapis.com/v0/b/geodis-dr.firebasestorage.app/o/snapshots%2Flatest.json?alt=media';
+// Shared notes API (badge -> note), served by the Cloud Function.
+const NOTES_URL = 'https://syncreport-eusvh7xq5q-uc.a.run.app/?notes=1';
 
 let syncedSnapshot = null;
+
+/* ---------- shared notes ---------- */
+async function loadNotes(){
+  try{
+    const res = await fetch(NOTES_URL, {cache:'no-store'});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const data = await res.json();
+    S.notes = (data && data.notes) ? data.notes : {};
+  }catch(err){
+    console.warn('Could not load shared notes.', err);
+  }
+  renderTable();
+}
+async function saveNote(badge, note){
+  if(note.trim()==='') delete S.notes[badge];
+  else S.notes[badge] = { note:note, updatedAt:new Date().toISOString() };
+  try{
+    const res = await fetch(NOTES_URL, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({badge:badge, note:note})});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+  }catch(err){
+    console.warn('Could not save note for badge '+badge, err);
+    alert('That note could not be saved (network or permission issue), so it may not be shared with others.');
+  }
+}
+// Save a note when the user finishes editing it; auto-grow the box as they type.
+document.getElementById('tbody').addEventListener('change', e=>{
+  if(e.target.classList.contains('note-input')) saveNote(e.target.dataset.badge, e.target.value);
+});
+document.getElementById('tbody').addEventListener('input', e=>{
+  if(e.target.classList.contains('note-input')){ e.target.style.height='auto'; e.target.style.height=Math.min(e.target.scrollHeight,120)+'px'; }
+});
 
 async function loadSyncedSnapshot(){
   if(!SNAPSHOT_URL){ showUploadSection(); return; }
@@ -797,6 +844,7 @@ function showSyncedResults(){
   populateFilterOptions();
   renderStats();
   renderTable();
+  loadNotes();
 }
 function showUploadSection(){
   document.getElementById('sync-banner').classList.toggle('hidden', !syncedSnapshot);

@@ -43,6 +43,8 @@ const RAW_PATH = {
   rcended: 'raw/rcended-latest.xlsx'   // optional RC "Ended Assignments" report
 };
 const SNAPSHOT_PATH = 'snapshots/latest.json';
+const NOTES_PATH = 'notes/notes.json';
+const NOTES_ORIGIN = 'https://geodis.ebtools.pro';   // the tool's front-end origin
 
 async function readRawFile(type) {
   try {
@@ -54,6 +56,53 @@ async function readRawFile(type) {
   }
 }
 
+/* ---------- shared notes (badge -> { note, updatedAt }) ----------
+   Read from the browser (public), written from the browser. There is no per-user
+   auth (the whole tool is unauthenticated), so writes are gated only by CORS +
+   an Origin check + payload limits. Fine for internal, low-sensitivity notes;
+   harden with Firebase Auth if that ever changes. */
+async function readNotes() {
+  try {
+    const [buf] = await bucket.file(NOTES_PATH).download();
+    return JSON.parse(buf.toString());
+  } catch (err) {
+    return {};
+  }
+}
+function setNotesCors(res) {
+  res.set('Access-Control-Allow-Origin', NOTES_ORIGIN);
+  res.set('Vary', 'Origin');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  res.set('Access-Control-Max-Age', '3600');
+}
+async function handleNotes(req, res) {
+  setNotesCors(res);
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (req.method === 'GET') {
+    res.set('Cache-Control', 'no-cache, max-age=0');
+    res.status(200).json({ ok: true, notes: await readNotes() });
+    return;
+  }
+  if (req.method === 'POST') {
+    if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
+    const badge = req.body && req.body.badge != null ? String(req.body.badge).trim() : '';
+    let note = req.body && req.body.note != null ? String(req.body.note) : '';
+    if (!badge || badge.length > 64) { res.status(400).json({ ok: false, error: 'Missing/invalid badge' }); return; }
+    if (note.length > 1000) note = note.slice(0, 1000);
+    const notes = await readNotes();
+    if (note.trim() === '') delete notes[badge];
+    else notes[badge] = { note: note, updatedAt: new Date().toISOString() };
+    await bucket.file(NOTES_PATH).save(JSON.stringify(notes), {
+      contentType: 'application/json',
+      metadata: { cacheControl: 'no-cache, max-age=0' }
+    });
+    res.status(200).json({ ok: true });
+    return;
+  }
+  res.status(405).json({ ok: false, error: 'Method not allowed' });
+}
+
 function parseToState(buffer, side) {
   const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -63,6 +112,9 @@ function parseToState(buffer, side) {
 
 exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, async (req, res) => {
   try {
+    // Shared-notes API (browser). Separate from the Power Automate sync path.
+    if (req.query.notes !== undefined) { await handleNotes(req, res); return; }
+
     if (req.method !== 'POST') { res.status(405).send('POST only'); return; }
 
     const key = req.get('x-sync-key');
@@ -121,6 +173,7 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
       counts: counts,
       records: records.map(r => ({
         badge: r.badge,
+        empNumber: r.empNumber || '',
         person: r.person,
         altName: r.altName,
         action: r.action,

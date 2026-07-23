@@ -50,8 +50,16 @@
       account: [/^account$/i, /^account name$/i, /\baccount\b/i],
       // Only present on the RC "Ended Assignments" report (identical to the active
       // report plus Actual End Date + End Reason).
-      endReason: [/end reason/i, /termination reason/i, /^reason$/i]
+      endReason: [/end reason/i, /termination reason/i, /^reason$/i],
+      // RC person-level id, shown as the "Employee #" column.
+      emp: [/legacy contact id/i, /contact id/i, /employee number/i, /employee\s*#/i, /associate number/i]
     }
+  };
+  // Locations with no active Beeline presence to learn a market from, but which are
+  // their own markets. Keyed by cityKey (lowercased, alphanumerics only).
+  var MARKET_OVERRIDES = {
+    longbeachca: 'Long Beach CA',
+    fortworthtx: 'Fort Worth TX'
   };
   var HEADER_KEYWORDS = /badge|assignment id|contractor name|person placed|status|name|kronos|profit|start date|end date|end reason/i;
 
@@ -124,6 +132,7 @@
     st.endCol    = pickCol(headers, DETECT[side].end);
     st.accountCol = pickCol(headers, DETECT[side].account || []);
     st.endReasonCol = pickCol(headers, DETECT[side].endReason || []);
+    st.empCol = pickCol(headers, DETECT[side].emp || []);
     if (overrides) { for (var k in overrides) { if (overrides[k] !== undefined) st[k] = overrides[k]; } }
     return st;
   }
@@ -332,10 +341,11 @@
       var name = st.nameCol !== -1 && row[st.nameCol] != null ? String(row[st.nameCol]).trim() : '';
       var start = st.startCol !== -1 ? parseDateVal(row[st.startCol]) : null;
       var acct = st.accountCol !== -1 ? parseCrmAccount(row[st.accountCol]) : null;
+      var emp = st.empCol !== -1 && row[st.empCol] != null ? String(row[st.empCol]).trim() : '';
       if (map.has(badge)) { map.get(badge).count++; dups.add(badge); }
       else map.set(badge, {
         name: name, region: region, start: start, count: 1,
-        city: acct ? acct.city : '', cityKey: acct ? acct.cityKey : ''
+        city: acct ? acct.city : '', cityKey: acct ? acct.cityKey : '', emp: emp
       });
     });
     return { map: map, dups: dups };
@@ -367,10 +377,11 @@
     });
     return map;
   }
-  /* Index the optional RC "Ended Assignments" report (people ended in RC in the
-     last ~30 days) by badge and by normalized name, keeping the most recent end
-     per person. Used to reclassify "Beeline Active / No RC Data" rows to
-     "End in Beeline" when the person was recently terminated in RC. */
+  /* Index the optional RC "Ended Assignments" report (people ended in RC within
+     whatever window the report is generated for -- 30, 90 days, etc.) by badge and
+     by normalized name, keeping the most recent end per person. Used to reclassify
+     "Beeline Active / No RC Data" rows to "End in Beeline" when the person was
+     recently terminated in RC. */
   function buildEndedIndex(endedSt) {
     var byBadge = {}, byName = {};
     if (!endedSt || endedSt.badgeCol === -1) return { byBadge: byBadge, byName: byName, has: false };
@@ -380,7 +391,8 @@
       var name = endedSt.nameCol !== -1 && row[endedSt.nameCol] != null ? String(row[endedSt.nameCol]).trim() : '';
       var end = endedSt.endCol !== -1 ? parseDateVal(row[endedSt.endCol]) : null;
       var reason = endedSt.endReasonCol !== -1 && row[endedSt.endReasonCol] != null ? String(row[endedSt.endReasonCol]).trim() : '';
-      var rec = { endDate: end, endReason: reason, name: name };
+      var emp = endedSt.empCol !== -1 && row[endedSt.empCol] != null ? String(row[endedSt.empCol]).trim() : '';
+      var rec = { endDate: end, endReason: reason, name: name, emp: emp };
       var newer = function (existing) {
         return !existing || (end && (!existing.endDate || end > existing.endDate));
       };
@@ -469,13 +481,15 @@
         market = bi.map.get(badge).region;
         marketVerified = true;
       } else {
-        var learned = crmRec ? cityMarkets[crmRec.cityKey] : '';
+        var ck = crmRec ? crmRec.cityKey : '';
+        var learned = cityMarkets[ck] || MARKET_OVERRIDES[ck] || '';
         marketVerified = !!learned;
         market = learned || 'Other';
         if (!learned && crmRec) marketRaw = crmRec.city;
       }
       records.push({
         badge: badge,
+        empNumber: crmRec ? (crmRec.emp || '') : '',
         crmName: inCrm ? ci.map.get(badge).name : '',
         crmStart: inCrm ? ci.map.get(badge).start : null,
         beeName: inBee ? bi.map.get(badge).name : '',
@@ -573,6 +587,7 @@
         r.action = 'endBeeline';
         r.endDate = hit.endDate;
         r.endReason = hit.endReason;
+        if (!r.empNumber && hit.emp) r.empNumber = hit.emp;
         r.reason = 'Active in Beeline, but ended in RC' +
           (hit.endDate ? (' on ' + fmtDate(hit.endDate)) : '') +
           (hit.endReason ? (' (reason: ' + hit.endReason + ')') : '') +
@@ -625,6 +640,7 @@
     parseCrmAccount: parseCrmAccount,
     learnCityMarkets: learnCityMarkets,
     buildEndedIndex: buildEndedIndex,
+    MARKET_OVERRIDES: MARKET_OVERRIDES,
     reconcile: reconcile
   };
 });

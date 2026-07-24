@@ -129,14 +129,26 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
     const b64 = req.body && req.body.fileBase64;
     if (!b64) { res.status(400).send('Missing fileBase64 in request body'); return; }
 
-    const buffer = Buffer.from(b64, 'base64');
+    let buffer = Buffer.from(b64, 'base64');
 
-    // Guard: a real .xlsx is a ZIP and must start with "PK\x03\x04". Power Automate
-    // intermittently mangles large attachments into a tiny ASCII skeleton; reject
-    // those BEFORE overwriting the last-good file, so one bad upload can't wipe good
-    // data and the failure is visible to the caller instead of silently breaking.
-    const isXlsx = buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4b && buffer[2] === 0x03 && buffer[3] === 0x04;
-    if (!isXlsx) {
+    // A real .xlsx is a ZIP starting with "PK\x03\x04".
+    const isZip = (b) => b.length >= 4 && b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04;
+
+    // Power Automate's "Get Attachment (V2)" often DOUBLE-base64-encodes contentBytes:
+    // one decode yields the ASCII base64 text of the real file (starts with "UEsD").
+    // If the first decode isn't a ZIP but looks like base64 text, unwrap one more layer.
+    if (!isZip(buffer)) {
+      const asText = buffer.toString('latin1');
+      if (asText.length >= 8 && /^[A-Za-z0-9+/=\s]+$/.test(asText.slice(0, 200))) {
+        const inner = Buffer.from(asText, 'base64');
+        if (isZip(inner)) buffer = inner;
+      }
+    }
+
+    // Guard: reject anything that still isn't a valid .xlsx (e.g. the tiny ASCII
+    // skeleton PA produces on a truly mangled upload) BEFORE overwriting the last-good
+    // file, so one bad upload can't wipe good data and the failure is visible.
+    if (!isZip(buffer)) {
       res.status(400).json({ ok: false, error: 'Uploaded ' + type + ' file is not a valid .xlsx (got ' + buffer.length + ' bytes). It was not saved; the previous file is kept.' });
       return;
     }

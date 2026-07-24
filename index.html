@@ -175,6 +175,10 @@
   .notes-col{width:210px}
   .note-input{width:100%;min-width:150px;min-height:30px;max-height:120px;font-family:inherit;font-size:12px;line-height:1.35;border:1px solid var(--line);border-radius:6px;padding:5px 7px;resize:vertical;background:#fff;color:var(--ink)}
   .note-input:focus{outline:none;border-color:var(--navy-3);box-shadow:0 0 0 2px rgba(11,37,69,.08)}
+  .edit-status{margin-left:6px;border:1px solid var(--line);background:#fff;color:var(--muted);border-radius:5px;font-size:11px;line-height:1;padding:3px 5px;cursor:pointer;vertical-align:middle}
+  .edit-status:hover{border-color:var(--navy-3);color:var(--navy)}
+  .ov-tag{margin-left:6px;font-size:9.5px;letter-spacing:.4px;text-transform:uppercase;color:var(--upd);background:var(--upd-bg);border-radius:4px;padding:2px 5px;font-weight:600;vertical-align:middle}
+  .status-select{font-family:inherit;font-size:12px;padding:5px 7px;border:1px solid var(--navy-3);border-radius:6px;background:#fff;color:var(--ink);max-width:210px}
   td.datecell{font-size:12.5px}
   .age{font-family:'IBM Plex Mono';font-size:10.5px;color:var(--muted);margin-left:5px}
   .age.stale{color:var(--dup);font-weight:600}
@@ -404,7 +408,7 @@
 <script>
 "use strict";
 
-const S = { beeline:null, crm:null, records:[], filterKey:'needsAction', search:'', sortKey:'action', sortDir:1, showDetails:false, _counts:null, marketFilter:'all', notes:{} };
+const S = { beeline:null, crm:null, records:[], filterKey:'needsAction', search:'', sortKey:'action', sortDir:1, showDetails:false, _counts:null, marketFilter:'all', notes:{}, overrides:{} };
 try{ S.marketFilter = localStorage.getItem('badgeCrosscheck.market') || 'all'; }catch(e){}
 
 // Aliases into the shared reconciliation module (see reconcile-core.js).
@@ -471,6 +475,7 @@ function recompute(){
   renderStats();
   renderTable();
   loadNotes();
+  loadOverrides();
 }
 
 /* ---------- render ---------- */
@@ -588,7 +593,7 @@ function renderTable(){
         <td class="empnum mono">${empCell}</td>
         <td class="badge">${esc(r.badge)}${dupTag}</td>
         <td class="person"><div class="pname">${personLine}</div>${altLine}<div class="preason">${esc(r.reason)}</div></td>
-        <td class="action">${actionPill(r.action)}</td>
+        <td class="action">${actionPill(r.action)}<button class="edit-status" data-badge="${esc(r.badge)}" title="Change status">✎</button>${r.overridden?'<span class="ov-tag" title="Manually set — click ✎ to revert">manual</span>':''}</td>
         <td class="datecell detail-col">${dateCell(r.crmStart)}</td>
         <td class="datecell detail-col">${dateCell(r.beeStart)}</td>
         <td class="market detail-col">${mkt}</td>
@@ -778,6 +783,8 @@ document.getElementById('btn-full').addEventListener('click', exportFull);
 const SNAPSHOT_URL = 'https://firebasestorage.googleapis.com/v0/b/geodis-dr.firebasestorage.app/o/snapshots%2Flatest.json?alt=media';
 // Shared notes API (badge -> note), served by the Cloud Function.
 const NOTES_URL = 'https://syncreport-eusvh7xq5q-uc.a.run.app/?notes=1';
+// Shared status-override API (badge -> action), persistent until corrected.
+const OVERRIDES_URL = 'https://syncreport-eusvh7xq5q-uc.a.run.app/?overrides=1';
 
 let syncedSnapshot = null;
 
@@ -804,12 +811,63 @@ async function saveNote(badge, note){
     alert('That note could not be saved (network or permission issue), so it may not be shared with others.');
   }
 }
-// Save a note when the user finishes editing it; auto-grow the box as they type.
+// Save a note on blur AND (debounced) as you type, so nothing is lost if you
+// refresh mid-edit. Auto-grow the box too.
+const noteTimers = {};
 document.getElementById('tbody').addEventListener('change', e=>{
   if(e.target.classList.contains('note-input')) saveNote(e.target.dataset.badge, e.target.value);
 });
 document.getElementById('tbody').addEventListener('input', e=>{
-  if(e.target.classList.contains('note-input')){ e.target.style.height='auto'; e.target.style.height=Math.min(e.target.scrollHeight,120)+'px'; }
+  if(!e.target.classList.contains('note-input')) return;
+  e.target.style.height='auto'; e.target.style.height=Math.min(e.target.scrollHeight,120)+'px';
+  const badge=e.target.dataset.badge, val=e.target.value;
+  clearTimeout(noteTimers[badge]);
+  noteTimers[badge]=setTimeout(()=>saveNote(badge, val), 700);
+});
+
+/* ---------- shared status overrides ---------- */
+// Overlay any manual overrides onto the computed action (persistent until reverted).
+function applyOverrides(){
+  S.records.forEach(r=>{
+    if(r.computedAction===undefined) r.computedAction=r.action;
+    const ov=S.overrides[r.badge];
+    r.action=(ov && ov.action)?ov.action:r.computedAction;
+    r.overridden=!!(ov && ov.action);
+  });
+}
+async function loadOverrides(){
+  try{
+    const res=await fetch(OVERRIDES_URL,{cache:'no-store'});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const data=await res.json();
+    S.overrides=(data && data.overrides)?data.overrides:{};
+  }catch(err){ console.warn('Could not load status overrides.', err); }
+  applyOverrides();
+  populateFilterOptions(); renderStats(); renderTable();
+}
+async function saveOverride(badge, action){
+  if(action==='') delete S.overrides[badge];
+  else S.overrides[badge]={ action:action, updatedAt:new Date().toISOString() };
+  applyOverrides();
+  populateFilterOptions(); renderStats(); renderTable();
+  try{
+    const res=await fetch(OVERRIDES_URL,{method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({badge:badge, action:action})});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+  }catch(err){ console.warn('Could not save status override for '+badge, err); alert('That status change could not be saved (network or permission issue).'); }
+}
+// Click the ✎ to turn the status chip into a dropdown; pick a value to save.
+document.getElementById('tbody').addEventListener('click', e=>{
+  const btn=e.target.closest('.edit-status'); if(!btn) return;
+  const badge=btn.dataset.badge, cell=btn.closest('td'), r=S.records.find(x=>x.badge===badge);
+  if(!r) return;
+  const opts=Object.keys(ACTIONS).map(k=>`<option value="${k}" ${r.action===k?'selected':''}>${esc(ACTIONS[k].label)}</option>`).join('');
+  const revert=r.overridden?'<option value="__auto">↺ Revert to auto</option>':'';
+  cell.innerHTML=`<select class="status-select" data-badge="${esc(badge)}">${opts}${revert}</select>`;
+  const sel=cell.querySelector('select'); sel.focus();
+});
+document.getElementById('tbody').addEventListener('change', e=>{
+  if(!e.target.classList.contains('status-select')) return;
+  saveOverride(e.target.dataset.badge, e.target.value==='__auto'?'':e.target.value);
 });
 
 async function loadSyncedSnapshot(){
@@ -845,6 +903,7 @@ function showSyncedResults(){
   renderStats();
   renderTable();
   loadNotes();
+  loadOverrides();
 }
 function showUploadSection(){
   document.getElementById('sync-banner').classList.toggle('hidden', !syncedSnapshot);

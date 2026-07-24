@@ -44,6 +44,7 @@ const RAW_PATH = {
 };
 const SNAPSHOT_PATH = 'snapshots/latest.json';
 const NOTES_PATH = 'notes/notes.json';
+const OVERRIDES_PATH = 'overrides/overrides.json';   // badge -> manual status override
 const NOTES_ORIGIN = 'https://geodis.ebtools.pro';   // the tool's front-end origin
 
 async function readRawFile(type) {
@@ -56,44 +57,49 @@ async function readRawFile(type) {
   }
 }
 
-/* ---------- shared notes (badge -> { note, updatedAt }) ----------
+/* ---------- shared, badge-keyed stores (notes + status overrides) ----------
    Read from the browser (public), written from the browser. There is no per-user
    auth (the whole tool is unauthenticated), so writes are gated only by CORS +
-   an Origin check + payload limits. Fine for internal, low-sensitivity notes;
+   an Origin check + payload limits. Fine for internal, low-sensitivity data;
    harden with Firebase Auth if that ever changes. */
-async function readNotes() {
+async function readJsonFile(path) {
   try {
-    const [buf] = await bucket.file(NOTES_PATH).download();
+    const [buf] = await bucket.file(path).download();
     return JSON.parse(buf.toString());
   } catch (err) {
     return {};
   }
 }
-function setNotesCors(res) {
+function setKvCors(res) {
   res.set('Access-Control-Allow-Origin', NOTES_ORIGIN);
   res.set('Vary', 'Origin');
   res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.set('Access-Control-Allow-Headers', 'Content-Type');
   res.set('Access-Control-Max-Age', '3600');
 }
-async function handleNotes(req, res) {
-  setNotesCors(res);
+// Generic badge -> { <field>, updatedAt } store. Empty value deletes the entry.
+// opts: { path, field, responseKey, maxLen, allowed? (whitelist of valid values) }
+async function handleKv(req, res, opts) {
+  setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
   if (req.method === 'GET') {
     res.set('Cache-Control', 'no-cache, max-age=0');
-    res.status(200).json({ ok: true, notes: await readNotes() });
+    res.status(200).json({ ok: true, [opts.responseKey]: await readJsonFile(opts.path) });
     return;
   }
   if (req.method === 'POST') {
     if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
     const badge = req.body && req.body.badge != null ? String(req.body.badge).trim() : '';
-    let note = req.body && req.body.note != null ? String(req.body.note) : '';
+    let value = req.body && req.body[opts.field] != null ? String(req.body[opts.field]) : '';
     if (!badge || badge.length > 64) { res.status(400).json({ ok: false, error: 'Missing/invalid badge' }); return; }
-    if (note.length > 1000) note = note.slice(0, 1000);
-    const notes = await readNotes();
-    if (note.trim() === '') delete notes[badge];
-    else notes[badge] = { note: note, updatedAt: new Date().toISOString() };
-    await bucket.file(NOTES_PATH).save(JSON.stringify(notes), {
+    if (value.length > opts.maxLen) value = value.slice(0, opts.maxLen);
+    if (opts.allowed && value.trim() !== '' && opts.allowed.indexOf(value.trim()) === -1) {
+      res.status(400).json({ ok: false, error: 'Invalid ' + opts.field }); return;
+    }
+    const store = await readJsonFile(opts.path);
+    if (value.trim() === '') delete store[badge];
+    else store[badge] = { [opts.field]: value, updatedAt: new Date().toISOString() };
+    await bucket.file(opts.path).save(JSON.stringify(store), {
       contentType: 'application/json',
       metadata: { cacheControl: 'no-cache, max-age=0' }
     });
@@ -112,8 +118,15 @@ function parseToState(buffer, side) {
 
 exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, async (req, res) => {
   try {
-    // Shared-notes API (browser). Separate from the Power Automate sync path.
-    if (req.query.notes !== undefined) { await handleNotes(req, res); return; }
+    // Shared browser stores (notes + status overrides). Separate from the sync path.
+    if (req.query.notes !== undefined) {
+      await handleKv(req, res, { path: NOTES_PATH, field: 'note', responseKey: 'notes', maxLen: 1000 });
+      return;
+    }
+    if (req.query.overrides !== undefined) {
+      await handleKv(req, res, { path: OVERRIDES_PATH, field: 'action', responseKey: 'overrides', maxLen: 40, allowed: Object.keys(Core.ACTIONS) });
+      return;
+    }
 
     if (req.method !== 'POST') { res.status(405).send('POST only'); return; }
 

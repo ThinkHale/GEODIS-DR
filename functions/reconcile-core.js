@@ -232,12 +232,36 @@
     tokens.sort();
     return tokens.join(' ');
   }
+  function ratio(a, b) {
+    var m = Math.max(a.length, b.length);
+    return m === 0 ? 1 : 1 - levenshtein(a, b) / m;
+  }
   function nameSimilarity(a, b) {
     var na = normalizeNameForMatch(a), nb = normalizeNameForMatch(b);
     if (na === '' || nb === '') return 0;
-    var dist = levenshtein(na, nb);
-    var maxLen = Math.max(na.length, nb.length);
-    return maxLen === 0 ? 1 : 1 - dist / maxLen;
+    // Full-string ratio: tolerant of typos and word order (tokens are sorted).
+    var full = ratio(na, nb);
+    // Token-subset ratio: handles extra middle names, e.g. "Juan Carlos Lozano"
+    // vs "Juan Lozano". Match each token of the SHORTER name to its best (fuzzy)
+    // token in the longer name. Require >= 2 tokens so a lone first name can't
+    // match everyone who shares it.
+    var ta = na.split(' '), tb = nb.split(' ');
+    var shorter = ta.length <= tb.length ? ta : tb;
+    var longer = ta.length <= tb.length ? tb : ta;
+    var tokenScore = 0;
+    if (shorter.length >= 2) {
+      var sum = 0;
+      shorter.forEach(function (t) {
+        var best = 0;
+        longer.forEach(function (u) {
+          var s = ratio(t, u);
+          if (s > best) best = s;
+        });
+        sum += best;
+      });
+      tokenScore = sum / shorter.length;
+    }
+    return Math.max(full, tokenScore);
   }
 
   /* ---------- badge-change (rehire) detection ---------- */

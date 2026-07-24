@@ -5,7 +5,20 @@
       "Bash(node -e ' *)",
       "Bash(git add *)",
       "Bash(git commit -q -m 'Function: unwrap Power Automate double-base64-encoded uploads *)",
-      "Bash(firebase deploy *)"
+      "Bash(firebase deploy *)",
+      "Bash(curl -s -D - -o /dev/null -X OPTIONS https://syncreport-eusvh7xq5q-uc.a.run.app/?notes=1 -H 'Origin: https://geodis.ebtools.pro' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type')",
+      "Bash(grep -iE \"HTTP/|access-control|^$\")",
+      "Bash(curl -s -D - -o /dev/null \"https://syncreport-eusvh7xq5q-uc.a.run.app/?notes=1\" -H \"Origin: https://geodis.ebtools.pro\")",
+      "Bash(curl -s https://geodis.ebtools.pro/index.html?v=__CMDSUB_OUTPUT__)",
+      "Read(//tmp/**)",
+      "Bash(node -e 'const fs=require\\(\"fs\"\\);const h=fs.readFileSync\\(\"index.html\",\"utf8\"\\);const s=[...h.matchAll\\(/<script>\\([\\\\s\\\\S]*?\\)<\\\\/script>/g\\)].map\\(m=>m[1]\\);fs.writeFileSync\\(\"/tmp/app.js\",s[s.length-1]\\);')",
+      "Bash(node --check /tmp/app.js)",
+      "Bash(git commit -q -m 'Add per-person status override + notes save-as-you-type *)",
+      "Bash(curl -s -w ' [%{http_code}]\\\\n' https://syncreport-eusvh7xq5q-uc.a.run.app/?overrides=1)",
+      "Bash(curl -s -w ' [%{http_code}]\\\\n' -X POST https://syncreport-eusvh7xq5q-uc.a.run.app/?overrides=1 -H 'Content-Type: application/json' -H 'Origin: https://geodis.ebtools.pro' -d '{\"badge\":\"OVTEST\",\"action\":\"addBadge\"}')",
+      "Bash(curl -s -w ' [%{http_code}]\\\\n' -X POST https://syncreport-eusvh7xq5q-uc.a.run.app/?overrides=1 -H 'Content-Type: application/json' -H 'Origin: https://geodis.ebtools.pro' -d '{\"badge\":\"OVTEST\",\"action\":\"notARealAction\"}')",
+      "Bash(curl -s -w ' [%{http_code}]\\\\n' -X POST https://syncreport-eusvh7xq5q-uc.a.run.app/?overrides=1 -H 'Content-Type: application/json' -H 'Origin: https://evil.example' -d '{\"badge\":\"X\",\"action\":\"matched\"}')",
+      "Bash(curl -s -w ' [%{http_code}]\\\\n' -X POST https://syncreport-eusvh7xq5q-uc.a.run.app/?overrides=1 -H 'Content-Type: application/json' -H 'Origin: https://geodis.ebtools.pro' -d '{\"badge\":\"OVTEST\",\"action\":\"\"}')"
     ]
   }
 }

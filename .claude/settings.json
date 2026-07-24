@@ -18,7 +18,8 @@
       "Bash(curl -s -w ' [%{http_code}]\\\\n' -X POST https://syncreport-eusvh7xq5q-uc.a.run.app/?overrides=1 -H 'Content-Type: application/json' -H 'Origin: https://geodis.ebtools.pro' -d '{\"badge\":\"OVTEST\",\"action\":\"addBadge\"}')",
       "Bash(curl -s -w ' [%{http_code}]\\\\n' -X POST https://syncreport-eusvh7xq5q-uc.a.run.app/?overrides=1 -H 'Content-Type: application/json' -H 'Origin: https://geodis.ebtools.pro' -d '{\"badge\":\"OVTEST\",\"action\":\"notARealAction\"}')",
       "Bash(curl -s -w ' [%{http_code}]\\\\n' -X POST https://syncreport-eusvh7xq5q-uc.a.run.app/?overrides=1 -H 'Content-Type: application/json' -H 'Origin: https://evil.example' -d '{\"badge\":\"X\",\"action\":\"matched\"}')",
-      "Bash(curl -s -w ' [%{http_code}]\\\\n' -X POST https://syncreport-eusvh7xq5q-uc.a.run.app/?overrides=1 -H 'Content-Type: application/json' -H 'Origin: https://geodis.ebtools.pro' -d '{\"badge\":\"OVTEST\",\"action\":\"\"}')"
+      "Bash(curl -s -w ' [%{http_code}]\\\\n' -X POST https://syncreport-eusvh7xq5q-uc.a.run.app/?overrides=1 -H 'Content-Type: application/json' -H 'Origin: https://geodis.ebtools.pro' -d '{\"badge\":\"OVTEST\",\"action\":\"\"}')",
+      "Bash(git commit -q -m 'Name matching: handle extra middle names via token-subset scoring *)"
     ]
   }
 }

@@ -602,7 +602,8 @@ function renderTable(){
     }).join('');
   }
   document.querySelectorAll('thead th').forEach(th=>{
-    th.querySelector('.arrow').textContent = (th.dataset.sort===S.sortKey)?(S.sortDir===1?'▲':'▼'):'';
+    const arrow = th.querySelector('.arrow');   // non-sortable cols (Notes) have none
+    if(arrow) arrow.textContent = (th.dataset.sort===S.sortKey)?(S.sortDir===1?'▲':'▼'):'';
   });
 }
 function esc(s){ return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }

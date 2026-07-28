@@ -511,6 +511,7 @@
         market = learned || 'Other';
         if (!learned && crmRec) marketRaw = crmRec.city;
       }
+      var beeFull_rec = beeFull.get(badge);
       records.push({
         badge: badge,
         empNumber: crmRec ? (crmRec.emp || '') : '',
@@ -518,6 +519,7 @@
         crmStart: inCrm ? ci.map.get(badge).start : null,
         beeName: inBee ? bi.map.get(badge).name : '',
         beeStart: inBee ? bi.map.get(badge).start : null,
+        beeEnd: beeFull_rec ? beeFull_rec.end : null,
         market: market,
         marketVerified: marketVerified,
         marketRaw: marketRaw,

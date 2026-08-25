@@ -44,7 +44,9 @@
     view: new URLSearchParams(location.search).get('view') || 'overview',
     profileBadge: null,
     query: '',
-    market: 'all',
+    market: (function () {
+      try { return localStorage.getItem('badgeCrosscheck.market') || 'all'; } catch (e) { return 'all'; }
+    })(),
     statusFilter: 'Active',
     records: null,          // null = snapshot has not arrived yet
     notes: {},              // shared badge -> note, published with the roster
@@ -66,6 +68,25 @@
       storedWeek: null, storedDay: null, saving: '', savedAt: ''
     }
   };
+
+  /* The reconciliation view has had its own market filter since before the suite
+     existed, persisted under this key. Both pickers now drive the same value, so
+     choosing a market in the header scopes the reconciliation table too, and the
+     choice survives a reload. */
+  var MARKET_KEY = 'badgeCrosscheck.market';
+  function setMarket(m, fromRecon) {
+    if (state.market === m) return;
+    state.market = m;
+    try { localStorage.setItem(MARKET_KEY, m); } catch (e) { /* private mode */ }
+    if (!fromRecon) {
+      document.dispatchEvent(new CustomEvent('geodis:market', { detail: { market: m, source: 'suite' } }));
+    }
+    render();
+  }
+  document.addEventListener('geodis:market', function (e) {
+    if (!e.detail || e.detail.source === 'suite') return;
+    setMarket(e.detail.market, true);
+  });
 
   var root = document.getElementById('suite-root');
   var esc = function (s) {
@@ -91,19 +112,46 @@
       performance: state.stores.performance,
       notes: state.notes
     });
+    validateMarket();
   }
   function allProfiles() { return Array.from(state.profiles.values()); }
+  /* A market persisted from an earlier session can outlive the snapshot that had
+     it. Without this the picker reads "All markets" (no option matches, so none
+     is selected) while every view silently filters to nothing. */
+  function validateMarket() {
+    if (state.market === 'all' || !state.profiles.size) return;
+    if (markets().indexOf(state.market) === -1) state.market = 'all';
+  }
   function profile(badge) { return state.profiles.get(SuiteData.normBadge(badge)) || null; }
   function markets() {
     var set = new Set();
     allProfiles().forEach(function (p) { if (p.market) set.add(p.market); });
     return Array.from(set).sort();
   }
+  /* ---------- market scoping ----------
+     The header's market picker scopes the WHOLE tool, so every view reads its
+     data through these rather than off state.stores directly. A market of 'all'
+     returns everything, so they are safe to call unconditionally. */
+  function inMarket(p) { return state.market === 'all' || (!!p && p.market === state.market); }
+  function profilesInMarket() { return allProfiles().filter(inMarket); }
+  // Records keyed by badge: a row whose badge is not on the roster has no market
+  // of its own. Attendance surfaces those separately in its orphan banner.
+  function byBadgeInMarket(rows) {
+    if (state.market === 'all') return rows;
+    return rows.filter(function (r) { return inMarket(profile(r.badge)); });
+  }
+  // A requisition carries its own market, and one with none is a position that
+  // has not been assigned to a branch yet -- it stays visible everywhere.
+  function requisitionsInMarket() {
+    if (state.market === 'all') return state.stores.requisitions;
+    return state.stores.requisitions.filter(function (r) { return !r.market || r.market === state.market; });
+  }
+
   // The roster subset the module tabs operate on: market, status, then search.
   function roster() {
     var q = state.query.trim().toLowerCase();
     return allProfiles().filter(function (p) {
-      if (state.market !== 'all' && p.market !== state.market) return false;
+      if (!inMarket(p)) return false;
       if (state.statusFilter !== 'all' && p.status !== state.statusFilter) return false;
       if (!q) return true;
       return (p.name + ' ' + p.badge + ' ' + p.empNumber + ' ' + p.market).toLowerCase().indexOf(q) !== -1;
@@ -210,11 +258,14 @@
   /* ---------- overview ---------- */
   function overview() {
     if (!state.records) return needsRoster();
-    var all = allProfiles();
+    // Everything below is scoped to the selected market -- see profilesInMarket().
+    var all = profilesInMarket();
+    var timeOff = byBadgeInMarket(state.stores.timeOff);
+    var reqs = requisitionsInMarket();
     var active = all.filter(function (p) { return p.status === 'Active'; });
     var exceptions = all.filter(function (p) { return !p.reconciled; }).length;
-    var pending = state.stores.timeOff.filter(function (t) { return t.status === 'Pending'; }).length;
-    var open = state.stores.requisitions.filter(function (r) { return r.status !== 'Filled'; })
+    var pending = timeOff.filter(function (t) { return t.status === 'Pending'; }).length;
+    var open = reqs.filter(function (r) { return r.status !== 'Filled'; })
       .reduce(function (n, r) { return n + Math.max(0, Number(r.openings || 0) - Number(r.filled || 0)); }, 0);
     var atRisk = all.filter(function (p) { return p.points >= 5; }).length;
 
@@ -230,11 +281,11 @@
       t.html + '</section>' +
       '<section class="suite-panel"><div class="suite-panel-head"><h2>Staffing &amp; requisition coverage</h2>' +
       '<div class="suite-actions"><button class="suite-btn" data-nav="requisitions">View requisitions</button></div></div>' +
-      (state.stores.requisitions.length ? reqTable(state.stores.requisitions.slice(0, 5), true) : empty('No requisitions yet')) +
+      (reqs.length ? reqTable(reqs.slice(0, 5), true) : empty('No requisitions yet')) +
       '</section></div><div class="suite-stack">' +
       '<section class="suite-panel"><div class="suite-panel-head"><h2>Time off activity</h2>' +
       '<div class="suite-actions"><button class="suite-btn" data-nav="timeoff">View all</button></div></div>' +
-      (state.stores.timeOff.length ? state.stores.timeOff.slice(0, 6).map(activityRow).join('') : empty('No time-off activity')) +
+      (timeOff.length ? timeOff.slice(0, 6).map(activityRow).join('') : empty('No time-off activity')) +
       '</section><section class="suite-panel"><div class="suite-panel-head"><h2>Operational action queue</h2></div>' +
       alertRow(exceptions, 'Assignment reconciliation exceptions', 'reconciliation') +
       alertRow(pending, 'Pending time-off approvals', 'timeoff') +
@@ -248,9 +299,10 @@
      attendance data the panel says so rather than drawing an invented line. */
   function trend() {
     var days = [], any = false;
+    var events = byBadgeInMarket(state.stores.attendance);
     for (var i = 6; i >= 0; i--) {
       var date = daysBack(i);
-      var rows = state.stores.attendance.filter(function (a) { return a.date === date; });
+      var rows = events.filter(function (a) { return a.date === date; });
       if (rows.length) any = true;
       var bad = rows.filter(function (a) { return a.type === 'Absent' || a.type === 'No Call / No Show'; }).length;
       days.push({ date: date, total: rows.length, rate: rows.length ? Math.round((rows.length - bad) / rows.length * 100) : null });
@@ -667,6 +719,10 @@
   function covFilter(rows) {
     var c = state.coverage, q = state.query.trim().toLowerCase();
     return rows.filter(function (r) {
+      // A row that never reached the roster has no market of its own. It stays
+      // visible rather than vanishing on a market change -- this is the view
+      // whose whole job is surfacing people who are not where they should be.
+      if (state.market !== 'all' && r.market && r.market !== state.market) return false;
       if (c.location !== 'all' && locLeaf(r.location) !== c.location) return false;
       if (c.statusFilter === 'exceptions') { if (r.severity !== 'bad' && r.severity !== 'warn') return false; }
       else if (c.statusFilter === 'onshift') { if (!ScheduleCore.STATUS[r.status].onShift) return false; }
@@ -856,7 +912,7 @@
     var q = state.query.trim().toLowerCase();
     var all = state.stores.attendance.filter(function (a) {
       var p = profile(a.badge);
-      if (state.market !== 'all' && (!p || p.market !== state.market)) return false;
+      if (!inMarket(p)) return false;
       if (!q) return true;
       return ((p ? p.name : '') + ' ' + a.badge + ' ' + a.type + ' ' + a.date).toLowerCase().indexOf(q) !== -1;
     }).sort(function (a, b) { return String(b.date || '').localeCompare(String(a.date || '')); });
@@ -891,7 +947,7 @@
     var q = state.query.trim().toLowerCase();
     var all = state.stores.timeOff.filter(function (t) {
       var p = profile(t.badge);
-      if (state.market !== 'all' && (!p || p.market !== state.market)) return false;
+      if (!inMarket(p)) return false;
       if (!q) return true;
       return ((p ? p.name : '') + ' ' + t.badge + ' ' + t.type + ' ' + t.status).toLowerCase().indexOf(q) !== -1;
     }).sort(function (a, b) { return String(b.start || '').localeCompare(String(a.start || '')); });
@@ -943,8 +999,7 @@
   function requisitions() {
     if (!state.storesLoaded) return loadingPanel('requisitions');
     var q = state.query.trim().toLowerCase();
-    var rows = state.stores.requisitions.filter(function (r) {
-      if (state.market !== 'all' && r.market && r.market !== state.market) return false;
+    var rows = requisitionsInMarket().filter(function (r) {
       if (!q) return true;
       return (r.id + ' ' + r.title + ' ' + r.department + ' ' + r.shift + ' ' + r.priority + ' ' + r.status).toLowerCase().indexOf(q) !== -1;
     });
@@ -1191,7 +1246,7 @@
     if (i) { i.focus(); i.setSelectionRange(state.query.length, state.query.length); }
   });
   root.addEventListener('change', function (e) {
-    if (e.target.id === 'market-picker') { state.market = e.target.value; render(); }
+    if (e.target.id === 'market-picker') { setMarket(e.target.value); }
     if (e.target.id === 'status-filter') { state.statusFilter = e.target.value; render(); }
 
     var cov = e.target.closest('[data-cov]');

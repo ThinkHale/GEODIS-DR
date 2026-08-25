@@ -512,6 +512,12 @@ function populateMarketOptions(){
   sel.innerHTML=opts.join('');
   const valid=[...sel.options].some(o=>o.value===S.marketFilter);
   sel.value = valid ? S.marketFilter : 'all';
+  // Dropping an unknown market has to reach the suite too, or the two views
+  // disagree about what is being filtered.
+  if(S.marketFilter !== sel.value){
+    S.marketFilter = sel.value;
+    document.dispatchEvent(new CustomEvent('geodis:market', {detail:{market:S.marketFilter, source:'recon'}}));
+  }
   S.marketFilter = sel.value;
 }
 function renderStats(){
@@ -771,9 +777,20 @@ document.querySelectorAll('.drop').forEach(drop=>{
 });
 document.addEventListener('click', ()=>document.querySelectorAll('.ms-panel').forEach(p=>p.classList.add('hidden')));
 
+// Kept in step with the suite header's market picker -- one market, both views.
+document.addEventListener('geodis:market', e=>{
+  if(!e.detail || e.detail.source==='recon') return;
+  if(S.marketFilter===e.detail.market) return;
+  S.marketFilter=e.detail.market;
+  try{ localStorage.setItem('badgeCrosscheck.market', S.marketFilter); }catch(err){}
+  const sel=document.getElementById('marketSelect');
+  if(sel && [...sel.options].some(o=>o.value===S.marketFilter)) sel.value=S.marketFilter;
+  populateFilterOptions(); renderStats(); renderTable();
+});
 document.getElementById('marketSelect').addEventListener('change', e=>{
   S.marketFilter=e.target.value;
   try{ localStorage.setItem('badgeCrosscheck.market', S.marketFilter); }catch(err){}
+  document.dispatchEvent(new CustomEvent('geodis:market', {detail:{market:S.marketFilter, source:'recon'}}));
   populateFilterOptions(); renderStats(); renderTable();
 });
 document.getElementById('filterSelect').addEventListener('change', e=>{ S.filterKey=e.target.value; renderTable(); });

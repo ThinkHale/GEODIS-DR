@@ -75,6 +75,21 @@ setTimeout(()=>{
   t('nothing written to localStorage', w.localStorage.length===0);
   t('point landed on the profile', w.GEODISSuite.profile('1001').points===1);
   t('standing recomputed', w.GEODISSuite.profile('1001').standing==='Good standing');
+
+  console.log('— one market across both views —');
+  click($('[data-nav="overview"]'));
+  const mp=$('#market-picker');
+  t('header picker offers the snapshot markets', mp.textContent.indexOf('Atlanta')!==-1);
+  mp.value='Atlanta'; mp.dispatchEvent(new w.Event('change',{bubbles:true}));
+  t('suite scoped to Atlanta', w.GEODISSuite.state.market==='Atlanta');
+  t("reconciliation's own select followed", $('#marketSelect').value==='Atlanta');
+  t('its table re-rendered under that market',
+    Array.from($('#tbody').querySelectorAll('tr')).every(tr=>tr.textContent.indexOf('Dallas')===-1));
+  // Now drive it from the reconciliation side.
+  const ms=$('#marketSelect'); ms.value='Dallas'; ms.dispatchEvent(new w.Event('change',{bubbles:true}));
+  t('choosing there updates the suite', w.GEODISSuite.state.market==='Dallas');
+  t('header picker followed', $('#market-picker').value==='Dallas');
+  t('persisted once, under one key', w.localStorage.getItem('badgeCrosscheck.market')==='Dallas');
   console.log('\n'+pass+' passed, '+fail+' failed');
   process.exit(fail?1:0);
 },40);

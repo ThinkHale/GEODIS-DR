@@ -12,6 +12,7 @@ try { require.resolve('jsdom'); } catch (e) { hasJsdom = false; }
 const SUITES = [
   { file: 'spine.test.js', name: 'associate spine (suite-data.js)', dom: false },
   { file: 'collections.test.js', name: 'shared collections (functions/index.js)', dom: false },
+  { file: 'coverage.test.js', name: 'schedule vs. on-premise coverage (schedule-core.js)', dom: false },
   { file: 'suite-ui.test.js', name: 'suite modules + reconciliation mount', dom: true },
   { file: 'page.test.js', name: 'index.html end to end', dom: true }
 ];

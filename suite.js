@@ -18,8 +18,9 @@
   };
   var TIME_OFF_TYPES = ['PTO', 'VTO', 'Sick', 'Personal', 'LOA'];
   var NAV = [
-    ['overview', 'Overview'], ['associates', 'Associates'], ['attendance', 'Attendance'],
-    ['timeoff', 'Time Off'], ['requisitions', 'Requisitions'], ['reconciliation', 'Assignment Reconciliation']
+    ['overview', 'Overview'], ['associates', 'Associates'], ['coverage', 'Coverage'],
+    ['attendance', 'Attendance'], ['timeoff', 'Time Off'], ['requisitions', 'Requisitions'],
+    ['reconciliation', 'Assignment Reconciliation']
   ];
 
   var state = {
@@ -33,7 +34,15 @@
     updatedAt: null,
     profiles: new Map(),
     stores: { attendance: [], timeOff: [], requisitions: [], performance: [] },
-    storesLoaded: false
+    storesLoaded: false,
+    // Coverage inputs are uploaded reports, not shared collections: the schedule
+    // lands weekly, the on-premise snapshot several times a day.
+    coverage: {
+      schedule: null, presence: null,
+      scheduleFile: '', presenceFile: '',
+      asOf: null, grace: ScheduleCore.GRACE_MINUTES,
+      statusFilter: 'exceptions', location: 'all'
+    }
   };
 
   var root = document.getElementById('suite-root');
@@ -84,6 +93,7 @@
     return {
       overview: '<path d="M3 11l9-8 9 8v9a1 1 0 01-1 1h-5v-7H9v7H4a1 1 0 01-1-1z"/>',
       associates: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0116 0"/>',
+      coverage: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
       attendance: '<rect x="3" y="5" width="18" height="16" rx="1"/><path d="M8 3v4m8-4v4M3 10h18m-13 5l2 2 5-5"/>',
       timeoff: '<path d="M3 12a9 9 0 0118 0H3zm9 0v9m-4 0h8"/>',
       requisitions: '<path d="M6 3h9l4 4v14H6zM14 3v5h5M9 13h7M9 17h7"/>',
@@ -106,6 +116,7 @@
       overview: ['Overview', 'Workforce command center'],
       associates: ['Associates', 'Roster, scorecards, and profile detail'],
       profile: ['Associate Profile', 'Assignment, attendance, time off, and performance'],
+      coverage: ['Coverage', 'Scheduled shifts vs. who is actually on premise'],
       attendance: ['Attendance', 'Occurrences and points'],
       timeoff: ['Time Off', 'PTO and VTO tracking'],
       requisitions: ['Requisitions', 'Staffing demand and fulfillment'],
@@ -345,6 +356,261 @@
     return '<dt>' + esc(label) + '</dt><dd>' + esc(value) + '</dd>';
   }
 
+  /* ---------- coverage ----------
+     The weekly schedule is the plan; the on-premise export is the fact. Crossing
+     them answers the question a supervisor actually asks at 11am: is the person who
+     is supposed to be on the floor here?
+
+     The two files move at different speeds -- the schedule lands once a week, the
+     on-premise report is re-pulled several times a day -- so the parsed schedule is
+     kept for the browser session and only the CSV has to be dropped again on the
+     second and third pass. Session, not localStorage: a stale week's schedule must
+     never quietly outlive its period. The period is checked against the as-of date
+     as well, and reported when it does not cover it.
+
+     All of the matching lives in schedule-core.js, the same way the Beeline/RC
+     crosscheck lives in reconcile-core.js, so an automated import can reuse it
+     without going through the DOM. */
+  var SCHED_CACHE = 'geodis:schedule';
+
+  function cacheSchedule(parsed, fileName) {
+    try { sessionStorage.setItem(SCHED_CACHE, JSON.stringify({ parsed: parsed, fileName: fileName })); }
+    catch (e) { /* private mode or quota: the schedule just will not survive a reload */ }
+  }
+  function restoreSchedule() {
+    try {
+      var raw = sessionStorage.getItem(SCHED_CACHE);
+      if (!raw) return;
+      var v = JSON.parse(raw);
+      if (!v || !v.parsed || !Array.isArray(v.parsed.people) || !v.parsed.people.length) return;
+      state.coverage.schedule = v.parsed;
+      state.coverage.scheduleFile = v.fileName || '';
+    } catch (e) { /* corrupt cache: start clean rather than render garbage */ }
+  }
+
+  function locLeaf(path) {
+    var parts = String(path || '').split('/').filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : '';
+  }
+  function dtValue(d) {
+    var p = function (n) { return String(n).padStart(2, '0'); };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+      'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+  function coverageAsOf() { return state.coverage.asOf || new Date(); }
+
+  function buildCoverageResult() {
+    var c = state.coverage;
+    if (!c.schedule || !c.presence) return null;
+    var res = ScheduleCore.buildCoverage({
+      schedule: c.schedule, presence: c.presence,
+      asOf: coverageAsOf(), graceMinutes: c.grace
+    });
+    // Reach from each row to its roster profile so a supervisor can go straight to
+    // attendance and time off from an exception.
+    ScheduleCore.linkRoster(res.rows, state.profiles, SuiteData.normBadge);
+    return res;
+  }
+
+  function covDrop(kind, step, title, desc, fileName, meta) {
+    return '<section class="suite-panel source-panel"><div class="source-step">' + step + '</div>' +
+      '<h3>' + esc(title) + '</h3><p>' + esc(desc) + '</p>' +
+      (fileName ? '<div class="cov-file"><strong>' + esc(fileName) + '</strong><span>' + esc(meta) + '</span></div>' : '') +
+      '<label class="suite-btn ' + (fileName ? '' : 'primary') + ' cov-pick">' +
+      (fileName ? 'Replace file' : 'Choose file') +
+      '<input type="file" accept=".xlsx,.xls,.csv" data-cov="' + kind + '"></label></section>';
+  }
+
+  function covSources() {
+    var c = state.coverage;
+    var schedMeta = '', presMeta = '';
+    if (c.schedule) {
+      schedMeta = c.schedule.people.length + ' associates · week of ' +
+        (c.schedule.periodStart || '?') + ' to ' + (c.schedule.periodEnd || '?');
+    }
+    if (c.presence) {
+      var on = c.presence.people.filter(function (p) { return p.present; }).length;
+      presMeta = c.presence.people.length + ' associates · ' + on + ' on premise';
+    }
+    return '<div class="cov-sources">' +
+      covDrop('schedule', 1, 'Weekly schedule',
+        'The "Employee Schedule - Weekly" export (.xlsx). Load it once a week — it is kept for this browser session.',
+        c.scheduleFile, schedMeta) +
+      covDrop('presence', 2, 'On premise now',
+        'The "On Premise - Simple" export (.csv). Drop a fresh one any time to re-check the floor.',
+        c.presenceFile, presMeta) +
+      '</div>';
+  }
+
+  // The on-premise rows carry no timestamp of their own; the export time in the
+  // file name is the report's as-of, and everything downstream depends on it, so it
+  // is shown and editable rather than assumed.
+  function covControls(res) {
+    var c = state.coverage;
+    return '<section class="suite-panel"><div class="filter-row cov-controls">' +
+      '<label class="cov-ctl"><span>As of</span>' +
+      '<input class="suite-input" type="datetime-local" id="cov-asof" value="' + esc(dtValue(coverageAsOf())) + '"></label>' +
+      '<button class="suite-btn" data-cov-now="1">Now</button>' +
+      '<label class="cov-ctl"><span>Grace after start</span>' +
+      '<input class="suite-input cov-num" type="number" min="0" max="120" step="5" id="cov-grace" value="' + esc(c.grace) + '"> min</label>' +
+      '<span class="cov-asof-note">' + esc(coverageAsOf().toLocaleString()) + '</span>' +
+      '<button class="suite-btn danger" data-cov-clear="1">Clear files</button>' +
+      '</div></section>';
+  }
+
+  function covMetrics(s) {
+    var cov = s.coverage == null ? '—' : s.coverage + '%';
+    return '<div class="metric-strip">' +
+      metric('Coverage now', cov, s.byStatus.working + ' of ' + s.onShift + ' on-shift associates present',
+        s.coverage == null ? '' : s.coverage >= 90 ? 'green' : 'orange') +
+      metric('Working', s.byStatus.working, 'On shift and on premise', 'green') +
+      metric('Not clocked in', s.byStatus.missing, 'On shift, not on premise', s.byStatus.missing ? 'orange' : 'green') +
+      metric('Unscheduled', s.byStatus.unscheduled, 'On premise with no shift covering now', s.byStatus.unscheduled ? 'orange' : 'green') +
+      '</div>';
+  }
+
+  function covWarnings(res) {
+    var c = state.coverage, notes = [];
+    var day = ScheduleCore.isoDate(coverageAsOf());
+    if (c.schedule && c.schedule.periodStart && (day < c.schedule.periodStart || day > c.schedule.periodEnd)) {
+      notes.push('The loaded schedule covers ' + c.schedule.periodStart + ' to ' + c.schedule.periodEnd +
+        ', which does not include ' + day + '. Load the current week before acting on this.');
+    }
+    if (res.summary.noSchedule) {
+      notes.push(res.summary.noSchedule + ' associate(s) on the on-premise report have no row in the weekly schedule.');
+    }
+    if (res.summary.noPresence) {
+      notes.push(res.summary.noPresence + ' scheduled associate(s) are missing from the on-premise report entirely.');
+    }
+    (res.warnings || []).forEach(function (w) { notes.push(w); });
+    if (!notes.length) return '';
+    return '<div class="warn-banner cov-warn"><strong>Check these before acting on the numbers</strong><ul>' +
+      notes.slice(0, 12).map(function (n) { return '<li>' + esc(n) + '</li>'; }).join('') +
+      (notes.length > 12 ? '<li>…and ' + (notes.length - 12) + ' more.</li>' : '') + '</ul></div>';
+  }
+
+  function covFilters(res) {
+    var c = state.coverage;
+    var locs = {};
+    res.rows.forEach(function (r) { var l = locLeaf(r.location); if (l) locs[l] = (locs[l] || 0) + 1; });
+    var opts = [['exceptions', 'Exceptions only'], ['onshift', 'On shift now'], ['all', 'Everyone']]
+      .concat(ScheduleCore.STATUS_ORDER.map(function (k) {
+        return [k, ScheduleCore.STATUS[k].label + ' (' + res.summary.byStatus[k] + ')'];
+      }));
+    return '<div class="filter-row">' +
+      '<input class="suite-input" id="suite-search" value="' + esc(state.query) +
+      '" placeholder="Search by name, badge, employee id, or supervisor…">' +
+      '<select class="suite-select" id="cov-status">' + opts.map(function (o) {
+        return '<option value="' + o[0] + '" ' + (c.statusFilter === o[0] ? 'selected' : '') + '>' + esc(o[1]) + '</option>';
+      }).join('') + '</select>' +
+      '<select class="suite-select" id="cov-loc"><option value="all">All locations</option>' +
+      Object.keys(locs).sort().map(function (l) {
+        return '<option value="' + esc(l) + '" ' + (c.location === l ? 'selected' : '') + '>' + esc(l) + ' (' + locs[l] + ')</option>';
+      }).join('') + '</select></div>';
+  }
+
+  function covFilter(rows) {
+    var c = state.coverage, q = state.query.trim().toLowerCase();
+    return rows.filter(function (r) {
+      if (c.location !== 'all' && locLeaf(r.location) !== c.location) return false;
+      if (c.statusFilter === 'exceptions') { if (r.severity !== 'bad' && r.severity !== 'warn') return false; }
+      else if (c.statusFilter === 'onshift') { if (!ScheduleCore.STATUS[r.status].onShift) return false; }
+      else if (c.statusFilter !== 'all' && r.status !== c.statusFilter) return false;
+      if (!q) return true;
+      return (r.name + ' ' + r.badge + ' ' + r.wfmId + ' ' + r.manager + ' ' + r.job).toLowerCase().indexOf(q) !== -1;
+    });
+  }
+
+  function covShiftCell(r) {
+    if (r.dayCode) return '<span class="cov-code">' + esc(r.dayCode) + '</span>';
+    if (!r.shiftRaw) return '<span class="score none">Not scheduled</span>';
+    var flags = (r.overnight ? '<span class="cov-flag">overnight</span>' : '') +
+      (r.suspectShift ? '<span class="cov-flag bad" title="This shift length looks like a typo in the source report.">check</span>' : '');
+    var when = r.minutesIntoShift != null ? Math.floor(r.minutesIntoShift / 60) + 'h' + (r.minutesIntoShift % 60) + 'm in'
+      : r.minutesUntilShift != null ? 'starts in ' + Math.floor(r.minutesUntilShift / 60) + 'h' + (r.minutesUntilShift % 60) + 'm'
+      : '';
+    return '<div class="name">' + esc(r.shiftRaw) + ' ' + flags + '</div>' +
+      (when ? '<div class="sub">' + esc(when) + '</div>' : '');
+  }
+
+  function covTable(rows, total) {
+    return '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
+      '<th>Associate</th><th>Status</th><th>On premise</th><th>Scheduled shift</th>' +
+      '<th>Location</th><th>Job</th><th>Supervisor</th></tr></thead><tbody>' +
+      rows.slice(0, MAX_ROWS).map(function (r) {
+        // Only a row that reached a roster profile can open one.
+        var open = r.badge ? ' data-profile="' + esc(r.badge) + '"' : '';
+        var nameCls = r.badge ? 'name link' : 'name';
+        var sub = r.badge
+          ? 'Badge ' + esc(r.badge) + (r.rosterMatch === 'name' ? ' · matched by name' : '')
+          : esc(r.wfmId || 'No employee id');
+        return '<tr class="cov-row ' + r.severity + '">' +
+          '<td><div class="' + nameCls + '"' + open + '>' + esc(r.name) + '</div><div class="sub">' + sub +
+          (r.inSchedule ? '' : ' · no schedule row') + (r.ambiguous ? ' · duplicate name' : '') + '</div></td>' +
+          '<td><span class="cov-status ' + r.severity + '">' + esc(r.statusLabel) + '</span></td>' +
+          '<td>' + (r.present ? '<span class="cov-dot on">Yes</span>' : '<span class="cov-dot off">No</span>') + '</td>' +
+          '<td>' + covShiftCell(r) + '</td>' +
+          '<td>' + esc(locLeaf(r.location) || '—') + '</td>' +
+          '<td>' + esc(r.job || '—') + '</td>' +
+          '<td>' + esc(r.manager || '—') + '</td></tr>';
+      }).join('') + '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length);
+  }
+
+  function coverageView() {
+    var c = state.coverage;
+    var head = hero('Shift coverage', 'The weekly schedule crossed with the on-premise snapshot.') + covSources();
+    if (!c.schedule || !c.presence) {
+      var need = !c.schedule && !c.presence ? 'both reports'
+        : !c.schedule ? 'the weekly schedule export' : 'the on-premise export';
+      return head + '<section class="suite-panel"><div class="workflow-empty">' +
+        'Load ' + esc(need) + ' above to see who is scheduled right now and who is actually on premise.' +
+        '</div></section>';
+    }
+    var res = buildCoverageResult();
+    var rows = covFilter(res.rows);
+    return head + covControls(res) + covMetrics(res.summary) + covWarnings(res) +
+      '<section class="suite-panel">' + covFilters(res) +
+      (rows.length ? covTable(rows, res.rows.length)
+        : empty('Nothing matches those filters', 'Widen the status or location filter to see more.')) +
+      '</section>';
+  }
+
+  function readCoverageFile(file, kind) {
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      try {
+        var wb = XLSX.read(e.target.result, { type: 'array' });
+        var ws = wb.Sheets[wb.SheetNames[0]];
+        // raw:false keeps the day header as "8/25/2026" text, which is what maps a
+        // merged column to its date; cellDates would turn it into a Date and lose
+        // the alignment the parser depends on.
+        var aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+        if (kind === 'schedule') {
+          var parsed = ScheduleCore.parseSchedule(aoa);
+          if (!parsed.people.length) throw new Error('No employee rows were found. Is this the "Employee Schedule - Weekly" export?');
+          state.coverage.schedule = parsed;
+          state.coverage.scheduleFile = file.name;
+          cacheSchedule(parsed, file.name);
+        } else {
+          var pres = ScheduleCore.parseOnPremise(aoa);
+          if (!pres.people.length) {
+            throw new Error(pres.warnings[0] || 'No employee rows were found. Is this the "On Premise - Simple" export?');
+          }
+          state.coverage.presence = pres;
+          state.coverage.presenceFile = file.name;
+          // Each upload re-dates the check from the export time in the file name.
+          state.coverage.asOf = ScheduleCore.asOfFromFileName(file.name) || new Date();
+        }
+        render();
+      } catch (err) {
+        console.error(err);
+        alert('Could not read "' + file.name + '".\n\n' + err.message);
+      }
+    };
+    reader.onerror = function () { alert('Failed to read "' + file.name + '". Try again.'); };
+    reader.readAsArrayBuffer(file);
+  }
+
   /* ---------- attendance ---------- */
   function attendance() {
     if (!state.records) return needsRoster();
@@ -468,8 +734,8 @@
   /* ---------- render ---------- */
   var VIEWS = {
     overview: overview, associates: associates, profile: profileView,
-    attendance: attendance, timeoff: timeoff, requisitions: requisitions,
-    reconciliation: reconciliation
+    coverage: coverageView, attendance: attendance, timeoff: timeoff,
+    requisitions: requisitions, reconciliation: reconciliation
   };
   function render() {
     unmountRecon();   // rescue the reconciliation DOM before innerHTML wipes it
@@ -592,6 +858,17 @@
       if (t) persist('timeoff', { id: t.id, badge: t.badge, status: t.status === 'Pending' ? 'Approved' : 'Pending' }, 'timeOff');
       return;
     }
+    if (e.target.closest('[data-cov-now]')) { state.coverage.asOf = new Date(); render(); return; }
+    if (e.target.closest('[data-cov-clear]')) {
+      if (!confirm('Clear the loaded schedule and on-premise files?')) return;
+      state.coverage.schedule = state.coverage.presence = null;
+      state.coverage.scheduleFile = state.coverage.presenceFile = '';
+      state.coverage.asOf = null;
+      try { sessionStorage.removeItem(SCHED_CACHE); } catch (err) { /* nothing cached */ }
+      render();
+      return;
+    }
+
     var fill = e.target.closest('[data-fill]');
     if (fill) {
       var r = state.stores.requisitions.find(function (x) { return x.id === fill.dataset.fill; });
@@ -611,6 +888,20 @@
   root.addEventListener('change', function (e) {
     if (e.target.id === 'market-picker') { state.market = e.target.value; render(); }
     if (e.target.id === 'status-filter') { state.statusFilter = e.target.value; render(); }
+
+    var cov = e.target.closest('[data-cov]');
+    if (cov && cov.files && cov.files[0]) { readCoverageFile(cov.files[0], cov.dataset.cov); return; }
+    if (e.target.id === 'cov-status') { state.coverage.statusFilter = e.target.value; render(); }
+    if (e.target.id === 'cov-loc') { state.coverage.location = e.target.value; render(); }
+    if (e.target.id === 'cov-grace') {
+      var g = Number(e.target.value);
+      state.coverage.grace = isFinite(g) && g >= 0 ? g : ScheduleCore.GRACE_MINUTES;
+      render();
+    }
+    if (e.target.id === 'cov-asof') {
+      var d = new Date(e.target.value);
+      if (!isNaN(d.getTime())) { state.coverage.asOf = d; render(); }
+    }
   });
 
   // Picking an attendance type fills in that type's default point value.
@@ -662,6 +953,8 @@
     rebuild();
     render();
   });
+
+  restoreSchedule();
 
   SuiteData.loadAll().then(function (stores) {
     state.stores = stores;

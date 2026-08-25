@@ -63,3 +63,12 @@ body.suite-active>header,body.suite-active>main,body.suite-active>.foot{display:
 .detail-list dd{margin:0;color:var(--suite-text)}
 .activity-row[data-profile]{cursor:pointer}
 .alert-row[data-nav]{cursor:pointer}
+.cov-sources{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}.cov-sources .source-panel{padding:18px}.cov-file{display:flex;flex-direction:column;gap:2px;border:1px solid var(--suite-line);border-radius:6px;background:#f8fafc;padding:9px 11px;margin-bottom:11px}.cov-file strong{font:600 12px 'IBM Plex Mono';word-break:break-all}.cov-file span{font-size:10.5px;color:var(--suite-muted)}.cov-pick{display:inline-flex;align-items:center;cursor:pointer}.cov-pick input{display:none}
+.cov-controls{gap:14px}.cov-ctl{display:flex;align-items:center;gap:7px;font-size:10.5px;font-weight:600;color:var(--suite-muted);text-transform:uppercase}.cov-ctl .suite-input{min-width:0;text-transform:none}.cov-num{width:66px}.cov-asof-note{margin-left:auto;font:11px 'IBM Plex Mono';color:var(--suite-muted)}
+.cov-warn ul{margin:6px 0 0;padding-left:18px}.cov-warn li{margin-top:3px}
+.cov-status{font:700 10px 'Barlow Semi Condensed';text-transform:uppercase;letter-spacing:.3px;border:1px solid var(--suite-line);border-radius:4px;padding:3px 7px;display:inline-block;color:var(--suite-muted)}.cov-status.ok{color:var(--suite-green);border-color:#bfe3ce;background:#f2fbf6}.cov-status.warn{color:var(--suite-amber);border-color:#f2dcb4;background:#fffaf1}.cov-status.bad{color:var(--suite-red);border-color:#f0c6c6;background:#fff6f6}
+.cov-row.bad td{background:#fffafa}.cov-row.warn td{background:#fffcf6}.cov-row .link{cursor:pointer;color:var(--suite-blue)}.cov-row .link:hover{text-decoration:underline}
+.cov-dot{display:inline-flex;align-items:center;gap:5px;font:700 10.5px 'Barlow Semi Condensed';text-transform:uppercase}.cov-dot:before{content:"";width:7px;height:7px;border-radius:50%}.cov-dot.on{color:var(--suite-green)}.cov-dot.on:before{background:var(--suite-green)}.cov-dot.off{color:var(--suite-muted)}.cov-dot.off:before{background:#c2cbd6}
+.cov-flag{font:600 9.5px 'Barlow Semi Condensed';text-transform:uppercase;letter-spacing:.3px;color:var(--suite-muted);border:1px solid var(--suite-line);border-radius:3px;padding:1px 5px;margin-left:5px}.cov-flag.bad{color:var(--suite-red);border-color:#f0c6c6}
+.cov-code{font:700 10.5px 'Barlow Semi Condensed';text-transform:uppercase;color:var(--suite-blue)}
+@media(max-width:1050px){.cov-sources{grid-template-columns:1fr}.cov-asof-note{margin-left:0;width:100%}}

@@ -123,20 +123,93 @@ covered all day when nobody is there.
 Cells that are not time ranges (`PTO`, `Holiday`) are kept as a `code`, not dropped —
 an approved day off must not read as an unexplained no-show.
 
-### Inputs are uploads, not collections
+### The schedule and every check are stored
 
-The on-premise rows carry no timestamp of their own. The export time in the file
-name is the report's as-of, and it is shown and editable rather than assumed.
+Both reports are written to Firebase, partitioned by date, so a schedule and an
+absence outlive the browser tab that produced them:
 
-Coverage inputs are uploaded reports, so they are the one part of the suite that is
-**not** a shared server collection. The parsed schedule is held in `sessionStorage`
-so the second and third on-premise pull of the day only needs the CSV re-dropped;
-session rather than `localStorage` so a stale week's schedule cannot quietly outlive
-its period. The loaded period is also checked against the as-of date and reported
-when it does not cover it.
+```text
+schedule/weeks/{periodStart}.json   the plan   -- one document per week
+coverage/days/{date}.json           the facts  -- every on-premise check that day
+```
 
-All of the matching lives in `schedule-core.js` with no DOM access, the same
-arrangement `reconcile-core.js` has, so a scheduled Cloud Function can reuse it
+The date is part of the storage path, so it is validated as a strict `YYYY-MM-DD`
+and never interpolated raw (`dateKeyOf()` in `functions/index.js`).
+
+A **schedule document** holds every scheduled person with their shifts by date and
+a roster `badge` resolved onto them where possible. `sessionStorage` is still used,
+but only as a fast local restore — Firebase is the record, and it is what lets the
+coverage view work on a fresh browser with only the on-premise CSV dropped in.
+
+A **coverage document** holds that day's checks plus whatever a manager documented:
+
+| Field | Holds |
+| --- | --- |
+| `checks[]` | one per on-premise pull: `asOf`, `summary`, `exceptions[]`, `presentKeys[]` |
+| `documented{}` | person key -> `{ disposition, reason, name, badge }` |
+
+Each check keeps **full detail for everyone who was not where they should be**, and
+a **bare key list for everyone who was on premise**. That answers both "who was
+missing and why" and "was this person here at 2pm" without writing a row per person
+per pull. A check's `id` derives from its as-of instant, so re-uploading the same
+export replaces that check instead of double-counting the day. Checks are capped at
+24 per day; documentation survives every later check.
+
+### Person keys
+
+A person is identified by the best key available, prefixed so the namespaces cannot
+collide and so a name-derived key is never mistaken for a badge:
+
+```text
+b:<badge>    resolved to the roster
+w:<wfmId>    seen in the on-premise report but not on the roster
+n:<name>     neither -- name only
+```
+
+`nameKey()` keeps the comma (`"reed,ava"`) so two WFM reports can never silently
+unify a reversed name. That means it can **never** match a roster name, which reads
+`"Ava Reed"`. `rosterKey()` is the cross-source key: it reduces either order to the
+same sorted first+last pair and ignores middle names, which appear in one system and
+not the other. The `n:` namespace uses `rosterKey()` on both sides, or a profile
+could never find its own history.
+
+### Documenting an absence
+
+A documented absence stores a disposition and a free-text reason. It never creates
+an attendance occurrence on its own — `DISPOSITION_OCCURRENCE` in `suite.js` maps a
+disposition to the occurrence a **one-click** action would create, and a disposition
+of `Approved time off`, `Reassigned`, or `Badge / system issue` maps to `null`, so a
+badge-reader gap can never become a disciplinary record.
+
+### Export for the GEODIS headcount spreadsheet
+
+Each branch sheet (`1502 - HC`, `1559 - Post HC`) holds side-by-side shift blocks.
+The columns to the *left* of the name vary by site — `Transition`, `Status`, `Dept`,
+`Profit Center`, or nothing — but in all seven sheets these six are contiguous and
+in this order:
+
+```text
+Employee  Name | EID | Start Date | Shift | Current Points | Comments
+```
+
+So the export emits exactly those six, to be pasted at the block's
+`Employee  Name` cell. That aligns on every branch sheet without modelling each
+site's leading columns, and leaves their `Transition` / `Dept` values untouched.
+`tests/sheet-export.test.js` asserts this contract against the real workbook, so a
+layout change there fails a test rather than producing a misaligned paste.
+
+Values map as: `EID` = WFM id, `Start Date` = the roster assignment start as
+`M/D/YY`, `Current Points` = attendance points, `Comments` = the documented reason
+or, failing that, the exception's own label. Shift labels come from the scheduled
+start (`1st` < 12:00, `2nd` < 20:00, else `3rd`), matching the "Geodis Key" sheet's
+schedules. **Sites that label shifts A/B/C will need those renamed by hand** — the
+grouping is right, only the label differs.
+
+`Expected` / `Onsite` / `Short` are computed for the chosen block and shown beside
+the copy button.
+
+All of the matching and shaping lives in `schedule-core.js` with no DOM access, the
+same arrangement `reconcile-core.js` has, so a scheduled Cloud Function can reuse it
 verbatim when these reports are automated rather than uploaded.
 
 ## Shared collections

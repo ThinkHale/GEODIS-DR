@@ -64,6 +64,33 @@
     return clean(s);
   }
 
+  /* Both WFM reports say "Last, First", but the RC/Beeline roster says
+     "First Last". nameKey() deliberately keeps the comma so two WFM reports can
+     never silently unify a reversed name -- which means it can NEVER match a
+     roster name. rosterKey() is the cross-source key: it reduces either order to
+     the same sorted first+last pair, and ignores middle names, which appear in
+     one system and not the other.
+
+       "Ava Reed"      -> "ava reed"
+       "Reed, Ava"     -> "ava reed"
+       "Reed, Ava B"   -> "ava reed"
+
+     Used ONLY for the roster join. WFM-to-WFM matching keeps nameKey(). */
+  function rosterKey(v) {
+    var s = String(v == null ? '' : v).toLowerCase().replace(/[^a-z\s,]/g, '');
+    var first, last;
+    if (s.indexOf(',') !== -1) {
+      var parts = s.split(',');
+      last = (parts[0].trim().split(/\s+/)[0]) || '';
+      first = ((parts[1] || '').trim().split(/\s+/)[0]) || '';
+    } else {
+      var toks = s.trim().split(/\s+/).filter(Boolean);
+      first = toks[0] || '';
+      last = toks.length > 1 ? toks[toks.length - 1] : '';
+    }
+    return [first, last].filter(Boolean).sort().join(' ');
+  }
+
   // "Ortiz, Brysin (80-BORTIZ9517)" -> { name: 'Ortiz, Brysin', id: '80-BORTIZ9517' }
   function splitNameAndId(v) {
     var s = String(v == null ? '' : v).trim();
@@ -434,6 +461,9 @@
       statusLabel: STATUS[status].label,
       // The scheduled window as text, plus the day code ("PTO") when there is one.
       shiftRaw: shift ? shift.shift.raw : (todayShift ? todayShift.raw : ''),
+      // The original start, not the -1440 shifted one, so a shift label is
+      // derived from when the shift actually begins.
+      shiftStart: shift ? shift.shift.start : (todayShift ? todayShift.start : null),
       shiftDate: shift ? shift.date : '',
       dayCode: todayShift && todayShift.start == null ? todayShift.raw : '',
       overnight: !!(shift && shift.shift.overnight),
@@ -469,39 +499,280 @@
      with its site prefix stripped, then the name. Whichever key hit is recorded on
      the row so a name-only match is never mistaken for an id match when someone is
      acting on it. */
-  function linkRoster(rows, profiles, normBadge) {
-    if (!profiles || !profiles.size) return rows;
-    var norm = normBadge || function (v) { return String(v == null ? '' : v).trim(); };
+  function rosterNameIndex(profiles) {
     var byName = new Map();
     profiles.forEach(function (p) {
-      var k = nameKey(p.name);
+      var k = rosterKey(p.name);
       if (!k) return;
       // A duplicated name on the roster cannot be resolved by name, so it is
       // poisoned rather than guessed at.
       byName.set(k, byName.has(k) ? null : p);
     });
-
+    return byName;
+  }
+  // Shared by linkRoster() and the schedule writer, so both resolve a person the
+  // same way. Returns { profile, how } with how = 'id' | 'name' | ''.
+  function resolveProfile(profiles, norm, byName, wfmId, wfmIdSuffix, name) {
+    if (wfmId) {
+      var byId = profiles.get(norm(wfmId));
+      if (byId) return { profile: byId, how: 'id' };
+    }
+    if (wfmIdSuffix && wfmIdSuffix !== wfmId) {
+      var bySuffix = profiles.get(norm(wfmIdSuffix));
+      if (bySuffix) return { profile: bySuffix, how: 'id' };
+    }
+    var byN = byName.get(rosterKey(name));
+    if (byN) return { profile: byN, how: 'name' };
+    return { profile: null, how: '' };
+  }
+  function linkRoster(rows, profiles, normBadge) {
+    if (!profiles || !profiles.size) return rows;
+    var norm = normBadge || function (v) { return String(v == null ? '' : v).trim(); };
+    var byName = rosterNameIndex(profiles);
     rows.forEach(function (row) {
-      var hit = null, how = '';
-      if (row.wfmId) {
-        hit = profiles.get(norm(row.wfmId));
-        if (hit) how = 'id';
-      }
-      if (!hit && row.wfmIdSuffix && row.wfmIdSuffix !== row.wfmId) {
-        hit = profiles.get(norm(row.wfmIdSuffix));
-        if (hit) how = 'id';
-      }
-      if (!hit) {
-        var byN = byName.get(row.nameKey);
-        if (byN) { hit = byN; how = 'name'; }
-      }
-      if (!hit) return;
-      row.badge = hit.badge;
-      row.market = hit.market || '';
-      row.rosterName = hit.name || '';
-      row.rosterMatch = how;
+      var hit = resolveProfile(profiles, norm, byName, row.wfmId, row.wfmIdSuffix, row.name);
+      if (!hit.profile) return;
+      row.badge = hit.profile.badge;
+      row.market = hit.profile.market || '';
+      row.rosterName = hit.profile.name || '';
+      row.rosterMatch = hit.how;
     });
     return rows;
+  }
+
+  /* ---------- persistence shapes ----------
+     What actually gets written to Firebase. Kept here, next to the logic that
+     produces it, so the storage shape and the matching rules cannot drift.
+
+     A person is identified by the best key available, in this order: roster badge,
+     WFM id, then name. The prefix keeps the three namespaces from colliding, and
+     it records WHICH kind of key it is -- so a name-derived key is never later
+     mistaken for a badge. */
+  function personKey(row) {
+    if (row.badge) return 'b:' + row.badge;
+    if (row.wfmId) return 'w:' + row.wfmId;
+    return 'n:' + rosterKey(row.name);
+  }
+  // The keys a roster profile could have been stored under. A profile has no WFM
+  // id of its own, so badge and name are the two ways back to its history.
+  function profileKeys(profile) {
+    var out = [];
+    if (profile.badge) out.push('b:' + profile.badge);
+    var k = rosterKey(profile.name);
+    if (k) out.push('n:' + k);
+    return out;
+  }
+  // Local, not UTC -- an as-of instant belongs to the site's calendar day.
+  function isoDateTime(d) {
+    return isoDate(d) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+
+  /* One stored on-premise check. Everyone who was NOT where they should be is
+     kept in full; everyone who was on premise is kept as a bare key. That is
+     enough to prove presence later without writing a row per person per pull.
+
+     The id is derived from the as-of instant, so re-uploading the same export
+     replaces that check instead of double-counting the day. */
+  function toCheck(res, opts) {
+    opts = opts || {};
+    var exceptions = res.rows.filter(function (r) {
+      var sev = STATUS[r.status].severity;
+      return sev === 'bad' || sev === 'warn';
+    });
+    return {
+      id: opts.id || ('CK' + (res.asOf instanceof Date ? res.asOf.getTime() : Date.now())),
+      asOf: res.asOf instanceof Date ? isoDateTime(res.asOf) : '',
+      fileName: opts.fileName || '',
+      graceMinutes: res.graceMinutes,
+      summary: res.summary,
+      exceptions: exceptions.map(function (r) {
+        return {
+          key: personKey(r), name: r.name, badge: r.badge || '', wfmId: r.wfmId || '',
+          status: r.status, present: !!r.present,
+          shift: r.shiftRaw || r.dayCode || '', location: r.location || '',
+          job: r.job || '', manager: r.manager || ''
+        };
+      }),
+      presentKeys: res.rows.filter(function (r) { return r.present; }).map(personKey)
+    };
+  }
+
+  /* The weekly schedule, flattened for storage with a roster badge resolved onto
+     each person where possible. The schedule export carries no employee id, so
+     the on-premise report is passed in as the bridge: it is what turns a
+     scheduled name into a WFM id, and the WFM id is what reaches a badge. */
+  function scheduleForStorage(parsed, opts) {
+    opts = opts || {};
+    var profiles = opts.profiles, presence = opts.presence;
+    var norm = opts.normBadge || function (v) { return String(v == null ? '' : v).trim(); };
+    var byName = profiles && profiles.size ? rosterNameIndex(profiles) : new Map();
+    var presenceByName = new Map();
+    if (presence && presence.people) {
+      presence.people.forEach(function (p) { presenceByName.set(p.nameKey, p); });
+    }
+    return {
+      periodStart: parsed.periodStart,
+      periodEnd: parsed.periodEnd,
+      executedAt: parsed.executedAt,
+      fileName: opts.fileName || '',
+      people: parsed.people.map(function (p) {
+        var seen = presenceByName.get(p.nameKey);
+        var hit = profiles && profiles.size
+          ? resolveProfile(profiles, norm, byName, seen ? seen.wfmId : '', seen ? seen.wfmIdSuffix : '', p.name)
+          : { profile: null };
+        return {
+          name: p.name, nameKey: p.nameKey,
+          badge: hit.profile ? hit.profile.badge : '',
+          wfmId: seen ? seen.wfmId : '',
+          location: p.location, job: p.job, shifts: p.shifts
+        };
+      })
+    };
+  }
+
+  /* ---------- export for the GEODIS headcount spreadsheet ----------
+     Each branch sheet ("1502 - HC", "1559 - Post HC") holds side-by-side shift
+     blocks. The columns to the LEFT of the name vary by site -- Transition,
+     Status, Dept, Profit Center, or nothing -- but in every sheet these six are
+     contiguous and in this order:
+
+       Employee  Name | EID | Start Date | Shift | Current Points | Comments
+
+     So exporting exactly those six, to be pasted at the "Employee  Name" cell of
+     the target block, aligns on every branch sheet without having to model each
+     site's leading columns. */
+  var SHEET_COLUMNS = ['Employee  Name', 'EID', 'Start Date', 'Shift', 'Current Points', 'Comments'];
+
+  /* Shift label from the scheduled start. Matches the "Geodis Key" mapping:
+     1st = 6:00/7:00 AM starts, 2nd = 3:00 PM starts, 3rd = overnight. Sites that
+     label their shifts A/B/C will need those renamed by hand -- the grouping is
+     still right, only the label differs. */
+  function shiftLabel(startMin) {
+    if (startMin == null) return '';
+    var m = ((startMin % 1440) + 1440) % 1440;
+    if (m < 720) return '1st';
+    if (m < 1200) return '2nd';
+    return '3rd';
+  }
+  // "5/28/2026" -> "5/28/26", which is how the sheet writes start dates.
+  function shortDate(v) {
+    var m = String(v == null ? '' : v).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    return m ? m[1] + '/' + m[2] + '/' + m[3].slice(-2) : String(v == null ? '' : v);
+  }
+
+  /* The rows a branch's shift block should contain, plus the Expected / Onsite /
+     Short trio that sits in that block's header.
+
+     opts: { location, shift, profiles, documented } -- location is the leaf code
+     ("1523"), shift is '1st' | '2nd' | '3rd' | 'all'. */
+  function spreadsheetExport(res, opts) {
+    opts = opts || {};
+    var profiles = opts.profiles, documented = opts.documented || {};
+    var wantLoc = opts.location && opts.location !== 'all' ? opts.location : '';
+    var wantShift = opts.shift && opts.shift !== 'all' ? opts.shift : '';
+
+    var rows = res.rows.filter(function (r) {
+      if (wantLoc && locationLeaf(r.location) !== wantLoc) return false;
+      // Only people this shift is responsible for. Someone with no shift at all
+      // is not part of any block's headcount.
+      var label = shiftLabelFor(r);
+      if (!label) return false;
+      return !wantShift || label === wantShift;
+    });
+
+    var out = rows.map(function (r) {
+      var p = profiles && r.badge ? profiles.get(r.badge) : null;
+      return {
+        name: r.name,
+        eid: r.wfmId || '',
+        startDate: p ? shortDate(p.crmStart || p.beeStart || '') : '',
+        shift: shiftLabelFor(r),
+        points: p ? p.points : '',
+        comments: commentFor(r, documented),
+        // Carried for the preview, not written to the sheet.
+        status: r.status, present: r.present, badge: r.badge || ''
+      };
+    }).sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
+
+    // Expected is everyone the block covers; Onsite is how many of them are here.
+    var expected = out.length;
+    var onsite = out.filter(function (r) { return r.present; }).length;
+    return {
+      columns: SHEET_COLUMNS.slice(),
+      rows: out,
+      summary: { expected: expected, onsite: onsite, short: expected - onsite }
+    };
+  }
+  // The shift a row belongs to, from whichever shift is relevant right now.
+  function shiftLabelFor(r) {
+    if (r.shiftStart != null) return shiftLabel(r.shiftStart);
+    return r.shiftRaw ? shiftLabel(startOf(r.shiftRaw)) : '';
+  }
+  function startOf(raw) {
+    var parsed = parseShiftRange(raw);
+    return parsed ? parsed.start : null;
+  }
+  /* The Comments cell. A documented reason wins, because that is what a person
+     actually wrote. Otherwise an exception states itself and anyone who is where
+     they should be gets a blank cell rather than noise. */
+  function commentFor(r, documented) {
+    var doc = documented[personKey(r)];
+    if (doc && (doc.reason || doc.disposition)) {
+      return doc.disposition && doc.reason ? doc.disposition + ' - ' + doc.reason : (doc.reason || doc.disposition);
+    }
+    var sev = STATUS[r.status].severity;
+    if (sev === 'bad' || sev === 'warn') return STATUS[r.status].label;
+    return '';
+  }
+  function locationLeaf(path) {
+    var parts = String(path == null ? '' : path).split('/');
+    return parts[parts.length - 1] || '';
+  }
+  // Tab-separated, which is what a spreadsheet paste expects. No header row --
+  // it is pasted into an existing block that already has its headers.
+  function toTsv(exported, withHeader) {
+    var lines = withHeader ? [exported.columns.join('\t')] : [];
+    exported.rows.forEach(function (r) {
+      lines.push([r.name, r.eid, r.startDate, r.shift, r.points, r.comments]
+        .map(function (c) { return String(c == null ? '' : c).replace(/[\t\r\n]/g, ' '); }).join('\t'));
+    });
+    return lines.join('\n');
+  }
+
+  /* ---------- reading history back ----------
+     Given a stored day and the keys a person could be under, what happened. */
+  function presenceHistory(day, keys) {
+    var set = {};
+    (keys || []).forEach(function (k) { set[k] = true; });
+    return ((day && day.checks) || []).map(function (c) {
+      var exception = (c.exceptions || []).filter(function (e) { return set[e.key]; })[0] || null;
+      return {
+        asOf: c.asOf,
+        present: (c.presentKeys || []).some(function (k) { return set[k]; }),
+        status: exception ? exception.status : '',
+        statusLabel: exception ? STATUS[exception.status].label : '',
+        severity: exception ? STATUS[exception.status].severity : '',
+        shift: exception ? exception.shift : ''
+      };
+    });
+  }
+  function documentedFor(day, keys) {
+    var docs = (day && day.documented) || {};
+    for (var i = 0; i < (keys || []).length; i++) {
+      if (docs[keys[i]]) return docs[keys[i]];
+    }
+    return null;
+  }
+  // A person's scheduled shifts for the week, from a stored schedule document.
+  function scheduleFor(week, keys) {
+    var set = {};
+    (keys || []).forEach(function (k) { set[k] = true; });
+    var people = (week && week.people) || [];
+    for (var i = 0; i < people.length; i++) {
+      var p = people[i];
+      if (set['b:' + p.badge] || set['n:' + rosterKey(p.name)]) return p;
+    }
+    return null;
   }
 
   var api = {
@@ -510,6 +781,7 @@
     STATUS: STATUS,
     STATUS_ORDER: STATUS_ORDER,
     nameKey: nameKey,
+    rosterKey: rosterKey,
     splitNameAndId: splitNameAndId,
     idSuffix: idSuffix,
     isoDate: isoDate,
@@ -521,7 +793,21 @@
     parseOnPremise: parseOnPremise,
     shiftsCovering: shiftsCovering,
     buildCoverage: buildCoverage,
-    linkRoster: linkRoster
+    linkRoster: linkRoster,
+    personKey: personKey,
+    profileKeys: profileKeys,
+    isoDateTime: isoDateTime,
+    toCheck: toCheck,
+    scheduleForStorage: scheduleForStorage,
+    SHEET_COLUMNS: SHEET_COLUMNS,
+    shiftLabel: shiftLabel,
+    shortDate: shortDate,
+    locationLeaf: locationLeaf,
+    spreadsheetExport: spreadsheetExport,
+    toTsv: toTsv,
+    presenceHistory: presenceHistory,
+    documentedFor: documentedFor,
+    scheduleFor: scheduleFor
   };
   root.ScheduleCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

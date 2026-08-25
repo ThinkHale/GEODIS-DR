@@ -194,8 +194,10 @@
       });
   }
 
+  // `name` is either a collection name or a ready-made query string.
   function post(name, body) {
-    return fetch(url(name), {
+    var u = name.indexOf('=') === -1 ? url(name) : API + '?' + name;
+    return fetch(u, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
@@ -211,6 +213,45 @@
   }
   function deleteRecord(name, id) { return post(name, { id: id, _delete: true }); }
   function replaceCollection(name, records) { return post(name, { records: records }); }
+
+  /* ---------- date-partitioned stores ----------
+     The weekly schedule (the plan) and each day's on-premise checks (the
+     observations). Both are partitioned by date so one read stays small and a
+     re-upload replaces exactly one document. */
+  function weekStart(isoDay) {
+    // Schedules are stored under the Sunday that starts their week, which is
+    // how the WFM export lays them out.
+    var d = new Date(isoDay + 'T00:00:00');
+    if (isNaN(d.getTime())) return '';
+    d.setDate(d.getDate() - d.getDay());
+    var p = function (n) { return String(n).padStart(2, '0'); };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+  function getJson(u) {
+    return fetch(u, { cache: 'no-store' }).then(function (res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    });
+  }
+  function loadSchedule(period) {
+    return getJson(API + '?schedule=1&period=' + encodeURIComponent(period))
+      .then(function (d) { return d.schedule && d.schedule.people ? d.schedule : null; })
+      .catch(function (err) { console.warn('Could not load the stored schedule.', err); return null; });
+  }
+  function saveSchedule(period, doc) {
+    return post('schedule=1&period=' + encodeURIComponent(period), doc);
+  }
+  function loadCoverage(date) {
+    return getJson(API + '?coverage=1&date=' + encodeURIComponent(date))
+      .then(function (d) { return d.coverage || {}; })
+      .catch(function (err) { console.warn('Could not load stored coverage.', err); return {}; });
+  }
+  function saveCheck(date, check) {
+    return post('coverage=1&date=' + encodeURIComponent(date), { check: check });
+  }
+  function saveDocumentation(date, document) {
+    return post('coverage=1&date=' + encodeURIComponent(date), { document: document });
+  }
 
   // Load every shared collection at once. Individual failures degrade to an
   // empty list rather than taking the whole suite down.
@@ -236,6 +277,12 @@
     loadAll: loadAll,
     saveRecord: saveRecord,
     deleteRecord: deleteRecord,
-    replaceCollection: replaceCollection
+    replaceCollection: replaceCollection,
+    weekStart: weekStart,
+    loadSchedule: loadSchedule,
+    saveSchedule: saveSchedule,
+    loadCoverage: loadCoverage,
+    saveCheck: saveCheck,
+    saveDocumentation: saveDocumentation
   };
 })(typeof window !== 'undefined' ? window : this);

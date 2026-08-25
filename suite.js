@@ -17,6 +17,23 @@
     'No Call / No Show': 2, 'Excused': 0
   };
   var TIME_OFF_TYPES = ['PTO', 'VTO', 'Sick', 'Personal', 'LOA'];
+  /* How a documented absence is characterised. "Badge / system issue" matters
+     most: it is the way to record that the person WAS here and the reader missed
+     them, so a hardware gap never turns into a disciplinary record. */
+  var DISPOSITIONS = ['', 'Called in', 'No call / no show', 'Approved time off', 'Late arrival',
+    'Left early', 'Reassigned', 'Badge / system issue', 'Other'];
+  // Disposition -> the occurrence a one-click log would create. null means the
+  // absence is explained and no occurrence should be offered at all.
+  var DISPOSITION_OCCURRENCE = {
+    'Called in': { type: 'Absent', points: 1 },
+    'No call / no show': { type: 'No Call / No Show', points: 2 },
+    'Approved time off': null,
+    'Late arrival': { type: 'Late', points: 0.5 },
+    'Left early': { type: 'Early Out', points: 0.5 },
+    'Reassigned': null,
+    'Badge / system issue': null,
+    'Other': { type: 'Absent', points: 0 }
+  };
   var NAV = [
     ['overview', 'Overview'], ['associates', 'Associates'], ['coverage', 'Coverage'],
     ['attendance', 'Attendance'], ['timeoff', 'Time Off'], ['requisitions', 'Requisitions'],
@@ -41,7 +58,12 @@
       schedule: null, presence: null,
       scheduleFile: '', presenceFile: '',
       asOf: null, grace: ScheduleCore.GRACE_MINUTES,
-      statusFilter: 'exceptions', location: 'all'
+      statusFilter: 'exceptions', location: 'all',
+      // Spreadsheet export: which branch block is being rebuilt.
+      exportOpen: false, exportShift: '1st', exportLoc: 'all',
+      // Loaded back from Firebase: this week's stored plan and today's stored
+      // checks. These are what make a schedule and an absence outlive the tab.
+      storedWeek: null, storedDay: null, saving: '', savedAt: ''
     }
   };
 
@@ -335,6 +357,7 @@
       '<div class="suite-actions"><button class="suite-btn primary" data-add="timeoff" data-badge="' + esc(p.badge) + '">+ Request</button></div></div>' +
       (p.timeOff.length ? p.timeOff.map(activityRow).join('') : empty('No time-off records')) + '</section>' +
 
+      schedulePanel(p) +
       '<section class="suite-panel"><div class="suite-panel-head"><h2>Assignment &amp; reconciliation</h2></div>' +
       '<dl class="detail-list">' +
       detail('RC start', p.crmStart) + detail('Beeline start', p.beeStart) +
@@ -346,6 +369,43 @@
       (p.note ? detail('Shared note', p.note) : '') +
       '</dl></section></div></div>';
   }
+  /* The answer to "is this person's schedule saved, and were they here?" --
+     their week from the stored plan, and every on-premise check today. */
+  function schedulePanel(p) {
+    var keys = ScheduleCore.profileKeys(p);
+    var week = state.coverage.storedWeek;
+    var day = state.coverage.storedDay;
+    var mine = week ? ScheduleCore.scheduleFor(week, keys) : null;
+    var history = ScheduleCore.presenceHistory(day, keys);
+    var doc = ScheduleCore.documentedFor(day, keys);
+
+    var body;
+    if (!mine && !history.length) {
+      body = empty('No schedule on file',
+        week ? 'This associate is not on the stored weekly schedule.' : 'Upload a weekly schedule in Shift coverage.');
+    } else {
+      var dates = mine ? Object.keys(mine.shifts).sort() : [];
+      body = (mine ? '<div class="sched-week">' + dates.map(function (d) {
+        var sh = mine.shifts[d];
+        var isToday = d === ScheduleCore.isoDate(new Date());
+        return '<div class="sched-day' + (isToday ? ' today' : '') + '">' +
+          '<span>' + esc(d.slice(5)) + '</span><b>' +
+          esc(sh.code || sh.raw || '—') + '</b></div>';
+      }).join('') + '</div>' : '') +
+      (history.length ? '<div class="sched-checks">' + history.map(function (h) {
+        var cls = h.present ? 'on' : (h.severity || 'off');
+        return '<div class="sched-check ' + cls + '"><span>' + esc((h.asOf || '').slice(11, 16)) + '</span><b>' +
+          esc(h.present ? 'On premise' : (h.statusLabel || 'Not on premise')) + '</b></div>';
+      }).join('') + '</div>'
+        : '<p class="perf-note">No on-premise check has been recorded today.</p>') +
+      (doc ? '<div class="sched-doc"><b>' + esc(doc.disposition || 'Documented') + '</b>' +
+        (doc.reason ? ' — ' + esc(doc.reason) : '') + '</div>' : '');
+    }
+    return '<section class="suite-panel"><div class="suite-panel-head"><h2>Schedule &amp; presence</h2>' +
+      '<div class="suite-actions"><button class="suite-btn" data-nav="coverage">Coverage</button></div></div>' +
+      body + '</section>';
+  }
+
   function perfStat(label, value, plain) {
     var has = value != null && isFinite(Number(value));
     return '<div class="perf-stat"><span>' + esc(label) + '</span><b>' +
@@ -388,6 +448,95 @@
     } catch (e) { /* corrupt cache: start clean rather than render garbage */ }
   }
 
+  /* ---------- coverage persistence ----------
+     sessionStorage only ever made the schedule survive a reload in ONE tab. The
+     record of who was scheduled, who was actually here, and why they were not
+     lives in Firebase: partitioned by week for the plan and by day for the
+     checks. See DATA_MODEL.md. */
+  function persistSchedule(parsed, fileName) {
+    var period = parsed.periodStart || SuiteData.weekStart(ScheduleCore.isoDate(new Date()));
+    if (!period) return;
+    var doc = ScheduleCore.scheduleForStorage(parsed, {
+      profiles: state.profiles, presence: state.coverage.presence,
+      normBadge: SuiteData.normBadge, fileName: fileName
+    });
+    state.coverage.saving = 'schedule';
+    render();
+    SuiteData.saveSchedule(period, doc).then(function () {
+      state.coverage.storedWeek = doc;
+      savedOk();
+    }).catch(function (err) { saveFailed('schedule', err); });
+  }
+
+  function persistCheck(fileName) {
+    var res = buildCoverageResult();
+    if (!res) return;   // no schedule loaded yet; the check is saved once there is one
+    var date = ScheduleCore.isoDate(coverageAsOf());
+    var check = ScheduleCore.toCheck(res, { fileName: fileName });
+    state.coverage.saving = 'check';
+    render();
+    SuiteData.saveCheck(date, check).then(function () {
+      return SuiteData.loadCoverage(date);
+    }).then(function (day) {
+      state.coverage.storedDay = day;
+      savedOk();
+    }).catch(function (err) { saveFailed('on-premise check', err); });
+  }
+
+  function savedOk() {
+    state.coverage.saving = '';
+    state.coverage.savedAt = new Date().toLocaleTimeString();
+    render();
+  }
+  function saveFailed(what, err) {
+    state.coverage.saving = '';
+    render();
+    console.warn('Could not save the ' + what + '.', err);
+    alert('The ' + what + ' could not be saved to Firebase, so it is only in this browser.\n\n' + err.message);
+  }
+
+  // Pull back this week's plan and today's checks, so a profile can show a
+  // schedule and a presence history without re-uploading anything.
+  function loadStoredCoverage() {
+    var todayIso = ScheduleCore.isoDate(new Date());
+    var week = SuiteData.weekStart(todayIso);
+    return Promise.all([SuiteData.loadSchedule(week), SuiteData.loadCoverage(todayIso)])
+      .then(function (r) {
+        state.coverage.storedWeek = r[0];
+        state.coverage.storedDay = r[1];
+        // A stored week also means the coverage view works on a fresh browser
+        // with only the on-premise export dropped in.
+        if (!state.coverage.schedule && r[0] && r[0].people && r[0].people.length) {
+          state.coverage.schedule = storedWeekToParsed(r[0]);
+          state.coverage.scheduleFile = r[0].fileName || 'Stored schedule';
+        }
+        render();
+      });
+  }
+  // The stored shape drops the fields only the parser needs, so rebuild just
+  // enough for buildCoverage() to run against it.
+  function storedWeekToParsed(week) {
+    return {
+      periodStart: week.periodStart, periodEnd: week.periodEnd,
+      executedAt: week.executedAt, dates: [], warnings: [],
+      people: (week.people || []).map(function (p) {
+        var shifts = {};
+        Object.keys(p.shifts || {}).forEach(function (d) {
+          var sh = p.shifts[d];
+          shifts[d] = {
+            raw: sh.raw, start: sh.start, end: sh.end, overnight: !!sh.overnight,
+            hours: sh.start != null && sh.end != null ? (sh.end - sh.start) / 60 : 0,
+            suspect: false, code: sh.code || ''
+          };
+        });
+        return {
+          name: p.name, nameKey: p.nameKey, location: p.location,
+          job: p.job, shifts: shifts, ambiguous: false
+        };
+      })
+    };
+  }
+
   function locLeaf(path) {
     var parts = String(path || '').split('/').filter(Boolean);
     return parts.length ? parts[parts.length - 1] : '';
@@ -421,6 +570,12 @@
       '<input type="file" accept=".xlsx,.xls,.csv" data-cov="' + kind + '"></label></section>';
   }
 
+  function covSaveNote() {
+    var c = state.coverage;
+    if (c.saving) return '<div class="cov-saved saving">Saving ' + esc(c.saving) + ' to Firebase…</div>';
+    if (c.savedAt) return '<div class="cov-saved">Saved to Firebase at ' + esc(c.savedAt) + '</div>';
+    return '';
+  }
   function covSources() {
     var c = state.coverage;
     var schedMeta = '', presMeta = '';
@@ -533,10 +688,89 @@
       (when ? '<div class="sub">' + esc(when) + '</div>' : '');
   }
 
+  /* Only a person who was not where they should be gets a documentation box --
+     there is nothing to explain about someone who is working their shift. */
+  function covDocCell(r) {
+    if (r.severity !== 'bad' && r.severity !== 'warn') return '<span class="sub">—</span>';
+    var key = ScheduleCore.personKey(r);
+    var doc = documentedFor(key);
+    var occ = doc && doc.disposition ? DISPOSITION_OCCURRENCE[doc.disposition] : undefined;
+    return '<div class="cov-doc">' +
+      '<select class="suite-select cov-disp" data-doc-key="' + esc(key) + '" data-doc-name="' + esc(r.name) +
+      '" data-doc-badge="' + esc(r.badge || '') + '">' +
+      DISPOSITIONS.map(function (o) {
+        return '<option value="' + esc(o) + '" ' + (doc && doc.disposition === o ? 'selected' : '') + '>' +
+          esc(o || 'Not documented') + '</option>';
+      }).join('') + '</select>' +
+      '<input class="suite-input cov-reason" data-doc-key="' + esc(key) + '" data-doc-name="' + esc(r.name) +
+      '" data-doc-badge="' + esc(r.badge || '') + '" value="' + esc(doc ? doc.reason : '') +
+      '" placeholder="Reason…">' +
+      // Logging an occurrence is a policy call, so it is offered, never automatic.
+      (occ && r.badge ? '<button class="suite-btn cov-log" data-log-badge="' + esc(r.badge) +
+        '" data-log-type="' + esc(occ.type) + '" data-log-points="' + occ.points +
+        '" data-log-reason="' + esc(doc.reason || doc.disposition) + '">Log ' + esc(occ.type) + '</button>' : '') +
+      (occ === null ? '<span class="cov-excused">Excused · no points</span>' : '') +
+      '</div>';
+  }
+  function documentedFor(key) {
+    var docs = (state.coverage.storedDay && state.coverage.storedDay.documented) || {};
+    return docs[key] || null;
+  }
+
+  /* ---------- export for the GEODIS headcount spreadsheet ----------
+     Rebuilds one branch's shift block as the six columns those sheets share, to
+     be pasted at the block's "Employee  Name" cell. */
+  function covExport(res) {
+    var c = state.coverage;
+    if (!c.exportOpen) {
+      return '<section class="suite-panel"><div class="suite-panel-head"><h2>Headcount spreadsheet</h2>' +
+        '<div class="suite-actions"><button class="suite-btn" data-export-toggle>Build a paste for a branch</button></div>' +
+        '</div><p class="perf-note">Rebuild a branch\u2019s shift block in the GEODIS spreadsheet layout.</p></section>';
+    }
+    var locs = {};
+    res.rows.forEach(function (r) {
+      var l = ScheduleCore.locationLeaf(r.location);
+      if (l) locs[l] = true;
+    });
+    var locList = Object.keys(locs).sort();
+    var ex = ScheduleCore.spreadsheetExport(res, {
+      location: c.exportLoc, shift: c.exportShift,
+      profiles: state.profiles,
+      documented: (c.storedDay && c.storedDay.documented) || {}
+    });
+    return '<section class="suite-panel"><div class="suite-panel-head"><h2>Headcount spreadsheet</h2>' +
+      '<div class="suite-actions"><button class="suite-btn" data-export-toggle>Hide</button></div></div>' +
+      '<div class="filter-row cov-controls">' +
+      '<label class="cov-ctl">Branch<select class="suite-select" id="export-loc">' +
+      '<option value="all">All</option>' + locList.map(function (l) {
+        return '<option value="' + esc(l) + '" ' + (c.exportLoc === l ? 'selected' : '') + '>' + esc(l) + '</option>';
+      }).join('') + '</select></label>' +
+      '<label class="cov-ctl">Shift<select class="suite-select" id="export-shift">' +
+      ['1st', '2nd', '3rd', 'all'].map(function (v) {
+        return '<option value="' + v + '" ' + (c.exportShift === v ? 'selected' : '') + '>' +
+          (v === 'all' ? 'All shifts' : v) + '</option>';
+      }).join('') + '</select></label>' +
+      '<div class="export-trio"><span>Expected<b>' + ex.summary.expected + '</b></span>' +
+      '<span>Onsite<b>' + ex.summary.onsite + '</b></span>' +
+      '<span class="' + (ex.summary.short ? 'short' : '') + '">Short<b>' + ex.summary.short + '</b></span></div>' +
+      '<button class="suite-btn primary" data-copy-sheet>Copy ' + ex.rows.length + ' rows</button>' +
+      '</div>' +
+      '<p class="export-hint">Paste at the <b>Employee&nbsp;&nbsp;Name</b> cell of that block. These six columns sit together on every branch sheet, so the leading Transition / Dept columns are left untouched.</p>' +
+      (ex.rows.length ? '<div class="suite-table-wrap"><table class="suite-table export-preview"><thead><tr>' +
+        ex.columns.map(function (h) { return '<th>' + esc(h) + '</th>'; }).join('') + '</tr></thead><tbody>' +
+        ex.rows.slice(0, MAX_ROWS).map(function (r) {
+          return '<tr class="' + (r.present ? '' : 'cov-row bad') + '"><td>' + esc(r.name) + '</td><td>' + esc(r.eid) + '</td>' +
+            '<td>' + esc(r.startDate || '—') + '</td><td>' + esc(r.shift) + '</td>' +
+            '<td>' + esc(r.points === '' ? '—' : r.points) + '</td><td>' + esc(r.comments) + '</td></tr>';
+        }).join('') + '</tbody></table></div>'
+        : empty('Nobody is scheduled for that branch and shift', 'Try another branch or shift.')) +
+      '</section>';
+  }
+
   function covTable(rows, total) {
     return '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
       '<th>Associate</th><th>Status</th><th>On premise</th><th>Scheduled shift</th>' +
-      '<th>Location</th><th>Job</th><th>Supervisor</th></tr></thead><tbody>' +
+      '<th>Location</th><th>Job</th><th>Supervisor</th><th>Documented</th></tr></thead><tbody>' +
       rows.slice(0, MAX_ROWS).map(function (r) {
         // Only a row that reached a roster profile can open one.
         var open = r.badge ? ' data-profile="' + esc(r.badge) + '"' : '';
@@ -552,13 +786,15 @@
           '<td>' + covShiftCell(r) + '</td>' +
           '<td>' + esc(locLeaf(r.location) || '—') + '</td>' +
           '<td>' + esc(r.job || '—') + '</td>' +
-          '<td>' + esc(r.manager || '—') + '</td></tr>';
+          '<td>' + esc(r.manager || '—') + '</td>' +
+          '<td>' + covDocCell(r) + '</td></tr>';
       }).join('') + '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length);
   }
 
   function coverageView() {
     var c = state.coverage;
-    var head = hero('Shift coverage', 'The weekly schedule crossed with the on-premise snapshot.') + covSources();
+    var head = hero('Shift coverage', 'The weekly schedule crossed with the on-premise snapshot. Both are saved to Firebase, so absences stay documented.') +
+      covSources() + covSaveNote();
     if (!c.schedule || !c.presence) {
       var need = !c.schedule && !c.presence ? 'both reports'
         : !c.schedule ? 'the weekly schedule export' : 'the on-premise export';
@@ -568,7 +804,7 @@
     }
     var res = buildCoverageResult();
     var rows = covFilter(res.rows);
-    return head + covControls(res) + covMetrics(res.summary) + covWarnings(res) +
+    return head + covControls(res) + covMetrics(res.summary) + covWarnings(res) + covExport(res) +
       '<section class="suite-panel">' + covFilters(res) +
       (rows.length ? covTable(rows, res.rows.length)
         : empty('Nothing matches those filters', 'Widen the status or location filter to see more.')) +
@@ -590,7 +826,8 @@
           if (!parsed.people.length) throw new Error('No employee rows were found. Is this the "Employee Schedule - Weekly" export?');
           state.coverage.schedule = parsed;
           state.coverage.scheduleFile = file.name;
-          cacheSchedule(parsed, file.name);
+          cacheSchedule(parsed, file.name);   // fast local restore; Firebase is the record
+          persistSchedule(parsed, file.name);
         } else {
           var pres = ScheduleCore.parseOnPremise(aoa);
           if (!pres.people.length) {
@@ -600,6 +837,7 @@
           state.coverage.presenceFile = file.name;
           // Each upload re-dates the check from the export time in the file name.
           state.coverage.asOf = ScheduleCore.asOfFromFileName(file.name) || new Date();
+          persistCheck(file.name);
         }
         render();
       } catch (err) {
@@ -869,6 +1107,36 @@
       return;
     }
 
+    if (e.target.closest('[data-export-toggle]')) {
+      state.coverage.exportOpen = !state.coverage.exportOpen;
+      render();
+      return;
+    }
+    var copy = e.target.closest('[data-copy-sheet]');
+    if (copy) {
+      var resx = buildCoverageResult();
+      if (!resx) return;
+      var exx = ScheduleCore.spreadsheetExport(resx, {
+        location: state.coverage.exportLoc, shift: state.coverage.exportShift,
+        profiles: state.profiles,
+        documented: (state.coverage.storedDay && state.coverage.storedDay.documented) || {}
+      });
+      navigator.clipboard.writeText(ScheduleCore.toTsv(exx, false)).then(function () {
+        copy.textContent = 'Copied ' + exx.rows.length + ' rows';
+      }).catch(function () { alert('Could not copy to the clipboard.'); });
+      return;
+    }
+    var log = e.target.closest('[data-log-badge]');
+    if (log) {
+      var d = log.dataset;
+      persist('attendance', {
+        id: 'AT' + Date.now(), badge: d.logBadge,
+        date: ScheduleCore.isoDate(coverageAsOf()),
+        type: d.logType, minutes: 0, points: Number(d.logPoints),
+        notes: d.logReason || 'From shift coverage'
+      }, 'attendance');
+      return;
+    }
     var fill = e.target.closest('[data-fill]');
     if (fill) {
       var r = state.stores.requisitions.find(function (x) { return x.id === fill.dataset.fill; });
@@ -876,6 +1144,43 @@
       var openings = Number(r.openings || 0), filled = Math.min(openings, Number(r.filled || 0) + 1);
       persist('requisitions', { id: r.id, filled: filled, status: filled >= openings && openings > 0 ? 'Filled' : 'Open' }, 'requisitions');
     }
+  });
+
+  // Documenting an absence: the disposition saves immediately, the free-text
+  // reason debounces so it is not one write per keystroke.
+  var docTimers = {};
+  function saveDoc(el) {
+    var date = ScheduleCore.isoDate(coverageAsOf());
+    var key = el.dataset.docKey;
+    var row = el.closest('.cov-doc');
+    var rec = {
+      key: key,
+      name: el.dataset.docName || '',
+      badge: el.dataset.docBadge || '',
+      disposition: row.querySelector('.cov-disp').value,
+      reason: row.querySelector('.cov-reason').value
+    };
+    return SuiteData.saveDocumentation(date, rec).then(function () {
+      return SuiteData.loadCoverage(date);
+    }).then(function (day) {
+      state.coverage.storedDay = day;
+    }).catch(function (err) {
+      console.warn('Could not save the documentation.', err);
+      alert('That note could not be saved, so it was not shared with anyone else.\n\n' + err.message);
+    });
+  }
+  root.addEventListener('change', function (e) {
+    if (e.target.id === 'export-loc') { state.coverage.exportLoc = e.target.value; render(); return; }
+    if (e.target.id === 'export-shift') { state.coverage.exportShift = e.target.value; render(); return; }
+    if (!e.target.classList.contains('cov-disp')) return;
+    // Re-render so the offered occurrence matches the new disposition.
+    saveDoc(e.target).then(render);
+  });
+  root.addEventListener('input', function (e) {
+    if (!e.target.classList.contains('cov-reason')) return;
+    var el = e.target, key = el.dataset.docKey;
+    clearTimeout(docTimers[key]);
+    docTimers[key] = setTimeout(function () { saveDoc(el); }, 700);
   });
 
   root.addEventListener('input', function (e) {
@@ -955,6 +1260,8 @@
   });
 
   restoreSchedule();
+
+  loadStoredCoverage();
 
   SuiteData.loadAll().then(function (stores) {
     state.stores = stores;

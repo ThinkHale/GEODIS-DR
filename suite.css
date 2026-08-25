@@ -72,3 +72,30 @@ body.suite-active>header,body.suite-active>main,body.suite-active>.foot{display:
 .cov-flag{font:600 9.5px 'Barlow Semi Condensed';text-transform:uppercase;letter-spacing:.3px;color:var(--suite-muted);border:1px solid var(--suite-line);border-radius:3px;padding:1px 5px;margin-left:5px}.cov-flag.bad{color:var(--suite-red);border-color:#f0c6c6}
 .cov-code{font:700 10.5px 'Barlow Semi Condensed';text-transform:uppercase;color:var(--suite-blue)}
 @media(max-width:1050px){.cov-sources{grid-template-columns:1fr}.cov-asof-note{margin-left:0;width:100%}}
+
+/* ---- coverage: documentation + saved schedule ---- */
+.cov-saved{font:600 11px Inter;color:var(--suite-green);margin-bottom:12px}.cov-saved.saving{color:var(--suite-muted)}
+.cov-doc{display:flex;flex-direction:column;gap:5px;min-width:190px}
+.cov-doc .suite-select,.cov-doc .suite-input{font-size:11.5px;padding:5px 7px}
+.cov-doc .cov-log{align-self:flex-start;font-size:11px;padding:4px 9px}
+.cov-excused{font:600 10px 'Barlow Semi Condensed';text-transform:uppercase;letter-spacing:.3px;color:var(--suite-green)}
+.sched-week{display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr));gap:7px;margin-bottom:13px}
+.sched-day{border:1px solid var(--suite-line);border-radius:7px;padding:8px 9px;text-align:center}
+.sched-day.today{border-color:var(--suite-orange);background:#fff6f1}
+.sched-day span{display:block;font:600 10px 'IBM Plex Mono';color:var(--suite-muted)}
+.sched-day b{display:block;font:600 11px Inter;margin-top:3px;line-height:1.3}
+.sched-checks{display:flex;flex-wrap:wrap;gap:7px}
+.sched-check{border:1px solid var(--suite-line);border-radius:7px;padding:7px 10px;min-width:96px}
+.sched-check span{display:block;font:600 10px 'IBM Plex Mono';color:var(--suite-muted)}
+.sched-check b{display:block;font:600 11px Inter;margin-top:2px}
+.sched-check.on{border-color:#bfe3ce;background:#f2fbf6}.sched-check.on b{color:var(--suite-green)}
+.sched-check.bad{border-color:#f0c6c6;background:#fff6f6}.sched-check.bad b{color:var(--suite-red)}
+.sched-check.warn{border-color:#f2dcb4;background:#fffaf1}.sched-check.warn b{color:var(--suite-amber)}
+.sched-doc{margin-top:12px;border-left:3px solid var(--suite-orange);background:#fff6f1;padding:9px 12px;border-radius:0 6px 6px 0;font-size:12.5px}
+.export-trio{display:flex;gap:14px;align-items:center}
+.export-trio span{display:flex;flex-direction:column;font:600 9.5px 'Barlow Semi Condensed';text-transform:uppercase;letter-spacing:.4px;color:var(--suite-muted)}
+.export-trio b{font:700 17px Inter;color:var(--suite-text);line-height:1.1}
+.export-trio span.short b{color:var(--suite-red)}
+.export-hint{margin:0 0 12px;font-size:11.5px;color:var(--suite-muted)}
+.export-preview th{white-space:nowrap}
+.export-preview td{font-size:12px}

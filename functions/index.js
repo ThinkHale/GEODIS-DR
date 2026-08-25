@@ -61,6 +61,20 @@ const COLLECTIONS = {
                             units: 'num', hours: 'num', notes: 'str' } }
 };
 const MAX_COLLECTION_RECORDS = 20000;
+
+/* Date-partitioned documents. Unlike the collections above these are split by
+   date, because they grow forever: a weekly schedule per week, and a day's worth
+   of on-premise checks per day. Partitioning keeps any single read small and
+   makes a re-upload replace exactly one document.
+
+   The date is part of the storage path, so it is validated as a strict ISO date
+   and never interpolated raw -- see dateKeyOf(). */
+const SCHEDULE_DIR = 'schedule/weeks';    // {periodStart}.json -- the plan
+const COVERAGE_DIR = 'coverage/days';     // {date}.json        -- the observations
+const MAX_SCHEDULE_PEOPLE = 5000;
+const MAX_CHECKS_PER_DAY = 24;
+const MAX_EXCEPTION_ROWS = 5000;
+const MAX_PRESENT_KEYS = 20000;
 const NOTES_ORIGIN = 'https://geodis.ebtools.pro';   // the tool's front-end origin
 
 async function readRawFile(type) {
@@ -202,6 +216,173 @@ async function handleCollection(req, res, opts) {
   res.status(200).json({ ok: true, count: list.length });
 }
 
+/* ---------- date-partitioned documents (schedule + coverage) ----------
+   A schedule document is the plan for one week; a coverage document is every
+   on-premise check taken on one day, plus whatever a manager documented about
+   the people who were not there. */
+
+// The only thing that ever reaches a storage path. Anything that is not exactly
+// YYYY-MM-DD is refused, so no caller can walk out of the directory.
+function dateKeyOf(v) {
+  const s = v == null ? '' : String(v).trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
+}
+function str(v, max) { return v == null ? '' : String(v).slice(0, max || 200); }
+
+async function listDateKeys(dir) {
+  const [files] = await bucket.getFiles({ prefix: dir + '/' });
+  return files
+    .map(f => (f.name.split('/').pop() || '').replace(/\.json$/, ''))
+    .filter(k => dateKeyOf(k))
+    .sort();
+}
+
+/* GET  ?schedule=1                     -> { periods: [...] }
+   GET  ?schedule=1&period=YYYY-MM-DD   -> the stored week
+   POST ?schedule=1&period=YYYY-MM-DD   -> replace that week  */
+async function handleSchedule(req, res) {
+  setKvCors(res);
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  const period = dateKeyOf(req.query.period);
+
+  if (req.method === 'GET') {
+    res.set('Cache-Control', 'no-cache, max-age=0');
+    if (!period) { res.status(200).json({ ok: true, periods: await listDateKeys(SCHEDULE_DIR) }); return; }
+    res.status(200).json({ ok: true, schedule: await readJsonFile(SCHEDULE_DIR + '/' + period + '.json') });
+    return;
+  }
+  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
+  if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
+  if (!period) { res.status(400).json({ ok: false, error: 'Missing/invalid period' }); return; }
+
+  const body = req.body || {};
+  const people = Array.isArray(body.people) ? body.people : null;
+  if (!people) { res.status(400).json({ ok: false, error: 'Missing people' }); return; }
+  if (people.length > MAX_SCHEDULE_PEOPLE) { res.status(400).json({ ok: false, error: 'Too many people' }); return; }
+
+  // shifts is a date -> shift map; keep only well-formed dates and flatten each
+  // shift to the few fields the suite renders.
+  const doc = {
+    periodStart: period,
+    periodEnd: dateKeyOf(body.periodEnd) || '',
+    fileName: str(body.fileName, 300),
+    executedAt: str(body.executedAt, 60),
+    uploadedAt: new Date().toISOString(),
+    people: people.map(p => {
+      const shifts = {};
+      const src = (p && p.shifts) || {};
+      Object.keys(src).forEach(d => {
+        if (!dateKeyOf(d)) return;
+        const sh = src[d] || {};
+        shifts[d] = {
+          raw: str(sh.raw, 60),
+          start: Number.isFinite(Number(sh.start)) ? Number(sh.start) : null,
+          end: Number.isFinite(Number(sh.end)) ? Number(sh.end) : null,
+          overnight: !!sh.overnight,
+          code: str(sh.code, 40)
+        };
+      });
+      return {
+        name: str(p && p.name, 120),
+        nameKey: str(p && p.nameKey, 120),
+        badge: str(p && p.badge, 64),
+        wfmId: str(p && p.wfmId, 64),
+        location: str(p && p.location, 200),
+        job: str(p && p.job, 120),
+        shifts: shifts
+      };
+    })
+  };
+  await bucket.file(SCHEDULE_DIR + '/' + period + '.json').save(JSON.stringify(doc), {
+    contentType: 'application/json',
+    metadata: { cacheControl: 'no-cache, max-age=0' }
+  });
+  res.status(200).json({ ok: true, period: period, people: doc.people.length });
+}
+
+/* GET  ?coverage=1                   -> { dates: [...] }
+   GET  ?coverage=1&date=YYYY-MM-DD   -> that day's checks + documentation
+   POST ?coverage=1&date=...  { check }     -> append one on-premise check
+   POST ?coverage=1&date=...  { document }  -> document one person's absence  */
+async function handleCoverage(req, res) {
+  setKvCors(res);
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  const date = dateKeyOf(req.query.date);
+
+  if (req.method === 'GET') {
+    res.set('Cache-Control', 'no-cache, max-age=0');
+    if (!date) { res.status(200).json({ ok: true, dates: await listDateKeys(COVERAGE_DIR) }); return; }
+    res.status(200).json({ ok: true, coverage: await readJsonFile(COVERAGE_DIR + '/' + date + '.json') });
+    return;
+  }
+  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
+  if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
+  if (!date) { res.status(400).json({ ok: false, error: 'Missing/invalid date' }); return; }
+
+  const path = COVERAGE_DIR + '/' + date + '.json';
+  const existing = await readJsonFile(path);
+  const doc = {
+    date: date,
+    checks: Array.isArray(existing.checks) ? existing.checks : [],
+    documented: (existing.documented && typeof existing.documented === 'object') ? existing.documented : {},
+    updatedAt: new Date().toISOString()
+  };
+  const body = req.body || {};
+
+  if (body.check) {
+    const c = body.check;
+    const exceptions = Array.isArray(c.exceptions) ? c.exceptions.slice(0, MAX_EXCEPTION_ROWS) : [];
+    const present = Array.isArray(c.presentKeys) ? c.presentKeys.slice(0, MAX_PRESENT_KEYS) : [];
+    const check = {
+      id: str(c.id, 64) || 'CK' + Date.now(),
+      asOf: str(c.asOf, 40),
+      fileName: str(c.fileName, 300),
+      graceMinutes: Number.isFinite(Number(c.graceMinutes)) ? Number(c.graceMinutes) : null,
+      summary: (c.summary && typeof c.summary === 'object') ? c.summary : {},
+      // Full detail for anyone who was not where they should be...
+      exceptions: exceptions.map(r => ({
+        key: str(r.key, 140), name: str(r.name, 120), badge: str(r.badge, 64), wfmId: str(r.wfmId, 64),
+        status: str(r.status, 24), present: !!r.present, shift: str(r.shift, 60),
+        location: str(r.location, 200), job: str(r.job, 120), manager: str(r.manager, 120)
+      })),
+      // ...and a bare key list for everyone who WAS on premise, so presence can
+      // still be proven later without storing a row per person per pull.
+      presentKeys: present.map(k => str(k, 140)),
+      savedAt: new Date().toISOString()
+    };
+    // Re-running the same pull replaces it rather than double-counting the day.
+    const i = doc.checks.findIndex(x => x && x.id === check.id);
+    if (i === -1) doc.checks.push(check); else doc.checks[i] = check;
+    doc.checks.sort((a, b) => String(a.asOf || '').localeCompare(String(b.asOf || '')));
+    if (doc.checks.length > MAX_CHECKS_PER_DAY) doc.checks = doc.checks.slice(-MAX_CHECKS_PER_DAY);
+  } else if (body.document) {
+    const dRec = body.document;
+    const key = str(dRec.key, 140);
+    if (!key) { res.status(400).json({ ok: false, error: 'Missing document key' }); return; }
+    // An empty reason clears the entry rather than storing a blank note.
+    if (!str(dRec.reason, 500).trim() && !str(dRec.disposition, 60).trim()) {
+      delete doc.documented[key];
+    } else {
+      doc.documented[key] = {
+        reason: str(dRec.reason, 500),
+        disposition: str(dRec.disposition, 60),
+        name: str(dRec.name, 120),
+        badge: str(dRec.badge, 64),
+        updatedAt: new Date().toISOString()
+      };
+    }
+  } else {
+    res.status(400).json({ ok: false, error: 'Expected a check or a document' });
+    return;
+  }
+
+  await bucket.file(path).save(JSON.stringify(doc), {
+    contentType: 'application/json',
+    metadata: { cacheControl: 'no-cache, max-age=0' }
+  });
+  res.status(200).json({ ok: true, date: date, checks: doc.checks.length });
+}
+
 function parseToState(buffer, side) {
   const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -220,6 +401,8 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
       await handleKv(req, res, { path: OVERRIDES_PATH, field: 'action', responseKey: 'overrides', maxLen: 40, allowed: Object.keys(Core.ACTIONS) });
       return;
     }
+    if (req.query.schedule !== undefined) { await handleSchedule(req, res); return; }
+    if (req.query.coverage !== undefined) { await handleCoverage(req, res); return; }
     // Suite collections: ?attendance=1, ?timeoff=1, ?requisitions=1, ?performance=1
     const collectionKey = Object.keys(COLLECTIONS).find(k => req.query[k] !== undefined);
     if (collectionKey) {

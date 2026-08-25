@@ -67,3 +67,10 @@ node_modules/
 
 # dataconnect generated files
 .dataconnect
+
+# Source reports and the GEODIS workbook. These hold real employee names, EIDs,
+# start dates, and attendance points -- and this repo is served publicly by
+# GitHub Pages, so nothing here may ever be committed.
+*.xlsx
+*.xls
+*.csv

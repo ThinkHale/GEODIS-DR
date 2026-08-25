@@ -263,6 +263,12 @@
   function saveSchedule(period, doc) {
     return post('schedule=1&period=' + encodeURIComponent(period), doc);
   }
+  // Which days have stored checks, for the review picker.
+  function loadCoverageDates() {
+    return getJson(API + '?coverage=1')
+      .then(function (d) { return d.dates || []; })
+      .catch(function (err) { console.warn('Could not list stored coverage.', err); return []; });
+  }
   function loadCoverage(date) {
     return getJson(API + '?coverage=1&date=' + encodeURIComponent(date))
       .then(function (d) { return d.coverage || {}; })
@@ -304,6 +310,7 @@
     loadSchedule: loadSchedule,
     saveSchedule: saveSchedule,
     loadCoverage: loadCoverage,
+    loadCoverageDates: loadCoverageDates,
     saveCheck: saveCheck,
     saveDocumentation: saveDocumentation
   };

@@ -124,3 +124,21 @@ body.suite-active>header,body.suite-active>main,body.suite-active>.foot{display:
 .import-report strong{display:block;margin-bottom:4px}
 .import-report ul{margin:6px 0 0;padding-left:18px;color:var(--suite-muted)}
 .import-report li{margin-top:3px}
+
+/* ---- one attendance state per day ---- */
+.att-state{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;border:1px solid var(--suite-line);border-left:3px solid #c2cbd6;border-radius:0 7px 7px 0;padding:10px 13px}
+.att-state b{font:600 14px Inter}
+.att-state span{font-size:11.5px;color:var(--suite-muted)}
+.att-state.on{border-left-color:var(--suite-green);background:#f2fbf6}.att-state.on b{color:var(--suite-green)}
+.att-state.bad{border-left-color:var(--suite-red);background:#fff6f6}.att-state.bad b{color:var(--suite-red)}
+.att-state.warn{border-left-color:var(--suite-amber);background:#fffaf1}.att-state.warn b{color:var(--suite-amber)}
+.att-timeline{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}
+.att-timeline span{font:600 10px 'IBM Plex Mono';border:1px solid var(--suite-line);border-radius:4px;padding:2px 6px;cursor:help;color:var(--suite-muted)}
+.att-timeline span.on{color:var(--suite-green);border-color:#bfe3ce;background:#f2fbf6}
+.att-timeline span.off{color:var(--suite-red);border-color:#f0c6c6;background:#fff6f6}
+
+/* ---- reviewing a stored check ---- */
+.cov-review-bar{background:#f6f8fb;border:1px solid var(--suite-line);border-radius:8px;padding:10px 12px;margin-bottom:14px}
+.review-banner{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;background:#eef3fb;border:1px solid #cfdcf0;border-left:3px solid var(--suite-blue);border-radius:0 8px 8px 0;padding:11px 14px;margin-bottom:14px}
+.review-banner strong{font:700 13px 'Barlow Semi Condensed';text-transform:uppercase;letter-spacing:.4px;color:var(--suite-blue)}
+.review-banner span{font-size:11.5px;color:var(--suite-muted)}

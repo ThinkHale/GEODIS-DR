@@ -20,11 +20,13 @@
   /* How a documented absence is characterised. "Badge / system issue" matters
      most: it is the way to record that the person WAS here and the reader missed
      them, so a hardware gap never turns into a disciplinary record. */
-  var DISPOSITIONS = ['', 'Called in', 'No call / no show', 'Approved time off', 'Late arrival',
-    'Left early', 'Reassigned', 'Badge / system issue', 'Other'];
+  var DISPOSITIONS = ['', ScheduleCore.PRESENT_DISPOSITION, 'Called in', 'No call / no show',
+    'Approved time off', 'Late arrival', 'Left early', 'Reassigned', 'Badge / system issue', 'Other'];
   // Disposition -> the occurrence a one-click log would create. null means the
   // absence is explained and no occurrence should be offered at all.
   var DISPOSITION_OCCURRENCE = {
+    // They were here -- the reader saw a punch out, or missed the punch in.
+    'Present': null,
     'Called in': { type: 'Absent', points: 1 },
     'No call / no show': { type: 'No Call / No Show', points: 2 },
     'Approved time off': null,
@@ -67,7 +69,9 @@
       exportOpen: false, exportShift: '1st', exportLoc: 'all',
       // Loaded back from Firebase: this week's stored plan and today's stored
       // checks. These are what make a schedule and an absence outlive the tab.
-      storedWeek: null, storedDay: null, saving: '', savedAt: ''
+      storedWeek: null, storedDay: null, saving: '', savedAt: '',
+      // Reviewing a check someone already uploaded, rather than the live compare.
+      dates: [], reviewDate: '', reviewId: '', reviewDay: null
     }
   };
 
@@ -547,11 +551,11 @@
     var week = state.coverage.storedWeek;
     var day = state.coverage.storedDay;
     var mine = week ? ScheduleCore.scheduleFor(week, keys) : null;
-    var history = ScheduleCore.presenceHistory(day, keys);
-    var doc = ScheduleCore.documentedFor(day, keys);
+    var att = ScheduleCore.resolveAttendance(day, keys);
+    var doc = att.documented;
 
     var body;
-    if (!mine && !history.length) {
+    if (!mine && !att.checks) {
       body = empty('No schedule on file',
         week ? 'This associate is not on the stored weekly schedule.' : 'Upload a weekly schedule in Shift coverage.');
     } else {
@@ -563,12 +567,8 @@
           '<span>' + esc(d.slice(5)) + '</span><b>' +
           esc(sh.code || sh.raw || '—') + '</b></div>';
       }).join('') + '</div>' : '') +
-      (history.length ? '<div class="sched-checks">' + history.map(function (h) {
-        var cls = h.present ? 'on' : (h.severity || 'off');
-        return '<div class="sched-check ' + cls + '"><span>' + esc((h.asOf || '').slice(11, 16)) + '</span><b>' +
-          esc(h.present ? 'On premise' : (h.statusLabel || 'Not on premise')) + '</b></div>';
-      }).join('') + '</div>'
-        : '<p class="perf-note">No on-premise check has been recorded today.</p>') +
+      (att.checks ? attendanceState(att)
+        : '<p class="perf-note">No on-premise check has covered this associate today.</p>') +
       (doc ? '<div class="sched-doc"><b>' + esc(doc.disposition || 'Documented') + '</b>' +
         (doc.reason ? ' — ' + esc(doc.reason) : '') + '</div>' : '');
     }
@@ -579,6 +579,27 @@
     return '<section class="suite-panel"><div class="suite-panel-head"><h2>Schedule &amp; presence</h2>' +
       '<div class="suite-actions"><button class="suite-btn" data-nav="coverage">Coverage</button></div></div>' +
       tag + body + '</section>';
+  }
+
+  /* ONE state for the day, however many times the report was pulled, with the
+     individual pulls underneath as supporting detail rather than as separate
+     attendance records. */
+  function attendanceState(att) {
+    var cls = att.present ? 'on' : (att.severity || 'off');
+    return '<div class="att-state ' + cls + '">' +
+      '<b>' + esc(att.label || 'No state') + '</b>' +
+      '<span>' +
+      (att.overridden ? 'Marked present despite the reader'
+        : att.present ? 'First seen ' + esc((att.firstPresent || '').slice(11, 16))
+        : 'Across ' + att.checks + ' check' + (att.checks === 1 ? '' : 's')) +
+      '</span></div>' +
+      (att.evidence.length > 1
+        ? '<div class="att-timeline">' + att.evidence.map(function (e) {
+            return '<span class="' + (e.present ? 'on' : 'off') + '" title="' +
+              esc(e.present ? 'On premise' : (ScheduleCore.STATUS[e.status] ? ScheduleCore.STATUS[e.status].label : 'Not on premise')) +
+              '">' + esc((e.asOf || '').slice(11, 16)) + '</span>';
+          }).join('') + '</div>'
+        : '');
   }
 
   function perfStat(label, value, plain) {
@@ -651,9 +672,11 @@
     state.coverage.saving = 'check';
     render();
     SuiteData.saveCheck(date, check).then(function () {
-      return SuiteData.loadCoverage(date);
-    }).then(function (day) {
-      state.coverage.storedDay = day;
+      return Promise.all([SuiteData.loadCoverage(date), SuiteData.loadCoverageDates()]);
+    }).then(function (r) {
+      state.coverage.storedDay = r[0];
+      // So the pull just saved is immediately reviewable.
+      state.coverage.dates = r[1] || state.coverage.dates;
       savedOk();
     }).catch(function (err) { saveFailed('on-premise check', err); });
   }
@@ -675,10 +698,11 @@
   function loadStoredCoverage() {
     var todayIso = ScheduleCore.isoDate(new Date());
     var week = SuiteData.weekStart(todayIso);
-    return Promise.all([SuiteData.loadSchedule(week), SuiteData.loadCoverage(todayIso)])
+    return Promise.all([SuiteData.loadSchedule(week), SuiteData.loadCoverage(todayIso), SuiteData.loadCoverageDates()])
       .then(function (r) {
         state.coverage.storedWeek = r[0];
         state.coverage.storedDay = r[1];
+        state.coverage.dates = r[2] || [];
         // A stored week also means the coverage view works on a fresh browser
         // with only the on-premise export dropped in.
         if (!state.coverage.schedule && r[0] && r[0].people && r[0].people.length) {
@@ -892,8 +916,11 @@
   /* Only a person who was not where they should be gets a documentation box --
      there is nothing to explain about someone who is working their shift. */
   function covDocCell(r) {
-    if (r.severity !== 'bad' && r.severity !== 'warn') return '<span class="sub">—</span>';
-    var key = ScheduleCore.personKey(r);
+    return covDocFor(ScheduleCore.personKey(r), r.name, r.badge, r.severity);
+  }
+  function covDocFor(key, name, badge, severity) {
+    if (severity !== 'bad' && severity !== 'warn') return '<span class="sub">—</span>';
+    var r = { name: name, badge: badge };
     var doc = documentedFor(key);
     var occ = doc && doc.disposition ? DISPOSITION_OCCURRENCE[doc.disposition] : undefined;
     return '<div class="cov-doc">' +
@@ -914,8 +941,8 @@
       '</div>';
   }
   function documentedFor(key) {
-    var docs = (state.coverage.storedDay && state.coverage.storedDay.documented) || {};
-    return docs[key] || null;
+    var src = state.coverage.reviewDate ? state.coverage.reviewDay : state.coverage.storedDay;
+    return ((src && src.documented) || {})[key] || null;
   }
 
   /* ---------- export for the GEODIS headcount spreadsheet ----------
@@ -968,6 +995,78 @@
       '</section>';
   }
 
+  /* ---------- reviewing a stored check ----------
+     Anyone can open a pull someone else uploaded. A stored check holds the
+     summary, full detail on every exception, and a key list of who was on
+     premise -- not a row per person -- so the review shows exactly that and
+     says so, rather than implying it can rebuild the whole comparison. */
+  function covReviewPicker() {
+    var c = state.coverage;
+    var dates = c.dates.slice().sort().reverse();
+    if (!dates.length && !c.reviewDate) return '';
+    var checks = (c.reviewDay && c.reviewDay.checks) || [];
+    return '<div class="filter-row cov-controls cov-review-bar">' +
+      '<label class="cov-ctl">Review a stored check<select class="suite-select" id="review-date">' +
+      '<option value="">Current upload</option>' +
+      dates.map(function (d) {
+        return '<option value="' + esc(d) + '" ' + (c.reviewDate === d ? 'selected' : '') + '>' + esc(d) + '</option>';
+      }).join('') + '</select></label>' +
+      (c.reviewDate
+        ? '<label class="cov-ctl">Pull<select class="suite-select" id="review-check">' +
+          (checks.length
+            ? checks.map(function (ck) {
+                return '<option value="' + esc(ck.id) + '" ' + (c.reviewId === ck.id ? 'selected' : '') + '>' +
+                  esc((ck.asOf || '').slice(11, 16) || ck.id) +
+                  (ck.summary && ck.summary.coverage != null ? ' · ' + ck.summary.coverage + '%' : '') +
+                  '</option>';
+              }).join('')
+            : '<option value="">No checks stored that day</option>') +
+          '</select></label>' +
+          '<button class="suite-btn" data-review-exit>Back to current upload</button>'
+        : '') +
+      '</div>';
+  }
+
+  function reviewedCheck() {
+    var c = state.coverage;
+    if (!c.reviewDate || !c.reviewDay) return null;
+    var checks = c.reviewDay.checks || [];
+    if (!checks.length) return null;
+    return checks.filter(function (ck) { return ck.id === c.reviewId; })[0] || checks[checks.length - 1];
+  }
+
+  function covReview(check) {
+    var c = state.coverage;
+    var ex = check.exceptions || [];
+    var present = (check.presentKeys || []).length;
+    return '<div class="review-banner"><strong>Stored check · ' + esc(c.reviewDate) + ' ' +
+      esc((check.asOf || '').slice(11, 16)) + '</strong>' +
+      '<span>' + esc(check.fileName || 'uploaded report') + ' · ' + present + ' on premise · ' +
+      ex.length + ' exception' + (ex.length === 1 ? '' : 's') + '</span></div>' +
+      covMetrics(check.summary || { byStatus: {}, onShift: 0, coverage: null }) +
+      '<section class="suite-panel">' +
+      (ex.length
+        ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
+          '<th>Associate</th><th>Status</th><th>Scheduled shift</th><th>Location</th>' +
+          '<th>Supervisor</th><th>Documented</th></tr></thead><tbody>' +
+          ex.map(function (r) {
+            var st = ScheduleCore.STATUS[r.status] || { label: r.status, severity: '' };
+            var open = r.badge ? ' data-profile="' + esc(r.badge) + '"' : '';
+            return '<tr class="cov-row ' + st.severity + '">' +
+              '<td><div class="' + (r.badge ? 'name link' : 'name') + '"' + open + '>' + esc(r.name) + '</div>' +
+              '<div class="sub">' + esc(r.badge ? 'Badge ' + r.badge : (r.wfmId || 'No employee id')) + '</div></td>' +
+              '<td><span class="cov-status ' + st.severity + '">' + esc(st.label) + '</span></td>' +
+              '<td>' + esc(r.shift || '—') + '</td>' +
+              '<td>' + esc(locLeaf(r.location) || '—') + '</td>' +
+              '<td>' + esc(r.manager || '—') + '</td>' +
+              '<td>' + covDocFor(r.key, r.name, r.badge, st.severity) + '</td></tr>';
+          }).join('') + '</tbody></table></div>'
+        : empty('No exceptions in this check', 'Everyone on shift was on premise at that moment.')) +
+      '<p class="export-hint">A stored check keeps full detail on every exception and a list of who was on ' +
+      'premise. It does not keep a row per person, so the table above is the exceptions only.</p>' +
+      '</section>';
+  }
+
   function covTable(rows, total) {
     return '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
       '<th>Associate</th><th>Status</th><th>On premise</th><th>Scheduled shift</th>' +
@@ -996,18 +1095,23 @@
     var c = state.coverage;
     var head = hero('Shift coverage', 'The weekly schedule crossed with the on-premise snapshot. Both are saved to Firebase, so absences stay documented.') +
       covSources() + covSaveNote();
+    /* Reviewing comes first: the point of it is reading a pull SOMEONE ELSE
+       uploaded, so it must not require having loaded the reports yourself. */
+    var reviewing = reviewedCheck();
+    if (reviewing) return head + covReviewPicker() + covReview(reviewing);
     if (!c.schedule || !c.presence) {
       var need = !c.schedule && !c.presence ? 'both reports'
         : !c.schedule ? 'the weekly schedule export' : 'the on-premise export';
-      return head + '<section class="suite-panel"><div class="workflow-empty">' +
-        'Load ' + esc(need) + ' above to see who is scheduled right now and who is actually on premise.' +
+      return head + covReviewPicker() + '<section class="suite-panel"><div class="workflow-empty">' +
+        'Load ' + esc(need) + ' above to see who is scheduled right now and who is actually on premise' +
+        (state.coverage.dates.length ? ', or open a stored check above.' : '.') +
         '</div></section>';
     }
     var res = buildCoverageResult();
     // Nothing below the sources means anything if the reports do not pair up.
-    if (res.mismatch) return head + covMismatch(res);
+    if (res.mismatch) return head + covReviewPicker() + covMismatch(res);
     var rows = covFilter(res.rows);
-    return head + covControls(res) + covMetrics(res.summary) + covWarnings(res) + covExport(res) +
+    return head + covReviewPicker() + covControls(res) + covMetrics(res.summary) + covWarnings(res) + covExport(res) +
       '<section class="suite-panel">' + covFilters(res) +
       (rows.length ? covTable(rows, res.rows.length)
         : empty('Nothing matches those filters', 'Widen the status or location filter to see more.')) +
@@ -1312,6 +1416,13 @@
       return;
     }
 
+    if (e.target.closest('[data-review-exit]')) {
+      state.coverage.reviewDate = '';
+      state.coverage.reviewId = '';
+      state.coverage.reviewDay = null;
+      render();
+      return;
+    }
     if (e.target.closest('[data-export-toggle]')) {
       state.coverage.exportOpen = !state.coverage.exportOpen;
       render();
@@ -1355,7 +1466,7 @@
   // reason debounces so it is not one write per keystroke.
   var docTimers = {};
   function saveDoc(el) {
-    var date = ScheduleCore.isoDate(coverageAsOf());
+    var date = state.coverage.reviewDate || ScheduleCore.isoDate(coverageAsOf());
     var key = el.dataset.docKey;
     var row = el.closest('.cov-doc');
     var rec = {
@@ -1368,13 +1479,30 @@
     return SuiteData.saveDocumentation(date, rec).then(function () {
       return SuiteData.loadCoverage(date);
     }).then(function (day) {
-      state.coverage.storedDay = day;
+      if (state.coverage.reviewDate === date) state.coverage.reviewDay = day;
+      else state.coverage.storedDay = day;
     }).catch(function (err) {
       console.warn('Could not save the documentation.', err);
       alert('That note could not be saved, so it was not shared with anyone else.\n\n' + err.message);
     });
   }
   root.addEventListener('change', function (e) {
+    if (e.target.id === 'review-date') {
+      var date = e.target.value;
+      state.coverage.reviewDate = date;
+      state.coverage.reviewId = '';
+      state.coverage.reviewDay = null;
+      if (!date) { render(); return; }
+      SuiteData.loadCoverage(date).then(function (day) {
+        state.coverage.reviewDay = day;
+        var checks = (day && day.checks) || [];
+        state.coverage.reviewId = checks.length ? checks[checks.length - 1].id : '';
+        render();
+      });
+      render();
+      return;
+    }
+    if (e.target.id === 'review-check') { state.coverage.reviewId = e.target.value; render(); return; }
     if (e.target.id === 'export-loc') { state.coverage.exportLoc = e.target.value; render(); return; }
     if (e.target.id === 'export-shift') { state.coverage.exportShift = e.target.value; render(); return; }
     if (!e.target.classList.contains('cov-disp')) return;

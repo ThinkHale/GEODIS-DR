@@ -173,6 +173,34 @@ same sorted first+last pair and ignores middle names, which appear in one system
 not the other. The `n:` namespace uses `rosterKey()` on both sides, or a profile
 could never find its own history.
 
+### One attendance state per person per day
+
+The on-premise report is pulled several times a day and every pull is stored, but
+that must not become several attendance states for one person.
+`resolveAttendance()` collapses them:
+
+- **Presence wins.** Absent at 10:00 and on premise at 10:30 means they were here.
+- **A pull that says nothing is not evidence.** Someone neither on premise nor an
+  exception was off shift at that moment. Those pulls are skipped, so an evening
+  pull cannot mark a 1st-shift associate absent.
+- **`Present` overrides the reader.** Someone who punched *out* instead of in
+  reads as absent to the badge reader; that disposition says they were here. It
+  also corrects the `Onsite` / `Short` counts in the headcount export, or those
+  would contradict the Comments cell beside them.
+
+The individual pulls stay as supporting detail on the profile, not as separate
+attendance records.
+
+### Reviewing a stored check
+
+Any pull can be reopened from the coverage view, including one somebody else
+uploaded — which is why the review is offered *before* the "load both reports"
+guard, not after it. A stored check keeps full detail on every exception and a
+key list of who was on premise, but **not a row per person**, so the review shows
+the exceptions and says as much rather than implying it can rebuild the whole
+comparison. Documentation written while reviewing is filed against the day being
+reviewed.
+
 ### Documenting an absence
 
 A documented absence stores a disposition and a free-text reason. It never creates

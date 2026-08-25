@@ -38,6 +38,10 @@
      simply not in the other file. Below this share of scheduled people found on
      premise, say so instead of reporting it as a coverage failure. */
   var LOW_OVERLAP_RATIO = 0.5;
+  /* Someone who punched OUT instead of in reads as absent to the badge reader.
+     Documenting them with this disposition overrides the reader -- they were
+     here. Shared with suite.js so both sides agree on the exact string. */
+  var PRESENT_DISPOSITION = 'Present';
 
   /* ---------- status vocabulary ----------
      severity drives the UI: 'bad' is an exception a supervisor should act on now,
@@ -115,6 +119,13 @@
 
   /* ---------- dates and times ---------- */
   function pad(n) { return String(n).padStart(2, '0'); }
+  /* A Date, whatever realm it came from. `instanceof Date` is realm-bound, so a
+     Date built outside this script's window (a test harness, an iframe) fails it
+     and we would silently fall back to "now" -- computing coverage for the wrong
+     instant and reporting it with full confidence. Duck-type instead. */
+  function asDate(v, fallback) {
+    return (v && typeof v.getTime === 'function' && !isNaN(v.getTime())) ? v : fallback;
+  }
   // Local-calendar ISO date. Never toISOString(): that shifts the day in any
   // timezone west of UTC, which is every GEODIS US site.
   function isoDate(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
@@ -413,7 +424,7 @@
     opts = opts || {};
     var schedule = opts.schedule || { people: [], dates: [] };
     var presence = opts.presence || { people: [] };
-    var asOf = opts.asOf instanceof Date ? opts.asOf : new Date();
+    var asOf = asDate(opts.asOf, new Date());
     var grace = opts.graceMinutes == null ? GRACE_MINUTES : Number(opts.graceMinutes);
 
     var todayKey = isoDate(asOf);
@@ -633,8 +644,8 @@
       return sev === 'bad' || sev === 'warn';
     });
     return {
-      id: opts.id || ('CK' + (res.asOf instanceof Date ? res.asOf.getTime() : Date.now())),
-      asOf: res.asOf instanceof Date ? isoDateTime(res.asOf) : '',
+      id: opts.id || ('CK' + (asDate(res.asOf) ? res.asOf.getTime() : Date.now())),
+      asOf: asDate(res.asOf) ? isoDateTime(res.asOf) : '',
       fileName: opts.fileName || '',
       graceMinutes: res.graceMinutes,
       summary: res.summary,
@@ -735,7 +746,11 @@
 
     var out = rows.map(function (r) {
       var p = profiles && r.badge ? profiles.get(r.badge) : null;
+      var doc = documented[personKey(r)];
       return {
+        // A punch-out mistaken for an absence is corrected here too, or the
+        // Onsite count would contradict the Comments cell beside it.
+        present: r.present || !!(doc && doc.disposition === PRESENT_DISPOSITION),
         name: r.name,
         eid: r.wfmId || '',
         startDate: p ? shortDate(p.crmStart || p.beeStart || '') : '',
@@ -744,7 +759,7 @@
         points: p ? p.points : '',
         comments: commentFor(r, documented),
         // Carried for the preview, not written to the sheet.
-        status: r.status, present: r.present, badge: r.badge || ''
+        status: r.status, badge: r.badge || ''
       };
     }).sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
 
@@ -796,6 +811,9 @@
      they should be gets a blank cell rather than noise. */
   function commentFor(r, documented) {
     var doc = documented[personKey(r)];
+    if (doc && doc.disposition === PRESENT_DISPOSITION) {
+      return doc.reason ? PRESENT_DISPOSITION + ' - ' + doc.reason : PRESENT_DISPOSITION;
+    }
     if (doc && (doc.reason || doc.disposition)) {
       return doc.disposition && doc.reason ? doc.disposition + ' - ' + doc.reason : (doc.reason || doc.disposition);
     }
@@ -835,6 +853,61 @@
       };
     });
   }
+  /* ---------- one attendance state per person per day ----------
+     The on-premise report gets pulled several times a day, and each pull is
+     stored. That must not turn into several attendance states for one person.
+
+     Presence wins: absent at 10:00 and on premise at 10:30 means they were here.
+     A check that says nothing about someone -- not on premise AND not an
+     exception, i.e. they were off shift -- is not evidence either way and is
+     skipped, so an evening pull cannot mark a 1st-shift associate absent.
+     A "Present" disposition overrides the reader entirely. */
+  function resolveAttendance(day, keys) {
+    var set = {};
+    (keys || []).forEach(function (k) { set[k] = true; });
+
+    var evidence = [];
+    ((day && day.checks) || []).forEach(function (c) {
+      var onPrem = (c.presentKeys || []).some(function (k) { return set[k]; });
+      var ex = (c.exceptions || []).filter(function (e) { return set[e.key]; })[0] || null;
+      if (!onPrem && !ex) return;                 // this check knows nothing about them
+      evidence.push({
+        asOf: c.asOf, present: onPrem,
+        status: ex ? ex.status : '', shift: ex ? ex.shift : ''
+      });
+    });
+
+    var doc = documentedFor(day, keys);
+    var overridden = !!(doc && doc.disposition === PRESENT_DISPOSITION);
+    var seenOnPremise = evidence.some(function (e) { return e.present; });
+    var present = overridden || seenOnPremise;
+    var firstPresent = (evidence.filter(function (e) { return e.present; })[0] || {}).asOf || '';
+    var absences = evidence.filter(function (e) { return !e.present && e.status; });
+    var lastAbsence = absences.length ? absences[absences.length - 1] : null;
+
+    var status = '', label = '', severity = '';
+    if (present) {
+      status = 'present';
+      severity = 'ok';
+      label = seenOnPremise ? 'On premise' : 'Present (documented)';
+    } else if (lastAbsence) {
+      status = lastAbsence.status;
+      label = STATUS[status] ? STATUS[status].label : status;
+      severity = STATUS[status] ? STATUS[status].severity : '';
+    }
+
+    return {
+      checks: evidence.length,        // how many pulls actually covered them
+      evidence: evidence,             // the timeline, for detail
+      present: present,
+      overridden: overridden,         // present only because someone said so
+      status: status, label: label, severity: severity,
+      firstPresent: firstPresent,
+      shift: (evidence.filter(function (e) { return e.shift; })[0] || {}).shift || '',
+      documented: doc
+    };
+  }
+
   function documentedFor(day, keys) {
     var docs = (day && day.documented) || {};
     for (var i = 0; i < (keys || []).length; i++) {
@@ -864,6 +937,7 @@
     splitNameAndId: splitNameAndId,
     idSuffix: idSuffix,
     isoDate: isoDate,
+    asDate: asDate,
     isoFromMdY: isoFromMdY,
     parseClock: parseClock,
     parseShiftRange: parseShiftRange,
@@ -890,6 +964,8 @@
     locationLeaf: locationLeaf,
     spreadsheetExport: spreadsheetExport,
     toTsv: toTsv,
+    PRESENT_DISPOSITION: PRESENT_DISPOSITION,
+    resolveAttendance: resolveAttendance,
     presenceHistory: presenceHistory,
     documentedFor: documentedFor,
     scheduleFor: scheduleFor

@@ -1,7 +1,5 @@
 :root{--suite-navy:#071f43;--suite-navy2:#0b2c5b;--suite-orange:#f26a21;--suite-blue:#1556a8;--suite-bg:#f4f6f9;--suite-line:#dce2e9;--suite-text:#10213d;--suite-muted:#66758b;--suite-green:#138a55;--suite-red:#cc3030;--suite-amber:#d87800}
 body.suite-active>header,body.suite-active>main,body.suite-active>.foot{display:none}
-body:not(.suite-active)>#suite-root{display:none}
-.suite-return{display:none;position:fixed;left:18px;bottom:18px;z-index:90;border:0;border-radius:7px;background:#f26a21;color:#fff;padding:10px 14px;font:600 12px Inter;box-shadow:0 8px 24px rgba(11,37,69,.25);cursor:pointer}body:not(.suite-active)>.suite-return{display:block}
 #suite-root{min-height:100vh;background:var(--suite-bg);color:var(--suite-text);font-family:Inter,system-ui,sans-serif}
 .suite-layout{display:grid;grid-template-columns:236px minmax(0,1fr);min-height:100vh}
 .suite-nav{position:sticky;top:0;height:100vh;background:var(--suite-navy);color:white;display:flex;flex-direction:column;padding:24px 14px 18px;z-index:20}
@@ -21,3 +19,47 @@ body:not(.suite-active)>#suite-root{display:none}
 .suite-modal-backdrop{position:fixed;inset:0;background:rgba(5,20,43,.52);z-index:100;display:grid;place-items:center;padding:20px}.suite-modal{width:min(560px,100%);background:white;border-radius:8px;box-shadow:0 18px 55px rgba(5,20,43,.3)}.suite-modal-head{padding:16px 18px;border-bottom:1px solid var(--suite-line);display:flex;align-items:center}.suite-modal-head h3{margin:0;font:700 18px 'Barlow Semi Condensed';text-transform:uppercase}.suite-modal-head button{margin-left:auto}.suite-form{padding:18px;display:grid;grid-template-columns:1fr 1fr;gap:14px}.suite-field{display:flex;flex-direction:column;gap:5px}.suite-field.full{grid-column:1/-1}.suite-field label{font-size:10.5px;font-weight:600;color:var(--suite-muted);text-transform:uppercase}.suite-field input,.suite-field select,.suite-field textarea{width:100%;border:1px solid var(--suite-line);border-radius:6px;padding:9px;font:12px Inter}.suite-modal-actions{grid-column:1/-1;display:flex;justify-content:flex-end;gap:8px;padding-top:4px}
 @media(max-width:1050px){.suite-layout{grid-template-columns:78px minmax(0,1fr)}.suite-brand strong,.suite-brand small,.suite-nav-btn span,.suite-nav-footer{display:none}.suite-brand{padding-inline:5px;justify-content:center}.suite-nav-btn{justify-content:center}.suite-nav-btn.active:before{left:-14px}.suite-grid{grid-template-columns:1fr}.metric-strip{grid-template-columns:repeat(2,1fr)}.metric:nth-child(2){border-right:0}.metric:nth-child(-n+2){border-bottom:1px solid var(--suite-line)}}
 @media(max-width:680px){.suite-layout{display:block}.suite-nav{position:fixed;left:0;right:0;bottom:0;top:auto;height:63px;display:block;padding:7px 4px;z-index:50}.suite-brand,.suite-nav-footer{display:none}.suite-nav-list{margin:0;display:grid;grid-template-columns:repeat(6,1fr);gap:0}.suite-nav-btn{padding:8px 2px;display:flex;justify-content:center}.suite-nav-btn span{display:none}.suite-nav-btn.active:before{left:25%;right:25%;top:auto;bottom:-7px;width:auto;height:3px}.suite-top{height:auto;min-height:64px;padding:10px 14px}.suite-location,.suite-user>span{display:none}.suite-content{padding:14px 12px 82px;min-width:0;overflow:hidden}.metric-strip{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.metric{padding:13px 11px;grid-template-columns:34px minmax(0,1fr)}.metric-icon{width:34px;height:34px}.metric-value{font-size:22px}.metric-note{font-size:9.5px}.suite-form{grid-template-columns:1fr}.suite-field.full,.suite-modal-actions{grid-column:1}.module-hero{align-items:flex-start;flex-direction:column}.suite-table{min-width:720px}.workflow-sources{grid-template-columns:1fr}.shift-fields{align-items:stretch;flex-direction:column}.shift-fields button{margin-left:0}.result-counts{display:none}.result-footer{align-items:flex-start;gap:10px;flex-direction:column}}
+
+/* ---- reconciliation mounted inside the shell ----
+   #recon-main is hidden by the rule above while parked as a direct child of
+   <body>; once moved into #recon-mount it is no longer a direct child, so it
+   shows. Drop its standalone page chrome -- .suite-content already pads. */
+#recon-mount>main{max-width:none;margin:0;padding:0}
+
+/* ---- roster + profile ---- */
+.suite-market{max-width:220px}
+.name.link{cursor:pointer;color:var(--suite-blue)}
+.name.link:hover{text-decoration:underline}
+.dup-flag{color:var(--suite-red)}
+.warn-text{color:var(--suite-amber)}
+.score.none{background:#eef1f5;color:var(--suite-muted);font-weight:500}
+.standing{font-size:11px;font-weight:600;white-space:nowrap}
+.standing.ok{color:var(--suite-green)}
+.standing.warn{color:var(--suite-amber)}
+.standing.bad{color:var(--suite-red)}
+.recon-chip{display:inline-block;font-size:10.5px;font-weight:600;letter-spacing:.2px;padding:3px 8px;border-radius:20px;background:#eef1f5;color:var(--suite-muted);white-space:nowrap}
+.recon-chip.ok{background:#e4f4ec;color:var(--suite-green)}
+.recon-chip.warn{background:#fbeed6;color:#a2670f;cursor:help}
+.row-cap{padding:10px 4px 2px;font-size:11.5px;color:var(--suite-muted)}
+.warn-banner{background:#fbeed6;border:1px solid #f0d9ae;color:#8a5a10;border-radius:8px;padding:10px 14px;font-size:12.5px;margin-bottom:14px}
+.warn-banner b{font-weight:700}
+
+.profile-head{display:flex;align-items:center;gap:16px;background:#fff;border:1px solid var(--suite-line);border-radius:10px;padding:18px 20px;margin-bottom:16px}
+.profile-avatar{width:52px;height:52px;border-radius:50%;flex:none;display:grid;place-items:center;background:var(--suite-navy);color:#fff;font:700 18px 'Barlow Semi Condensed'}
+.profile-id{margin-right:auto;min-width:0}
+.profile-id h2{margin:0;font:700 21px 'Barlow Semi Condensed';letter-spacing:.3px}
+.profile-id p{margin:2px 0 0;font-size:12px;color:var(--suite-muted)}
+.profile-id p.sub{font-style:italic}
+.profile-chips{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+.perf-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px}
+.perf-stat{border:1px solid var(--suite-line);border-radius:8px;padding:11px 13px}
+.perf-stat span{display:block;font-size:10.5px;letter-spacing:.4px;text-transform:uppercase;color:var(--suite-muted)}
+.perf-stat b{font:600 20px Inter;color:var(--suite-text)}
+.perf-note{margin:12px 0 0;font-size:12.5px;color:var(--suite-muted)}
+
+.detail-list{display:grid;grid-template-columns:auto 1fr;gap:7px 16px;margin:0;font-size:12.5px}
+.detail-list dt{color:var(--suite-muted);font-weight:600;white-space:nowrap}
+.detail-list dd{margin:0;color:var(--suite-text)}
+.activity-row[data-profile]{cursor:pointer}
+.alert-row[data-nav]{cursor:pointer}

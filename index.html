@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="suite.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="reconcile-core.js"></script>
+<script src="suite-data.js"></script>
 <style>
   :root{
     --navy:#0B2545; --navy-2:#14365e; --navy-3:#1d4a7a;
@@ -236,7 +237,7 @@
   </div>
 </header>
 
-<main>
+<main id="recon-main">
   <div class="sync-banner hidden" id="sync-banner">
     <span class="sync-dot"></span>
     <span id="sync-banner-text">Synced automatically.</span>
@@ -808,6 +809,7 @@ async function loadNotes(){
     console.warn('Could not load shared notes.', err);
   }
   renderTable();
+  publishRecords();
 }
 async function saveNote(badge, note){
   if(note.trim()==='') delete S.notes[badge];
@@ -843,6 +845,17 @@ function applyOverrides(){
     r.action=(ov && ov.action)?ov.action:r.computedAction;
     r.overridden=!!(ov && ov.action);
   });
+  publishRecords();
+}
+// The suite's associate roster IS this record set -- see suite-data.js. Emitting
+// it as an event keeps the two scripts decoupled and order-independent.
+function publishRecords(){
+  document.dispatchEvent(new CustomEvent('geodis:records', {detail:{
+    records: S.records,
+    counts: S._counts,
+    notes: S.notes,
+    updatedAt: syncedSnapshot ? syncedSnapshot.updatedAt : null
+  }}));
 }
 async function loadOverrides(){
   try{
@@ -901,6 +914,7 @@ function showSyncedResults(){
     endDate: r.endDate ? new Date(r.endDate) : null
   }));
   S._counts = syncedSnapshot.counts;
+  publishRecords();
   document.getElementById('upload-section').classList.add('hidden');
   document.getElementById('await-state').classList.add('hidden');
   document.getElementById('sync-banner').classList.remove('hidden');

@@ -45,6 +45,22 @@ const RAW_PATH = {
 const SNAPSHOT_PATH = 'snapshots/latest.json';
 const NOTES_PATH = 'notes/notes.json';
 const OVERRIDES_PATH = 'overrides/overrides.json';   // badge -> manual status override
+// Suite collections. Unlike the badge-keyed stores above these hold a list of
+// records, because a person has many attendance events and many time-off
+// requests, and a requisition is not tied to a badge at all.
+const COLLECTIONS = {
+  attendance:   { path: 'attendance/events.json',        responseKey: 'attendance',
+                  fields: { badge: 'str', date: 'str', type: 'str', minutes: 'num', points: 'num', notes: 'str' } },
+  timeoff:      { path: 'timeoff/requests.json',         responseKey: 'timeOff',
+                  fields: { badge: 'str', type: 'str', start: 'str', end: 'str', hours: 'num', status: 'str', notes: 'str' } },
+  requisitions: { path: 'requisitions/requisitions.json', responseKey: 'requisitions',
+                  fields: { title: 'str', department: 'str', shift: 'str', market: 'str', openings: 'num',
+                            filled: 'num', priority: 'str', status: 'str', due: 'str', notes: 'str' } },
+  performance:  { path: 'performance/metrics.json',      responseKey: 'performance',
+                  fields: { badge: 'str', period: 'str', quality: 'num', productivity: 'num', safety: 'num',
+                            units: 'num', hours: 'num', notes: 'str' } }
+};
+const MAX_COLLECTION_RECORDS = 20000;
 const NOTES_ORIGIN = 'https://geodis.ebtools.pro';   // the tool's front-end origin
 
 async function readRawFile(type) {
@@ -109,6 +125,83 @@ async function handleKv(req, res, opts) {
   res.status(405).json({ ok: false, error: 'Method not allowed' });
 }
 
+/* ---------- shared suite collections ----------
+   A collection is a JSON array of records, each carrying a stable `id`. One POST
+   either upserts a single record, deletes one (`_delete`), or replaces the whole
+   list (`records`) -- the last of these is how a morning report import will land.
+   Writes are gated by the same CORS + Origin check as the badge-keyed stores. */
+async function readJsonArray(path) {
+  const data = await readJsonFile(path);
+  return Array.isArray(data) ? data : [];
+}
+// Copy only whitelisted fields, coercing to the declared type. Anything the
+// browser sends that we did not declare is dropped rather than stored.
+function sanitizeRecord(raw, fields) {
+  const out = {};
+  Object.keys(fields).forEach(k => {
+    if (raw[k] === undefined || raw[k] === null) return;
+    if (fields[k] === 'num') {
+      const n = Number(raw[k]);
+      if (Number.isFinite(n)) out[k] = n;
+    } else {
+      out[k] = String(raw[k]).slice(0, 500);
+    }
+  });
+  return out;
+}
+async function handleCollection(req, res, opts) {
+  setKvCors(res);
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (req.method === 'GET') {
+    res.set('Cache-Control', 'no-cache, max-age=0');
+    res.status(200).json({ ok: true, [opts.responseKey]: await readJsonArray(opts.path) });
+    return;
+  }
+  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
+  if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
+
+  const body = req.body || {};
+  const now = new Date().toISOString();
+  let list;
+
+  if (Array.isArray(body.records)) {
+    // Bulk replace, used by report imports.
+    if (body.records.length > MAX_COLLECTION_RECORDS) {
+      res.status(400).json({ ok: false, error: 'Too many records' }); return;
+    }
+    list = body.records.map((raw, i) => {
+      const rec = sanitizeRecord(raw || {}, opts.fields);
+      rec.id = raw && raw.id != null ? String(raw.id).slice(0, 64) : opts.responseKey + '-' + Date.now() + '-' + i;
+      rec.updatedAt = now;
+      return rec;
+    });
+  } else {
+    const id = body.id != null ? String(body.id).trim() : '';
+    if (!id || id.length > 64) { res.status(400).json({ ok: false, error: 'Missing/invalid id' }); return; }
+    list = await readJsonArray(opts.path);
+    const idx = list.findIndex(x => x && x.id === id);
+    if (body._delete) {
+      if (idx === -1) { res.status(200).json({ ok: true, deleted: false }); return; }
+      list.splice(idx, 1);
+    } else {
+      if (idx === -1 && list.length >= MAX_COLLECTION_RECORDS) {
+        res.status(400).json({ ok: false, error: 'Collection is full' }); return;
+      }
+      const rec = sanitizeRecord(body, opts.fields);
+      rec.id = id;
+      rec.updatedAt = now;
+      if (idx === -1) list.push(rec);
+      else list[idx] = Object.assign({}, list[idx], rec);
+    }
+  }
+
+  await bucket.file(opts.path).save(JSON.stringify(list), {
+    contentType: 'application/json',
+    metadata: { cacheControl: 'no-cache, max-age=0' }
+  });
+  res.status(200).json({ ok: true, count: list.length });
+}
+
 function parseToState(buffer, side) {
   const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -125,6 +218,12 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
     }
     if (req.query.overrides !== undefined) {
       await handleKv(req, res, { path: OVERRIDES_PATH, field: 'action', responseKey: 'overrides', maxLen: 40, allowed: Object.keys(Core.ACTIONS) });
+      return;
+    }
+    // Suite collections: ?attendance=1, ?timeoff=1, ?requisitions=1, ?performance=1
+    const collectionKey = Object.keys(COLLECTIONS).find(k => req.query[k] !== undefined);
+    if (collectionKey) {
+      await handleCollection(req, res, COLLECTIONS[collectionKey]);
       return;
     }
 

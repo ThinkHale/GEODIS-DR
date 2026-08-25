@@ -11,13 +11,18 @@ const records = [
   { badge: 'b2', person: 'Cleo Nash', action: 'matched', actionLabel: 'Matched', reason: '', market: 'STL', crmStart: '1/3/2026' }
 ];
 const K_AVA = 'b:b1', K_CLEO = 'b:b2';
-const ex = (key, name, badge) => ({ key, name, badge, wfmId: '80-X', status: 'missing', shift: '7:00 AM - 3:30 PM', location: 'GEODIS/US/CL/CL1523/1523', manager: 'Boss, B' });
+const ex = (key, name, badge, status, loc, mgr) => ({
+  key, name, badge, wfmId: '80-X', status: status || 'missing',
+  shift: '7:00 AM - 3:30 PM', location: 'GEODIS/US/CL/CL' + (loc || '1523') + '/' + (loc || '1523'),
+  manager: mgr || 'Boss, B'
+});
+const EXTRA = ex('n:eli extra', 'Extra, Eli', '', 'unscheduled', '1541', 'Other, O');
 // Three pulls: Ava absent then absent then present; Cleo absent throughout.
 const days = {
   '2026-08-25': {
     date: '2026-08-25',
     checks: [
-      { id: 'C1', asOf: '2026-08-25T10:00:00', fileName: 'onprem-10.csv', summary: { onShift: 2, byStatus: { working: 0, missing: 2, unscheduled: 0 }, coverage: 0 }, presentKeys: [], exceptions: [ex(K_AVA, 'Reed, Ava', 'b1'), ex(K_CLEO, 'Nash, Cleo', 'b2')] },
+      { id: 'C1', asOf: '2026-08-25T10:00:00', fileName: 'onprem-10.csv', summary: { onShift: 2, byStatus: { working: 0, missing: 2, unscheduled: 0 }, coverage: 0 }, presentKeys: [], exceptions: [ex(K_AVA, 'Reed, Ava', 'b1'), ex(K_CLEO, 'Nash, Cleo', 'b2'), EXTRA] },
       { id: 'C2', asOf: '2026-08-25T10:15:00', fileName: 'onprem-1015.csv', summary: { onShift: 2, byStatus: { working: 0, missing: 2, unscheduled: 0 }, coverage: 0 }, presentKeys: [], exceptions: [ex(K_AVA, 'Reed, Ava', 'b1'), ex(K_CLEO, 'Nash, Cleo', 'b2')] },
       { id: 'C3', asOf: '2026-08-25T10:30:00', fileName: 'onprem-1030.csv', summary: { onShift: 2, byStatus: { working: 1, missing: 1, unscheduled: 0 }, coverage: 50 }, presentKeys: [K_AVA], exceptions: [ex(K_CLEO, 'Nash, Cleo', 'b2')] }
     ],
@@ -104,6 +109,52 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   t('the 10:00 pull shows both people absent',
     d.body.textContent.indexOf('Nash, Cleo') !== -1 && d.body.textContent.indexOf('Reed, Ava') !== -1);
   t('and its own coverage figure', d.body.textContent.indexOf('0%') !== -1);
+
+  console.log('— filters work inside a stored check —');
+  t('a filter row is rendered', !!$('#cov-status') && !!$('#cov-loc'));
+  t('search box is offered', !!$('#suite-search'));
+  const bodyRows = () => $$('.suite-table tbody tr').length;
+  t('all three exceptions listed', bodyRows() === 3);
+  t('status options come from this check', $$('#cov-status option').length === 3);
+  t('and are counted', $$('#cov-status option')[0].textContent.indexOf('(3)') !== -1);
+
+  pick('#cov-status', 'unscheduled');
+  t('status filter narrows', bodyRows() === 1);
+  t('to the right person', d.querySelector('.suite-table tbody tr').textContent.indexOf('Extra, Eli') !== -1);
+  pick('#cov-status', 'missing');
+  t('the other status narrows too', bodyRows() === 2);
+  pick('#cov-status', 'all');
+  t('back to all', bodyRows() === 3);
+
+  t('location options come from this check', $$('#cov-loc option').length === 3);
+  pick('#cov-loc', '1541');
+  t('location filter narrows', bodyRows() === 1);
+  pick('#cov-loc', 'all');
+  t('back to all locations', bodyRows() === 3);
+
+  const box = $('#suite-search');
+  box.value = 'cleo'; box.dispatchEvent(new w.Event('input', { bubbles: true }));
+  t('search narrows', bodyRows() === 1);
+  t('search keeps focus', d.activeElement.id === 'suite-search');
+  const box2 = $('#suite-search');
+  box2.value = ''; box2.dispatchEvent(new w.Event('input', { bubbles: true }));
+  t('clearing search restores', bodyRows() === 3);
+
+  const mp = $('#market-picker');
+  mp.value = 'STL'; mp.dispatchEvent(new w.Event('change', { bubbles: true }));
+  t('still reviewing after a market change', !!$('#review-check'));
+  t('market filter applies to a stored check', bodyRows() === 3);
+  t('the unrostered row is not hidden by a market', d.body.textContent.indexOf('Extra, Eli') !== -1);
+  mp.value = 'all'; mp.dispatchEvent(new w.Event('change', { bubbles: true }));
+
+  const box3 = $('#suite-search');
+  box3.value = 'zzzznobody'; box3.dispatchEvent(new w.Event('input', { bubbles: true }));
+  t('a filtered-to-nothing table says so', d.body.textContent.indexOf('Nothing matches those filters') !== -1);
+  t('and does not claim the check had no exceptions',
+    d.body.textContent.indexOf('No exceptions in this check') === -1);
+  const box4 = $('#suite-search');
+  box4.value = ''; box4.dispatchEvent(new w.Event('input', { bubbles: true }));
+  t('restored', bodyRows() === 3);
 
   console.log('— documenting while reviewing writes to that day —');
   // Cleo is absent at all three pulls, so she is the one the override must fix.

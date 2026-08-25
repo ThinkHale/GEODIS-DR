@@ -1035,21 +1035,71 @@
     return checks.filter(function (ck) { return ck.id === c.reviewId; })[0] || checks[checks.length - 1];
   }
 
-  function covReview(check) {
+  /* Filters for a stored check. Reuses the live view's control ids so the same
+     handlers drive both, but the options come from what this check actually
+     holds. Everything stored IS an exception, so the live "Exceptions only" and
+     "On shift now" have nothing to narrow here and read as All rather than
+     silently emptying the table. */
+  function covReviewFilters(check) {
     var c = state.coverage;
     var ex = check.exceptions || [];
+    var counts = {}, locs = {};
+    ex.forEach(function (r) {
+      counts[r.status] = (counts[r.status] || 0) + 1;
+      var l = locLeaf(r.location);
+      if (l) locs[l] = (locs[l] || 0) + 1;
+    });
+    var sel = counts[c.statusFilter] ? c.statusFilter : 'all';
+    var opts = [['all', 'All exceptions (' + ex.length + ')']].concat(
+      ScheduleCore.STATUS_ORDER.filter(function (k) { return counts[k]; })
+        .map(function (k) { return [k, ScheduleCore.STATUS[k].label + ' (' + counts[k] + ')']; }));
+    return '<div class="filter-row">' +
+      '<input class="suite-input" id="suite-search" value="' + esc(state.query) +
+      '" placeholder="Search by name, badge, employee id, or supervisor…">' +
+      '<select class="suite-select" id="cov-status">' + opts.map(function (o) {
+        return '<option value="' + o[0] + '" ' + (sel === o[0] ? 'selected' : '') + '>' + esc(o[1]) + '</option>';
+      }).join('') + '</select>' +
+      '<select class="suite-select" id="cov-loc"><option value="all">All locations</option>' +
+      Object.keys(locs).sort().map(function (l) {
+        return '<option value="' + esc(l) + '" ' + (c.location === l ? 'selected' : '') + '>' +
+          esc(l) + ' (' + locs[l] + ')</option>';
+      }).join('') + '</select></div>';
+  }
+  function covReviewFilter(rows) {
+    var c = state.coverage, q = state.query.trim().toLowerCase();
+    var wantStatus = c.statusFilter === 'exceptions' || c.statusFilter === 'onshift' ? 'all' : c.statusFilter;
+    return rows.filter(function (r) {
+      if (state.market !== 'all') {
+        // A stored exception carries no market of its own; take it from the
+        // profile. A row that never reached one stays visible, as in the live
+        // view -- this is where people who are not where they should be surface.
+        var p = r.badge ? profile(r.badge) : null;
+        if (p && p.market !== state.market) return false;
+      }
+      if (wantStatus !== 'all' && r.status !== wantStatus) return false;
+      if (c.location !== 'all' && locLeaf(r.location) !== c.location) return false;
+      if (!q) return true;
+      return (r.name + ' ' + r.badge + ' ' + r.wfmId + ' ' + r.manager + ' ' + r.job)
+        .toLowerCase().indexOf(q) !== -1;
+    });
+  }
+
+  function covReview(check) {
+    var c = state.coverage;
+    var all = check.exceptions || [];
+    var ex = covReviewFilter(all);
     var present = (check.presentKeys || []).length;
     return '<div class="review-banner"><strong>Stored check · ' + esc(c.reviewDate) + ' ' +
       esc((check.asOf || '').slice(11, 16)) + '</strong>' +
       '<span>' + esc(check.fileName || 'uploaded report') + ' · ' + present + ' on premise · ' +
       ex.length + ' exception' + (ex.length === 1 ? '' : 's') + '</span></div>' +
       covMetrics(check.summary || { byStatus: {}, onShift: 0, coverage: null }) +
-      '<section class="suite-panel">' +
+      '<section class="suite-panel">' + covReviewFilters(check) +
       (ex.length
         ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
           '<th>Associate</th><th>Status</th><th>Scheduled shift</th><th>Location</th>' +
           '<th>Supervisor</th><th>Documented</th></tr></thead><tbody>' +
-          ex.map(function (r) {
+          ex.slice(0, MAX_ROWS).map(function (r) {
             var st = ScheduleCore.STATUS[r.status] || { label: r.status, severity: '' };
             var open = r.badge ? ' data-profile="' + esc(r.badge) + '"' : '';
             return '<tr class="cov-row ' + st.severity + '">' +
@@ -1060,8 +1110,10 @@
               '<td>' + esc(locLeaf(r.location) || '—') + '</td>' +
               '<td>' + esc(r.manager || '—') + '</td>' +
               '<td>' + covDocFor(r.key, r.name, r.badge, st.severity) + '</td></tr>';
-          }).join('') + '</tbody></table></div>'
-        : empty('No exceptions in this check', 'Everyone on shift was on premise at that moment.')) +
+          }).join('') + '</tbody></table></div>' + rowCap(Math.min(ex.length, MAX_ROWS), ex.length)
+        : empty(all.length ? 'Nothing matches those filters' : 'No exceptions in this check',
+                all.length ? 'Widen the status, location, or market filter to see more.'
+                           : 'Everyone on shift was on premise at that moment.')) +
       '<p class="export-hint">A stored check keeps full detail on every exception and a list of who was on ' +
       'premise. It does not keep a row per person, so the table above is the exceptions only.</p>' +
       '</section>';

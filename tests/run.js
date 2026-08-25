@@ -15,6 +15,7 @@ const SUITES = [
   { file: 'coverage.test.js', name: 'schedule vs. on-premise coverage (schedule-core.js)', dom: false },
   { file: 'persistence.test.js', name: 'schedule + coverage persistence', dom: false },
   { file: 'sheet-export.test.js', name: 'GEODIS headcount spreadsheet export', dom: false },
+  { file: 'report-pairing.test.js', name: 'pairing the two WFM reports', dom: false },
   { file: 'market-filter.test.js', name: 'market filter across every view (DOM)', dom: true },
   { file: 'coverage-ui.test.js', name: 'coverage persistence + spreadsheet paste (DOM)', dom: true },
   { file: 'suite-ui.test.js', name: 'suite modules + reconciliation mount', dom: true },

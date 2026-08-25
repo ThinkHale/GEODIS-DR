@@ -32,6 +32,12 @@
      in the source report than a real shift -- see parseShiftRange. */
   var GRACE_MINUTES = 10;
   var LONG_SHIFT_HOURS = 16;
+  /* Both reports are exported per site. Pairing a schedule for one site with an
+     on-premise pull for another yields a confident, catastrophic, and completely
+     wrong result -- every scheduled person reads as absent because they are
+     simply not in the other file. Below this share of scheduled people found on
+     premise, say so instead of reporting it as a coverage failure. */
+  var LOW_OVERLAP_RATIO = 0.5;
 
   /* ---------- status vocabulary ----------
      severity drives the UI: 'bad' is an exception a supervisor should act on now,
@@ -377,6 +383,31 @@
     return out.sort(function (a, b) { return a.start - b.start; });
   }
 
+  /* How much of the schedule the on-premise report actually accounts for. The
+     on-premise export lists everyone active, so a correctly paired report should
+     find nearly every scheduled person. */
+  function siteList(people) {
+    var seen = {};
+    (people || []).forEach(function (p) {
+      var l = locationLeaf(p.location);
+      if (l) seen[l] = true;
+    });
+    return Object.keys(seen).sort();
+  }
+  function overlapOf(schedule, presence, byName) {
+    var matched = 0;
+    schedule.people.forEach(function (p) { if (byName.has(p.nameKey)) matched++; });
+    return {
+      scheduled: schedule.people.length,
+      onPremise: presence.people.length,
+      matched: matched,
+      ratio: schedule.people.length ? matched / schedule.people.length : 1,
+      scheduleSites: siteList(schedule.people),
+      presenceSites: siteList(presence.people)
+    };
+  }
+  function sitesPhrase(list) { return list.length ? list.join(', ') : 'an unnamed site'; }
+
   /* opts: { schedule, presence, asOf (Date), graceMinutes } */
   function buildCoverage(opts) {
     opts = opts || {};
@@ -412,13 +443,35 @@
       return d !== 0 ? d : a.name.localeCompare(b.name);
     });
 
+    var overlap = overlapOf(schedule, presence, byName);
+    var bothLoaded = overlap.scheduled > 0 && overlap.onPremise > 0;
+    var mismatch = bothLoaded && overlap.matched === 0;
+    var warnings = (schedule.warnings || []).concat(presence.warnings || []);
+    if (mismatch) {
+      warnings.unshift('None of the ' + overlap.scheduled + ' scheduled people appear in the on-premise ' +
+        'report, so no coverage can be calculated. The schedule covers ' + sitesPhrase(overlap.scheduleSites) +
+        ' and the on-premise report covers ' + sitesPhrase(overlap.presenceSites) +
+        '. These are different sites -- load the schedule exported for the same site.');
+    } else if (bothLoaded && overlap.ratio < LOW_OVERLAP_RATIO) {
+      warnings.unshift('Only ' + overlap.matched + ' of ' + overlap.scheduled + ' scheduled people appear in ' +
+        'the on-premise report. The schedule covers ' + sitesPhrase(overlap.scheduleSites) +
+        ' and the on-premise report covers ' + sitesPhrase(overlap.presenceSites) +
+        '. Anyone absent from the on-premise report is counted as not clocked in, so coverage may read low.');
+    }
+
+    var summary = summarize(rows);
+    // A percentage nobody can substantiate is worse than no percentage.
+    if (mismatch) summary.coverage = null;
+
     return {
       asOf: asOf,
       date: todayKey,
       graceMinutes: grace,
       rows: rows,
-      summary: summarize(rows),
-      warnings: (schedule.warnings || []).concat(presence.warnings || [])
+      summary: summary,
+      overlap: overlap,
+      mismatch: mismatch,
+      warnings: warnings
     };
   }
 
@@ -793,6 +846,9 @@
     parseOnPremise: parseOnPremise,
     shiftsCovering: shiftsCovering,
     buildCoverage: buildCoverage,
+    LOW_OVERLAP_RATIO: LOW_OVERLAP_RATIO,
+    overlapOf: overlapOf,
+    siteList: siteList,
     linkRoster: linkRoster,
     personKey: personKey,
     profileKeys: profileKeys,

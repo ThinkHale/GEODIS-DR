@@ -676,6 +676,28 @@
       '</div>';
   }
 
+  /* When the two reports describe different people there is nothing to report --
+     showing "0% coverage, 0 working" would be a confident lie. Replace the whole
+     metric strip with what actually went wrong and how to fix it. */
+  function covMismatch(res) {
+    var o = res.overlap;
+    var sites = function (list) {
+      return list.length
+        ? list.map(function (x) { return '<span class="site-tag">' + esc(x) + '</span>'; }).join('')
+        : '<span class="site-tag">unnamed</span>';
+    };
+    return '<div class="cov-mismatch">' +
+      '<strong>These two reports cover different sites</strong>' +
+      '<p>None of the <b>' + o.scheduled + '</b> scheduled people appear in the on-premise report, so ' +
+      'no coverage can be calculated.</p>' +
+      '<div class="site-rows">' +
+      '<div><span>Weekly schedule</span>' + sites(o.scheduleSites) + '</div>' +
+      '<div><span>On premise</span>' + sites(o.presenceSites) + '</div>' +
+      '</div>' +
+      '<p>Load the weekly schedule exported for the same site as the on-premise report.</p>' +
+      '</div>';
+  }
+
   function covWarnings(res) {
     var c = state.coverage, notes = [];
     var day = ScheduleCore.isoDate(coverageAsOf());
@@ -859,6 +881,8 @@
         '</div></section>';
     }
     var res = buildCoverageResult();
+    // Nothing below the sources means anything if the reports do not pair up.
+    if (res.mismatch) return head + covMismatch(res);
     var rows = covFilter(res.rows);
     return head + covControls(res) + covMetrics(res.summary) + covWarnings(res) + covExport(res) +
       '<section class="suite-panel">' + covFilters(res) +

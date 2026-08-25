@@ -56,6 +56,11 @@ const COLLECTIONS = {
   requisitions: { path: 'requisitions/requisitions.json', responseKey: 'requisitions',
                   fields: { title: 'str', department: 'str', shift: 'str', market: 'str', openings: 'num',
                             filled: 'num', priority: 'str', status: 'str', due: 'str', notes: 'str' } },
+  // Shift tags cross-referenced from the PLX workbook. Keyed by WFM EID where
+  // there is one, name otherwise -- see shift-key.js.
+  shifts:       { path: 'shifts/assignments.json',       responseKey: 'shifts',
+                  fields: { eid: 'str', nameKey: 'str', name: 'str', shift: 'str', building: 'str',
+                            dept: 'str', hours: 'str', badge: 'str', source: 'str' } },
   performance:  { path: 'performance/metrics.json',      responseKey: 'performance',
                   fields: { badge: 'str', period: 'str', quality: 'num', productivity: 'num', safety: 'num',
                             units: 'num', hours: 'num', notes: 'str' } }

@@ -52,7 +52,9 @@
     notes: {},              // shared badge -> note, published with the roster
     updatedAt: null,
     profiles: new Map(),
-    stores: { attendance: [], timeOff: [], requisitions: [], performance: [] },
+    stores: { attendance: [], timeOff: [], requisitions: [], performance: [], shifts: [] },
+    shiftKey: null,          // parsed "Geodis Key" vocabulary, when a workbook is loaded
+    shiftImport: null,       // last import result, for the report shown after
     storesLoaded: false,
     // Coverage inputs are uploaded reports, not shared collections: the schedule
     // lands weekly, the on-premise snapshot several times a day.
@@ -110,6 +112,8 @@
       attendance: state.stores.attendance,
       timeOff: state.stores.timeOff,
       performance: state.stores.performance,
+      shifts: state.stores.shifts,
+      shiftKeyOf: ScheduleCore.rosterKey,
       notes: state.notes
     });
     validateMarket();
@@ -227,6 +231,118 @@
           (v === 'all' ? 'All statuses' : v) + '</option>';
       }).join('') + '</select></div>';
   }
+  /* A shift tag is what the person works, not what they were scheduled for this
+     week. It comes from the PLX workbook and is editable per associate. */
+  function shiftChip(p) {
+    if (!p.shift) return '<span class="shift-chip none" data-set-shift="' + esc(p.badge) + '">Set shift</span>';
+    return '<span class="shift-chip" data-set-shift="' + esc(p.badge) + '"' +
+      (p.shiftHours ? ' title="' + esc(p.shiftHours) + (p.shiftBuilding ? ' · building ' + esc(p.shiftBuilding) : '') + '"' : '') +
+      '>' + esc(p.shift) + '</span>';
+  }
+
+  function shiftImportPanel(total, tagged) {
+    var imp = state.shiftImport;
+    return '<section class="suite-panel shift-import"><div class="suite-panel-head">' +
+      '<h2>Shift tags</h2><div class="suite-actions">' +
+      '<label class="suite-btn cov-pick' + (tagged ? '' : ' primary') + '">Import PLX workbook' +
+      '<input type="file" accept=".xlsx,.xls" data-shift-book></label></div></div>' +
+      '<p class="perf-note"><b>' + tagged + '</b> of ' + total + ' associates in this view carry a shift tag. ' +
+      'The weekly WFM schedule only covers people rostered that week, so a tag is what puts everyone else in the ' +
+      'right headcount block. Import the workbook once, then set the shift on new associates as they start.</p>' +
+      (imp ? shiftImportReport(imp) : '') + '</section>';
+  }
+  function shiftImportReport(imp) {
+    return '<div class="import-report' + (imp.failed ? ' bad' : '') + '">' +
+      '<strong>' + esc(imp.headline) + '</strong>' +
+      (imp.warnings && imp.warnings.length
+        ? '<ul>' + imp.warnings.slice(0, 8).map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') +
+          (imp.warnings.length > 8 ? '<li>…and ' + (imp.warnings.length - 8) + ' more.</li>' : '') + '</ul>'
+        : '') + '</div>';
+  }
+
+  /* Reads the whole workbook: the "Geodis Key" tab for the shift vocabulary and
+     every "<site> - HC" tab for the per-associate assignment. */
+  function readShiftWorkbook(file) {
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      try {
+        var wb = XLSX.read(e.target.result, { type: 'array' });
+        var sheets = wb.SheetNames.map(function (n) {
+          return { name: n, aoa: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: '' }) };
+        });
+        var keySheet = sheets.filter(function (x) { return ShiftKey.KEY_SHEET.test(x.name); })[0];
+        var key = keySheet ? ShiftKey.parseShiftKey(keySheet.aoa) : null;
+        var hc = ShiftKey.parseHeadcount(sheets, ScheduleCore.rosterKey);
+        if (!hc.people.length) {
+          throw new Error('No "<site> - HC" tabs with an "Employee  Name" column were found.');
+        }
+        var records = ShiftKey.toShiftRecords(hc, key);
+        var warnings = (key ? key.warnings : ['No "Geodis Key" tab was found, so shift hours are unknown.'])
+          .concat(hc.warnings)
+          .concat(ShiftKey.validateAgainstKey(hc, key));
+
+        state.shiftKey = key;
+        state.shiftImport = { headline: 'Reading ' + records.length + ' shift tags…', warnings: [] };
+        render();
+
+        SuiteData.replaceCollection('shifts', records).then(function () {
+          state.stores.shifts = records;
+          rebuild();
+          var matched = allProfiles().filter(function (p) { return !!p.shift; }).length;
+          state.shiftImport = {
+            headline: records.length + ' shift tags imported from ' + hc.sheets.length + ' site tabs · ' +
+              matched + ' matched a roster profile by name',
+            warnings: warnings
+          };
+          render();
+        }).catch(function (err) {
+          state.shiftImport = { failed: true, headline: 'Could not save the shift tags: ' + err.message, warnings: [] };
+          render();
+        });
+      } catch (err) {
+        console.error(err);
+        state.shiftImport = { failed: true, headline: 'Could not read "' + file.name + '": ' + err.message, warnings: [] };
+        render();
+      }
+    };
+    reader.onerror = function () { alert('Failed to read "' + file.name + '".'); };
+    reader.readAsArrayBuffer(file);
+  }
+
+  // Setting or correcting one person's shift, for new starters and fixes.
+  function setShift(badge) {
+    var p = profile(badge);
+    if (!p) return;
+    var known = {};
+    state.stores.shifts.forEach(function (r) { if (r.shift) known[r.shift] = true; });
+    if (state.shiftKey) {
+      Object.keys(state.shiftKey.byBuilding).forEach(function (b) {
+        state.shiftKey.byBuilding[b].forEach(function (sh) { known[sh] = true; });
+      });
+    }
+    var list = Object.keys(known).sort();
+    var next = prompt('Shift for ' + p.name +
+      (list.length ? '\n\nKnown shifts: ' + list.join(', ') : '') +
+      '\n\nLeave blank to clear.', p.shift || '');
+    if (next === null) return;
+    next = next.trim();
+    var id = 'name:' + ScheduleCore.rosterKey(p.name);
+    var rec = {
+      id: id, eid: '', nameKey: ScheduleCore.rosterKey(p.name), name: p.name,
+      shift: next, building: p.shiftBuilding || '', badge: p.badge, source: 'Set in the suite'
+    };
+    var write = next ? SuiteData.saveRecord('shifts', rec) : SuiteData.deleteRecord('shifts', id);
+    write.then(function () {
+      return SuiteData.loadCollection('shifts');
+    }).then(function (rows) {
+      state.stores.shifts = rows;
+      rebuild();
+      render();
+    }).catch(function (err) {
+      alert('That shift could not be saved.\n\n' + err.message);
+    });
+  }
+
   function statusChip(p) {
     return '<span class="status ' + (p.status === 'Ended' ? 'closed' : '') + '">' + esc(p.status) + '</span>';
   }
@@ -346,21 +462,24 @@
   function associates() {
     if (!state.records) return needsRoster();
     var all = roster(), rows = all.slice(0, MAX_ROWS);
+    var tagged = all.filter(function (p) { return !!p.shift; }).length;
     return hero('Associate roster', 'Built from the RC / Beeline assignment snapshot. Profiles cannot be added by hand — a profile exists because an assignment does.', '', '') +
+      shiftImportPanel(all.length, tagged) +
       '<section class="suite-panel">' + filters() +
       '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
-      '<th>Associate</th><th>Employee #</th><th>Market</th><th>Status</th><th>Reconciliation</th>' +
+      '<th>Associate</th><th>Employee #</th><th>Market</th><th>Shift</th><th>Status</th><th>Reconciliation</th>' +
       '<th>Attendance pts</th><th>Standing</th><th>Score</th><th></th></tr></thead><tbody>' +
       (rows.length ? rows.map(function (p) {
         return '<tr><td><div class="name">' + esc(p.name || 'Unknown') + '</div>' +
           '<div class="sub">' + esc(p.badge) + (p.dup ? ' · <b class="dup-flag">DUP</b>' : '') + '</div></td>' +
           '<td>' + esc(p.empNumber || '—') + '</td>' +
           '<td>' + esc(p.market) + (p.marketRaw ? ' <span class="sub">· ' + esc(p.marketRaw) + '</span>' : '') + '</td>' +
+          '<td>' + shiftChip(p) + '</td>' +
           '<td>' + statusChip(p) + '</td><td>' + reconChip(p) + '</td>' +
           '<td>' + p.points + '</td><td><span class="standing ' + p.standingCls + '">' + esc(p.standing) + '</span></td>' +
           '<td>' + scoreCell(p) + '</td>' +
           '<td><button class="suite-btn" data-profile="' + esc(p.badge) + '">Open</button></td></tr>';
-      }).join('') : '<tr><td colspan="9">' + empty('No associates match', 'Adjust the search, market, or status filter.') + '</td></tr>') +
+      }).join('') : '<tr><td colspan="10">' + empty('No associates match', 'Adjust the search, market, or status filter.') + '</td></tr>') +
       '</tbody></table></div>' + rowCap(rows.length, all.length) + '</section>';
   }
 
@@ -453,9 +572,13 @@
       (doc ? '<div class="sched-doc"><b>' + esc(doc.disposition || 'Documented') + '</b>' +
         (doc.reason ? ' — ' + esc(doc.reason) : '') + '</div>' : '');
     }
+    var tag = '<div class="shift-tag-row"><span>Shift tag</span>' + shiftChip(p) +
+      (p.shiftHours ? '<b>' + esc(p.shiftHours) + '</b>' : '') +
+      (p.shiftBuilding ? '<em>Building ' + esc(p.shiftBuilding) + '</em>' : '') +
+      (p.shiftSource ? '<em>' + esc(p.shiftSource) + '</em>' : '') + '</div>';
     return '<section class="suite-panel"><div class="suite-panel-head"><h2>Schedule &amp; presence</h2>' +
       '<div class="suite-actions"><button class="suite-btn" data-nav="coverage">Coverage</button></div></div>' +
-      body + '</section>';
+      tag + body + '</section>';
   }
 
   function perfStat(label, value, plain) {
@@ -824,7 +947,7 @@
         return '<option value="' + esc(l) + '" ' + (c.exportLoc === l ? 'selected' : '') + '>' + esc(l) + '</option>';
       }).join('') + '</select></label>' +
       '<label class="cov-ctl">Shift<select class="suite-select" id="export-shift">' +
-      ['1st', '2nd', '3rd', 'all'].map(function (v) {
+      ScheduleCore.shiftLabelsIn(res, state.profiles).concat(['all']).map(function (v) {
         return '<option value="' + v + '" ' + (c.exportShift === v ? 'selected' : '') + '>' +
           (v === 'all' ? 'All shifts' : v) + '</option>';
       }).join('') + '</select></label>' +
@@ -1157,6 +1280,9 @@
     var nav = e.target.closest('[data-nav]');
     if (nav) { go(nav.dataset.nav); return; }
 
+    var sh = e.target.closest('[data-set-shift]');
+    if (sh) { setShift(sh.dataset.setShift); return; }
+
     var prof = e.target.closest('[data-profile]');
     if (prof) { go('profile', prof.dataset.profile); return; }
 
@@ -1275,6 +1401,8 @@
 
     var cov = e.target.closest('[data-cov]');
     if (cov && cov.files && cov.files[0]) { readCoverageFile(cov.files[0], cov.dataset.cov); return; }
+    var book = e.target.closest('[data-shift-book]');
+    if (book && book.files && book.files[0]) { readShiftWorkbook(book.files[0]); return; }
     if (e.target.id === 'cov-status') { state.coverage.statusFilter = e.target.value; render(); }
     if (e.target.id === 'cov-loc') { state.coverage.location = e.target.value; render(); }
     if (e.target.id === 'cov-grace') {

@@ -726,9 +726,9 @@
 
     var rows = res.rows.filter(function (r) {
       if (wantLoc && locationLeaf(r.location) !== wantLoc) return false;
-      // Only people this shift is responsible for. Someone with no shift at all
-      // is not part of any block's headcount.
-      var label = shiftLabelFor(r);
+      // Only people this shift is responsible for. Someone with neither a shift
+      // tag nor a scheduled shift is not part of any block's headcount.
+      var label = shiftOf(r, profiles).label;
       if (!label) return false;
       return !wantShift || label === wantShift;
     });
@@ -739,7 +739,8 @@
         name: r.name,
         eid: r.wfmId || '',
         startDate: p ? shortDate(p.crmStart || p.beeStart || '') : '',
-        shift: shiftLabelFor(r),
+        shift: shiftOf(r, profiles).label,
+        shiftSource: shiftOf(r, profiles).source,
         points: p ? p.points : '',
         comments: commentFor(r, documented),
         // Carried for the preview, not written to the sheet.
@@ -756,6 +757,31 @@
       summary: { expected: expected, onsite: onsite, short: expected - onsite }
     };
   }
+  /* Which block this person belongs in.
+
+     The profile's shift TAG wins over the shift derived from today's scheduled
+     hours. The tag is the standing assignment recorded in the PLX workbook and
+     uses each site's own vocabulary -- 1st/2nd at most buildings, A/B/C at 1519
+     and 1559 -- whereas a derived label is only ever 1st/2nd/3rd and exists only
+     for people the WFM schedule happened to cover this week. Preferring the tag
+     is what puts everyone else in the right block. */
+  function shiftOf(r, profiles) {
+    var p = profiles && r.badge ? profiles.get(r.badge) : null;
+    if (p && p.shift) return { label: p.shift, source: 'tag' };
+    var derived = shiftLabelFor(r);
+    return derived ? { label: derived, source: 'schedule' } : { label: '', source: '' };
+  }
+  // Every shift label present, so a picker offers what the data actually holds
+  // rather than a hardcoded 1st/2nd/3rd.
+  function shiftLabelsIn(res, profiles) {
+    var seen = {};
+    res.rows.forEach(function (r) {
+      var l = shiftOf(r, profiles).label;
+      if (l) seen[l] = true;
+    });
+    return Object.keys(seen).sort();
+  }
+
   // The shift a row belongs to, from whichever shift is relevant right now.
   function shiftLabelFor(r) {
     if (r.shiftStart != null) return shiftLabel(r.shiftStart);
@@ -857,6 +883,9 @@
     scheduleForStorage: scheduleForStorage,
     SHEET_COLUMNS: SHEET_COLUMNS,
     shiftLabel: shiftLabel,
+    shiftOf: shiftOf,
+    shiftLabelFor: shiftLabelFor,
+    shiftLabelsIn: shiftLabelsIn,
     shortDate: shortDate,
     locationLeaf: locationLeaf,
     spreadsheetExport: spreadsheetExport,

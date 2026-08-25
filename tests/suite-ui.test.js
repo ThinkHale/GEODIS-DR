@@ -20,11 +20,12 @@ const dom=new JSDOM(`<!doctype html><html><body class="suite-active">
 </body></html>`,{runScripts:'outside-only',url:'https://geodis.ebtools.pro/'});
 const w=dom.window;
 w.fetch=(url)=>{ const key=String(url).match(/\?(\w+)=1/)[1];
-  const map={attendance:'attendance',timeoff:'timeOff',requisitions:'requisitions',performance:'performance'};
+  const map={attendance:'attendance',timeoff:'timeOff',requisitions:'requisitions',performance:'performance',shifts:'shifts'};
   return Promise.resolve({ok:true,json:()=>Promise.resolve({[map[key]]:stores[map[key]]})}); };
 w.alert=()=>{}; w.confirm=()=>true; w.scrollTo=()=>{}; w.scrollTo=()=>{};
 w.eval(fs.readFileSync(R+'suite-data.js','utf8'));
 w.eval(fs.readFileSync(R+'schedule-core.js','utf8'));
+w.eval(fs.readFileSync(R+'shift-key.js','utf8'));
 w.eval(fs.readFileSync(R+'suite.js','utf8'));
 const d=w.document, $=s=>d.querySelector(s), $$=s=>Array.from(d.querySelectorAll(s));
 const click=el=>el.dispatchEvent(new w.MouseEvent('click',{bubbles:true}));

@@ -58,10 +58,10 @@ w.fetch = (url, opt) => {
   if (u.indexOf('schedule=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ schedule: storedWeek }) });
   if (u.indexOf('coverage=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ coverage: storedDay }) });
   const k = u.match(/\?(\w+)=1/)[1];
-  const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions', performance: 'performance' };
+  const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions', performance: 'performance', shifts: 'shifts' };
   return Promise.resolve({ ok: true, json: () => Promise.resolve({ [map[k]]: [] }) });
 };
-['suite-data.js', 'schedule-core.js', 'suite.js'].forEach(f => w.eval(fs.readFileSync(R + f, 'utf8')));
+['suite-data.js', 'schedule-core.js', 'shift-key.js', 'suite.js'].forEach(f => w.eval(fs.readFileSync(R + f, 'utf8')));
 const d = w.document, $ = s => d.querySelector(s);
 const click = el => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
 const upload = (kind, aoa, name) => {

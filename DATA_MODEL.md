@@ -181,6 +181,58 @@ disposition to the occurrence a **one-click** action would create, and a disposi
 of `Approved time off`, `Reassigned`, or `Badge / system issue` maps to `null`, so a
 badge-reader gap can never become a disciplinary record.
 
+## Shift tags
+
+The WFM weekly schedule only covers people who were rostered that week, so anyone
+on the clock without a schedule row reads as `unscheduled` even though everyone
+knows which shift they work. The PLX workbook already records that, in two places:
+
+| Tab | Holds |
+| --- | --- |
+| `Geodis Key` | building + job + account -> shift label and its hours |
+| `<site> - HC` | one row per associate, with an EID and a `Shift` column |
+
+The HC tabs are the per-person assignment; the Key is the vocabulary saying which
+shifts a building runs and when. `shift-key.js` parses both, with no DOM access.
+
+### The EID is not a badge
+
+WFM EIDs look like `80-LGRACH3897`; the RC/Beeline roster is keyed by numeric
+badges like `215005`. Measured against the live snapshot, **1 of 1217** badges is
+in WFM form — they are separate namespaces with effectively no overlap. So a
+shift record carries both its EID (which matches the on-premise report directly)
+and a `nameKey` (the only bridge to a roster profile). On real data the name
+bridge resolves **116 of 117** on-premise rows to a profile; the EID resolves none.
+
+A record's id is `eid:<EID>` when there is one and `name:<rosterKey>` otherwise,
+so a new starter with no EID yet is still taggable.
+
+### What is not assumed
+
+- A building running the same shift label on different hours for different
+  accounts is **ambiguous**: every window is kept, none is chosen, and it is
+  reported. `windowFor()` returns `null` rather than guessing.
+- A shift value the building does not run is a **typo, not a new shift**
+  (`validateAgainstKey`). A mistyped tag puts someone in a headcount block
+  nobody is looking for them in.
+- A name carrying two different shifts is **poisoned**, not resolved.
+- Compound schedules (`"Sun 11am-7:30pm / Mon-Thurs 1:30pm-10pm"`) keep the
+  first window and set `compound`; unparseable ones keep their raw text with no
+  hours at all.
+
+### The tag decides the headcount block
+
+`shiftOf()` prefers the profile's shift **tag** over the label derived from
+today's scheduled hours. The tag is the standing assignment and uses each site's
+own vocabulary — `1st`/`2nd` at most buildings, `A`/`B`/`C` at 1519 and 1559 —
+whereas a derived label is only ever `1st`/`2nd`/`3rd` and exists only for people
+the WFM schedule happened to cover. Preferring the tag is what puts everyone else
+in the right block, and it removes the earlier need to rename A/B/C by hand.
+
+Tags live in the `shifts` shared collection. Import the workbook once from the
+Associates view; after that only new associates need a shift set, which is done
+per profile and stored with `source: "Set in the suite"`.
+
 ### Export for the GEODIS headcount spreadsheet
 
 Each branch sheet (`1502 - HC`, `1559 - Post HC`) holds side-by-side shift blocks.
@@ -226,6 +278,7 @@ attendance/events.json             [] occurrences
 timeoff/requests.json              [] PTO / VTO / sick requests
 requisitions/requisitions.json     [] open positions (not badge-keyed)
 performance/metrics.json           [] scorecard metrics per badge per period
+shifts/assignments.json            [] shift tag per associate (EID- or name-keyed)
 ```
 
 ### Collection API

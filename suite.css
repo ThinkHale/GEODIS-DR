@@ -109,3 +109,18 @@ body.suite-active>header,body.suite-active>main,body.suite-active>.foot{display:
 .site-rows>div{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .site-rows span:first-child{font:600 10px 'Barlow Semi Condensed';text-transform:uppercase;letter-spacing:.4px;color:var(--suite-muted);min-width:112px}
 .site-tag{font:600 11px 'IBM Plex Mono';background:#fff;border:1px solid var(--suite-line);border-radius:4px;padding:2px 7px;margin-right:4px}
+
+/* ---- shift tags ---- */
+.shift-chip{display:inline-block;font:700 10.5px 'Barlow Semi Condensed';text-transform:uppercase;letter-spacing:.4px;padding:3px 9px;border-radius:20px;background:#e8eefb;color:var(--suite-blue);cursor:pointer;white-space:nowrap}
+.shift-chip:hover{background:#d8e3f7}
+.shift-chip.none{background:#eef1f5;color:var(--suite-muted);font-weight:600}
+.shift-tag-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:0 0 13px;margin-bottom:13px;border-bottom:1px solid var(--suite-line)}
+.shift-tag-row>span:first-child{font:600 10px 'Barlow Semi Condensed';text-transform:uppercase;letter-spacing:.4px;color:var(--suite-muted)}
+.shift-tag-row b{font:600 12px Inter}
+.shift-tag-row em{font-style:normal;font-size:11px;color:var(--suite-muted)}
+.shift-import .perf-note{margin-top:0}
+.import-report{margin-top:12px;background:#f2fbf6;border:1px solid #bfe3ce;border-left:3px solid var(--suite-green);border-radius:0 6px 6px 0;padding:10px 13px;font-size:12.5px}
+.import-report.bad{background:#fff6f6;border-color:#f0c6c6;border-left-color:var(--suite-red)}
+.import-report strong{display:block;margin-bottom:4px}
+.import-report ul{margin:6px 0 0;padding-left:18px;color:var(--suite-muted)}
+.import-report li{margin-top:3px}

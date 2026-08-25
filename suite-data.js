@@ -23,7 +23,8 @@
     attendance: 'attendance',
     timeoff: 'timeOff',
     requisitions: 'requisitions',
-    performance: 'performance'
+    performance: 'performance',
+    shifts: 'shifts'
   };
 
   /* Attendance occurrence thresholds. GEODIS policy varies by site, so these are
@@ -108,9 +109,23 @@
         endReason: r.endReason || '',
         // Joined below.
         attendance: [], points: 0, standing: '', standingCls: '',
-        timeOff: [], performance: null, score: null, note: ''
+        timeOff: [], performance: null, score: null, note: '',
+        shift: '', shiftBuilding: '', shiftHours: '', shiftSource: ''
       });
     });
+
+    /* Shift tags come from the PLX workbook and are keyed by WFM EID or name --
+       never by badge, because the EID and the RC/Beeline badge are separate
+       namespaces with no overlap. The caller supplies the name-key function
+       (ScheduleCore.rosterKey) so this file need not know about that module.
+       A name carrying two different shifts is poisoned rather than guessed at. */
+    var shiftIdx = {};
+    if (stores.shifts && stores.shiftKeyOf) {
+      stores.shifts.forEach(function (r) {
+        if (!r.nameKey) return;
+        shiftIdx[r.nameKey] = (shiftIdx[r.nameKey] && shiftIdx[r.nameKey].shift !== r.shift) ? null : r;
+      });
+    }
 
     attach(byBadge, stores.attendance, 'attendance');
     attach(byBadge, stores.timeOff, 'timeOff');
@@ -130,6 +145,13 @@
       p.standingCls = band.cls;
       p.score = scoreOf(p);
       p.note = notes[p.badge] ? notes[p.badge].note : '';
+      var sr = stores.shiftKeyOf ? shiftIdx[stores.shiftKeyOf(p.name)] : null;
+      if (sr) {
+        p.shift = sr.shift;
+        p.shiftBuilding = sr.building || '';
+        p.shiftHours = sr.hours || '';
+        p.shiftSource = sr.source || '';
+      }
       p.attendance.sort(function (a, b) { return String(b.date || '').localeCompare(String(a.date || '')); });
       p.timeOff.sort(function (a, b) { return String(b.start || '').localeCompare(String(a.start || '')); });
     });
@@ -256,10 +278,10 @@
   // Load every shared collection at once. Individual failures degrade to an
   // empty list rather than taking the whole suite down.
   function loadAll() {
-    return Promise.all(['attendance', 'timeoff', 'requisitions', 'performance']
+    return Promise.all(['attendance', 'timeoff', 'requisitions', 'performance', 'shifts']
       .map(function (n) { return loadCollection(n); }))
       .then(function (r) {
-        return { attendance: r[0], timeOff: r[1], requisitions: r[2], performance: r[3] };
+        return { attendance: r[0], timeOff: r[1], requisitions: r[2], performance: r[3], shifts: r[4] };
       });
   }
 

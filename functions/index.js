@@ -60,7 +60,7 @@ const OVERRIDES_PATH = 'overrides/overrides.json';   // badge -> manual status o
 const COLLECTIONS = {
   attendance:   { path: 'attendance/events.json',        responseKey: 'attendance',
                   fields: { badge: 'str', name: 'str', date: 'str', type: 'str', minutes: 'num', points: 'num', notes: 'str',
-                            source: 'str', importRef: 'str', location: 'str', shift: 'str' } },
+                            source: 'str', importRef: 'str', location: 'str', shift: 'str', historical: 'bool' } },
   timeoff:      { path: 'timeoff/requests.json',         responseKey: 'timeOff',
                   fields: { badge: 'str', name: 'str', type: 'str', start: 'str', end: 'str', hours: 'num',
                             status: 'str', notes: 'str', shift: 'str', location: 'str', source: 'str',

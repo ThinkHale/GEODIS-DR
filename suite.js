@@ -10,8 +10,12 @@
 
   var MAX_ROWS = 250;   // cap rendered rows; the roster runs to the hundreds
 
-  // Default occurrence value per attendance type. Editable on every entry --
-  // these are just the starting points so the common cases are one click.
+  /* GEODIS policy: PTO is 0, an absence is 1, a no-call/no-show is 2, and a late
+     or early-out is half an absence. Editable on every entry -- these are the
+     starting points so the common cases are one click.
+
+     attendance-import.js MUST agree with this. The same occurrence cannot be
+     worth more because it arrived by import than because somebody typed it. */
   var TYPE_POINTS = {
     'Present': 0, 'Late': 0.5, 'Early Out': 0.5, 'Absent': 1,
     'No Call / No Show': 2, 'Excused': 0

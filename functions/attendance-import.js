@@ -18,12 +18,16 @@ function cleanName(v) {
 function match(name, byName, rosterKey) {
   const key = rosterKey(cleanName(name)); return key && byName.has(key) && byName.get(key) ? byName.get(key) : null;
 }
+/* GEODIS policy: PTO is 0, an absence is 1, a no-call/no-show is 2. Late and
+   early-out are half an absence, which is what the suite has always used for a
+   hand-logged one. This has to agree with TYPE_POINTS in suite.js -- the same
+   occurrence must not be worth more because it arrived by import. */
 function kind(comment) {
   const s = text(comment).toLowerCase();
-  if (/ncns|no call/.test(s)) return { type: 'No Call / No Show', points: 4 };
-  if (/late/.test(s)) return { type: 'Late', points: 1 };
-  if (/left early|leave early|clocked out early/.test(s)) return { type: 'Early Out', points: 1 };
-  if (/called off|call off|absent|not onsite/.test(s)) return { type: 'Absent', points: 2 };
+  if (/ncns|no call/.test(s)) return { type: 'No Call / No Show', points: 2 };
+  if (/late/.test(s)) return { type: 'Late', points: 0.5 };
+  if (/left early|leave early|clocked out early/.test(s)) return { type: 'Early Out', points: 0.5 };
+  if (/called off|call off|absent|not onsite/.test(s)) return { type: 'Absent', points: 1 };
   if (/approved|plaw|pto|psl|time off|doctor|rescheduled/.test(s)) return { type: 'Excused', points: 0 };
   return { type: 'Excused', points: 0 };
 }
@@ -92,21 +96,39 @@ function parseRedbull(buffer, opts) {
   });
   return events;
 }
+/* The PLX sheet's "Current Points" is the balance of record, so historical rows
+   are NOT re-scored: they come in at zero, as dated history with the reason
+   somebody wrote, and the balance carries the number.
+
+   Re-deriving points from years of free-text comments would only ever be a
+   worse copy of a figure GEODIS already maintains -- and it silently scored an
+   unreadable comment as zero, which is the wrong way for a disciplinary record
+   to fail. The scale in kind() now applies only to occurrences logged from here
+   on, where somebody chose the type. */
 function build(plxBuffer, redbullBuffer, opts) {
   const plx = parsePlx(plxBuffer, opts), redbull = parseRedbull(redbullBuffer, opts), byKey = new Map();
   plx.events.concat(redbull).forEach(e => { const key = [opts.rosterKey(e.name), e.date, e.type].join('|'); if (!byKey.has(key) || !byKey.get(key).badge) byKey.set(key, e); });
-  const events = Array.from(byKey.values()), sums = new Map();
-  events.forEach(e => { if (e.badge) sums.set(e.badge, (sums.get(e.badge) || 0) + Number(e.points || 0)); });
+  const events = Array.from(byKey.values()).map(e => Object.assign({}, e, {
+    points: 0,
+    historical: true,
+    notes: e.notes ? e.notes + ' · history, not scored' : 'History, not scored'
+  }));
+
+  // One opening balance per associate, from the sheet GEODIS maintains. Its id
+  // is derived from the badge, so a re-import replaces it instead of stacking.
   plx.balances.forEach(b => {
-    if (!b.badge) return; const current = Math.round((sums.get(b.badge) || 0) * 100) / 100, delta = Math.round((b.points - current) * 100) / 100;
-    if (!delta) return;
+    if (!b.badge) return;
+    const points = Math.round(Number(b.points || 0) * 100) / 100;
     events.push({ id: 'AT-BAL-' + hash(b.badge), badge: b.badge, name: b.name, date: opts.asOf,
-      type: 'Balance Adjustment', minutes: 0, points: delta, notes: 'Reconciled to Current Points ' + b.points + ' from ' + b.sheet,
+      type: 'Opening Balance', minutes: 0, points: points,
+      notes: 'Current Points ' + b.points + ' from ' + b.sheet + '. Occurrences logged after this add to it.',
       source: opts.plxSource, importRef: b.sheet + ' row ' + b.row, location: '', shift: '' });
-    sums.set(b.badge, b.points);
   });
+
+  const balanced = events.filter(e => e.type === 'Opening Balance');
   return { events, balances: plx.balances, transitions: plx.transitions,
-    summary: { detailed: byKey.size, adjustments: events.length - byKey.size, total: events.length,
+    summary: { detailed: byKey.size, adjustments: balanced.length, total: events.length,
+      pointsFrom: 'PLX Current Points',
       matched: events.filter(e => e.badge).length, unmatched: events.filter(e => !e.badge).length,
       transitionFlags: plx.transitions.length, matchedTransitions: plx.transitions.filter(x => x.badge).length } };
 }

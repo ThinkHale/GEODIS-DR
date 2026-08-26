@@ -73,9 +73,14 @@ w.fetch = (url, opt) => {
 const d = w.document, $ = s => d.querySelector(s), $$ = s => Array.from(d.querySelectorAll(s));
 const click = el => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
 const settle = ms => new Promise(r => setTimeout(r, ms));
+// Find the column by its header, not its position -- adding a column upstream
+// should not silently point this at the wrong cell.
+const colIndex = label => $$('.suite-table thead th')
+  .findIndex(th => th.textContent.replace(/[▲▼]/g, '').trim() === label);
 const shiftCellFor = name => {
   const row = $$('.suite-table tbody tr').find(tr => tr.textContent.indexOf(name) !== -1);
-  return row ? row.querySelectorAll('td')[3].textContent.trim() : null;
+  const i = colIndex('Shift');
+  return row && i !== -1 ? row.querySelectorAll('td')[i].textContent.trim() : null;
 };
 
 (async () => {
@@ -84,7 +89,8 @@ const shiftCellFor = name => {
   click($('[data-nav="associates"]'));
 
   console.log('— before any import —');
-  t('roster has a Shift column', $$('.suite-table thead th')[3].textContent.trim() === 'Shift');
+  t('roster has a Shift column', colIndex('Shift') !== -1);
+  t('and a Site / account column', colIndex('Site / account') !== -1);
   t('nobody is tagged yet', shiftCellFor('Luz Grachen') === 'Set shift');
   const panel = $('.shift-import .perf-note').textContent;
   t('the panel says 0 of 3 are tagged', panel.indexOf('0 of 3 associates') === 0);

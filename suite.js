@@ -46,6 +46,7 @@
     view: new URLSearchParams(location.search).get('view') || 'overview',
     profileBadge: null,
     query: '',
+    sort: { associates: { key: 'name', dir: 1 }, attendance: { key: 'date', dir: -1 } },
     market: (function () {
       try { return localStorage.getItem('badgeCrosscheck.market') || 'all'; } catch (e) { return 'all'; }
     })(),
@@ -178,6 +179,36 @@
     return state.stores.requisitions.filter(function (r) { return !r.market || r.market === state.market; });
   }
 
+  /* ---------- sorting ----------
+     Values are compared as strings unless both are numbers, so "1502" sorts
+     before "1519" and points sort 2 before 10. Blanks always sink to the bottom
+     regardless of direction -- an associate with no site recorded is not the
+     "first" site, they are missing one. */
+  function blank(v) { return v === '' || v == null; }
+  function cmp(a, b) {
+    if (typeof a === 'number' && typeof b === 'number') return a - b;
+    return String(a).localeCompare(String(b), undefined, { numeric: true });
+  }
+  function sortRows(rows, table, valueOf) {
+    var st = state.sort[table];
+    return rows.slice().sort(function (x, y) {
+      var a = valueOf(x, st.key), b = valueOf(y, st.key);
+      // A missing value is not the smallest value, so it takes no part in the
+      // direction: reversing the sort must not float everyone with no site
+      // recorded to the top of the page.
+      if (blank(a) !== blank(b)) return blank(a) ? 1 : -1;
+      var d = blank(a) ? 0 : cmp(a, b) * st.dir;
+      // Ties break by name, always ascending -- a stable, readable second key.
+      return d || cmp(valueOf(x, 'name'), valueOf(y, 'name'));
+    });
+  }
+  function sortHead(table, key, label) {
+    var st = state.sort[table];
+    var on = st.key === key;
+    return '<th class="sortable' + (on ? ' sorted' : '') + '" data-sort="' + table + ':' + key + '">' +
+      esc(label) + '<span class="sort-arrow">' + (on ? (st.dir === 1 ? '▲' : '▼') : '') + '</span></th>';
+  }
+
   // The roster subset the module tabs operate on: market, status, then search.
   function roster() {
     var q = state.query.trim().toLowerCase();
@@ -186,7 +217,7 @@
       if (state.statusFilter !== 'all' && p.status !== state.statusFilter) return false;
       if (!q) return true;
       return (p.name + ' ' + p.badge + ' ' + p.empNumber + ' ' + p.market).toLowerCase().indexOf(q) !== -1;
-    }).sort(function (a, b) { return a.name.localeCompare(b.name); });
+    });
   }
 
   /* ---------- shell ---------- */
@@ -414,6 +445,17 @@
       .reduce(function (n, r) { return n + Math.max(0, Number(r.openings || 0) - Number(r.filled || 0)); }, 0);
     var atRisk = all.filter(function (p) { return p.points >= 5; }).length;
 
+    /* "Upcoming" has to mean upcoming, not "most recent". A request is upcoming
+       while it has not finished -- so today's time off still counts, and
+       yesterday's stops cluttering the page. Soonest first, unlike the Time Off
+       tab, which is a log and reads newest first. */
+    var todayIso = today();
+    var upcoming = timeOff.filter(function (x) {
+      return String(x.end || x.start || '') >= todayIso;
+    }).sort(function (a, b) {
+      return String(a.start || '').localeCompare(String(b.start || ''));
+    });
+
     var t = trend();
     return '<div class="metric-strip">' +
       metric('Active associates', active.length, all.length + ' on the assignment roster') +
@@ -428,9 +470,10 @@
       '<div class="suite-actions"><button class="suite-btn" data-nav="requisitions">View requests</button></div></div>' +
       (reqs.length ? reqTable(reqs.slice(0, 5), true) : empty('No Beeline requests yet')) +
       '</section></div><div class="suite-stack">' +
-      '<section class="suite-panel"><div class="suite-panel-head"><h2>Time off activity</h2>' +
+      '<section class="suite-panel"><div class="suite-panel-head"><h2>Upcoming PTO</h2>' +
       '<div class="suite-actions"><button class="suite-btn" data-nav="timeoff">View all</button></div></div>' +
-      (timeOff.length ? timeOff.slice(0, 6).map(activityRow).join('') : empty('No time-off activity')) +
+      (upcoming.length ? upcoming.slice(0, 6).map(activityRow).join('')
+        : empty('No upcoming PTO', 'Requests ending today or later appear here.')) +
       '</section><section class="suite-panel"><div class="suite-panel-head"><h2>Operational action queue</h2></div>' +
       alertRow(exceptions, 'Assignment reconciliation exceptions', 'reconciliation') +
       alertRow(pending, 'Pending time-off approvals', 'timeoff') +
@@ -490,25 +533,43 @@
   /* ---------- associates ---------- */
   function associates() {
     if (!state.records) return needsRoster();
-    var all = roster(), rows = all.slice(0, MAX_ROWS);
+    var all = sortRows(roster(), 'associates', function (p, k) {
+      if (k === 'location') return p.locationLabel;
+      if (k === 'points') return Number(p.points) || 0;
+      if (k === 'score') return p.score == null ? '' : Number(p.score);
+      return p[k] == null ? '' : p[k];
+    });
+    var rows = all.slice(0, MAX_ROWS);
     var tagged = all.filter(function (p) { return !!p.shift; }).length;
     return hero('Associate roster', 'Built from the RC / Beeline assignment snapshot. Profiles cannot be added by hand — a profile exists because an assignment does.', '', '') +
       shiftImportPanel(all.length, tagged) +
       '<section class="suite-panel">' + filters() +
       '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
-      '<th>Associate</th><th>Employee #</th><th>Market</th><th>Shift</th><th>Status</th><th>Reconciliation</th>' +
-      '<th>Attendance pts</th><th>Standing</th><th>Score</th><th></th></tr></thead><tbody>' +
+      sortHead('associates', 'name', 'Associate') +
+      '<th>Employee #</th>' +
+      sortHead('associates', 'location', 'Site / account') +
+      sortHead('associates', 'market', 'Market') +
+      sortHead('associates', 'shift', 'Shift') +
+      sortHead('associates', 'status', 'Status') +
+      '<th>Reconciliation</th>' +
+      sortHead('associates', 'points', 'Attendance pts') +
+      '<th>Standing</th>' + sortHead('associates', 'score', 'Score') +
+      '<th></th></tr></thead><tbody>' +
       (rows.length ? rows.map(function (p) {
         return '<tr><td><div class="name">' + esc(p.name || 'Unknown') + '</div>' +
           '<div class="sub">' + esc(p.badge) + (p.dup ? ' · <b class="dup-flag">DUP</b>' : '') + '</div></td>' +
           '<td>' + esc(p.empNumber || '—') + '</td>' +
+          '<td>' + (p.location
+            ? '<div class="name">' + esc(p.location) + '</div>' +
+              (p.account ? '<div class="sub">' + esc(p.account) + '</div>' : '')
+            : '<span class="sub">—</span>') + '</td>' +
           '<td>' + esc(p.market) + (p.marketRaw ? ' <span class="sub">· ' + esc(p.marketRaw) + '</span>' : '') + '</td>' +
           '<td>' + shiftChip(p) + '</td>' +
           '<td>' + statusChip(p) + '</td><td>' + reconChip(p) + '</td>' +
           '<td>' + p.points + '</td><td><span class="standing ' + p.standingCls + '">' + esc(p.standing) + '</span></td>' +
           '<td>' + scoreCell(p) + '</td>' +
           '<td><button class="suite-btn" data-profile="' + esc(p.badge) + '">Open</button></td></tr>';
-      }).join('') : '<tr><td colspan="10">' + empty('No associates match', 'Adjust the search, market, or status filter.') + '</td></tr>') +
+      }).join('') : '<tr><td colspan="11">' + empty('No associates match', 'Adjust the search, market, or status filter.') + '</td></tr>') +
       '</tbody></table></div>' + rowCap(rows.length, all.length) + '</section>';
   }
 
@@ -1266,7 +1327,14 @@
       if (!inMarket(p)) return false;
       if (!q) return true;
       return ((p ? p.name : '') + ' ' + a.badge + ' ' + a.type + ' ' + a.date).toLowerCase().indexOf(q) !== -1;
-    }).sort(function (a, b) { return String(b.date || '').localeCompare(String(a.date || '')); });
+    });
+    all = sortRows(all, 'attendance', function (a, k) {
+      var pr = profile(a.badge);
+      if (k === 'location') return pr ? pr.locationLabel : '';
+      if (k === 'name') return pr ? pr.name : (a.badge || '');
+      if (k === 'points') return Number(a.points) || 0;
+      return a[k] == null ? '' : a[k];
+    });
     var rows = all.slice(0, MAX_ROWS);
     var orphans = SuiteData.unmatched(state.profiles, state.stores.attendance);
 
@@ -1277,12 +1345,20 @@
       '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
       '" placeholder="Search by name, badge, type, or date…"></div>' +
       (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
-        '<th>Date</th><th>Associate</th><th>Type</th><th>Minutes</th><th>Points</th><th>Running pts</th><th>Notes</th><th></th></tr></thead><tbody>' +
+        sortHead('attendance', 'date', 'Date') +
+        sortHead('attendance', 'name', 'Associate') +
+        sortHead('attendance', 'location', 'Site / account') +
+        sortHead('attendance', 'type', 'Type') +
+        '<th>Minutes</th>' + sortHead('attendance', 'points', 'Points') +
+        '<th>Running pts</th><th>Notes</th><th></th></tr></thead><tbody>' +
         rows.map(function (a) {
           var p = profile(a.badge);
           return '<tr><td>' + esc(a.date) + '</td>' +
             '<td>' + (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div><div class="sub">' + esc(p.badge) + '</div>'
               : '<div class="name">Badge ' + esc(a.badge) + '</div><div class="sub warn-text">Not on roster</div>') + '</td>' +
+            '<td>' + (p && p.location
+              ? esc(p.location) + (p.account ? ' <span class="sub">' + esc(p.account) + '</span>' : '')
+              : '<span class="sub">—</span>') + '</td>' +
             '<td>' + esc(a.type) + '</td><td>' + esc(a.minutes || 0) + '</td><td>' + esc(a.points || 0) + '</td>' +
             '<td>' + (p ? p.points : '—') + '</td><td>' + esc(a.notes || '') + '</td>' +
             '<td><button class="suite-btn danger" data-del="attendance|' + esc(a.id) + '">Remove</button></td></tr>';
@@ -1799,6 +1875,16 @@
     var sh = e.target.closest('[data-set-shift]');
     if (sh) { setShift(sh.dataset.setShift); return; }
 
+    var sortCell = e.target.closest('[data-sort]');
+    if (sortCell) {
+      var parts = sortCell.dataset.sort.split(':'), tbl = parts[0], col = parts[1];
+      var st = state.sort[tbl];
+      // Clicking the column you are already on reverses it; a new column starts
+      // ascending, which is what people expect of a name or a site number.
+      if (st.key === col) st.dir = -st.dir; else { st.key = col; st.dir = 1; }
+      render();
+      return;
+    }
     var prof = e.target.closest('[data-profile]');
     if (prof) { go('profile', prof.dataset.profile); return; }
 

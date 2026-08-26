@@ -97,7 +97,9 @@
      Two independent tables sit side by side. The left one lists building
      addresses; the right one, found by its own header row, is the shift map. */
   function parseShiftKey(aoa) {
-    var out = { entries: [], byBuilding: {}, windows: {}, warnings: [] };
+    // accounts: "building|accountNum" -> the client's name, so an associate's
+    // dept code ("1502-18845") can be shown as a place rather than a number.
+    var out = { entries: [], byBuilding: {}, windows: {}, accounts: {}, warnings: [] };
     var rows = aoa || [];
     var headerRow = -1, cols = null;
     for (var i = 0; i < Math.min(rows.length, 15); i++) {
@@ -126,6 +128,7 @@
         supervisor: cols.supervisor !== -1 ? cells[cols.supervisor] : ''
       };
       out.entries.push(entry);
+      if (entry.accountNum && entry.account) out.accounts[building + '|' + entry.accountNum] = entry.account;
 
       if (!out.byBuilding[building]) out.byBuilding[building] = [];
       if (out.byBuilding[building].indexOf(shift) === -1) out.byBuilding[building].push(shift);
@@ -303,6 +306,15 @@
      One record per associate. The id is the EID when there is one, because that
      is stable and matches the on-premise report directly; otherwise it falls
      back to the name key so someone with no EID yet is still tagged. */
+  /* An associate's dept code is "<building>-<accountNum>" (e.g. "1502-18845").
+     The Key knows which client that account is, so the pair becomes a place a
+     person can read: site 1502, account CCM. */
+  function accountOf(key, building, dept) {
+    var num = String(dept || '').split('-')[1];
+    if (!num || !key || !key.accounts) return '';
+    return key.accounts[building + '|' + num.trim()] || '';
+  }
+
   function toShiftRecords(headcount, key) {
     return headcount.people.map(function (p) {
       var w = windowFor(key, p.building, p.shift);
@@ -314,7 +326,8 @@
         shift: p.shift,
         building: p.building,
         dept: p.dept,
-        // Denormalised so a profile can show the hours without loading the Key.
+        // Denormalised so a profile can show the site and hours without the Key.
+        account: accountOf(key, p.building, p.dept),
         hours: w ? w.raw : '',
         source: 'PLX workbook'
       };
@@ -386,6 +399,7 @@
     parseHeadcount: parseHeadcount,
     windowFor: windowFor,
     toShiftRecords: toShiftRecords,
+    accountOf: accountOf,
     validateAgainstKey: validateAgainstKey,
     indexShifts: indexShifts
   };

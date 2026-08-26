@@ -31,6 +31,7 @@ const SUITES = [
   { file: 'coverage-review.test.js', name: 'reviewing a stored check (DOM)', dom: true },
   { file: 'timeoff-ui.test.js', name: 'Time Off page: status + connect (DOM)', dom: true },
   { file: 'payroll-ui.test.js', name: 'Payroll tab (DOM)', dom: true },
+  { file: 'location-sort.test.js', name: 'site / account column + sorting (DOM)', dom: true },
   { file: 'market-filter.test.js', name: 'market filter across every view (DOM)', dom: true },
   { file: 'coverage-ui.test.js', name: 'coverage persistence + spreadsheet paste (DOM)', dom: true },
   { file: 'suite-ui.test.js', name: 'suite modules + reconciliation mount', dom: true },

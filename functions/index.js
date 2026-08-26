@@ -79,7 +79,7 @@ const COLLECTIONS = {
   // there is one, name otherwise -- see shift-key.js.
   shifts:       { path: 'shifts/assignments.json',       responseKey: 'shifts',
                   fields: { eid: 'str', nameKey: 'str', name: 'str', shift: 'str', building: 'str',
-                            dept: 'str', hours: 'str', badge: 'str', source: 'str' } },
+                            dept: 'str', account: 'str', hours: 'str', badge: 'str', source: 'str' } },
   // Payroll discrepancies raised on the GEODIS Payroll Discrepancy Form.
   discrepancies:{ path: 'payroll/discrepancies.json',    responseKey: 'discrepancies',
                   fields: { badge: 'str', name: 'str', location: 'str', date: 'str', weekEnding: 'str',

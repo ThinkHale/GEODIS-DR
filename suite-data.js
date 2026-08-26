@@ -113,7 +113,9 @@
         attendance: [], points: 0, standing: '', standingCls: '',
         timeOff: [], performance: null, score: null, note: '',
         transitionAssociate: false, transitionPtoInitial: 0, transitionPtoBalance: 0,
-        shift: '', shiftBuilding: '', shiftHours: '', shiftSource: ''
+        shift: '', shiftBuilding: '', shiftHours: '', shiftSource: '',
+        // Where they work: the GEODIS site number and the client account on it.
+        location: '', account: '', locationLabel: ''
       });
     });
 
@@ -161,6 +163,11 @@
         p.shiftBuilding = sr.building || '';
         p.shiftHours = sr.hours || '';
         p.shiftSource = sr.source || '';
+        p.location = sr.building || '';
+        p.account = sr.account || '';
+        // One readable string for tables and sorting. Site first, so sorting by
+        // it groups a building together rather than scattering it by client.
+        p.locationLabel = [p.location, p.account].filter(Boolean).join(' · ');
       }
       p.attendance.sort(function (a, b) { return String(b.date || '').localeCompare(String(a.date || '')); });
       p.timeOff.sort(function (a, b) { return String(b.start || '').localeCompare(String(a.start || '')); });

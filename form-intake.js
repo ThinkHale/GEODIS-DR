@@ -185,17 +185,18 @@
      The flat shape still works, so an existing flow does not have to change. */
   var CANONICAL = ['name', 'shift', 'location', 'dates', 'duration', 'hours', 'reason', 'email'];
 
-  function normalizeSubmission(body) {
+  function normalizeSubmission(body, canonical) {
     body = body || {};
     var resp = body.response;
     if (!resp || typeof resp !== 'object') return body;
     var map = body.fields || {};
+    var wanted = canonical || CANONICAL;
     var out = {
       language: body.language,
       responseId: body.responseId,
       submittedAt: body.submittedAt
     };
-    CANONICAL.forEach(function (k) {
+    wanted.forEach(function (k) {
       if (body[k] != null && body[k] !== '') { out[k] = body[k]; return; }
       var id = map[k];
       if (!id) return;

@@ -24,7 +24,8 @@
     timeoff: 'timeOff',
     requisitions: 'requisitions',
     performance: 'performance',
-    shifts: 'shifts'
+    shifts: 'shifts',
+    discrepancies: 'discrepancies'
   };
 
   /* Attendance occurrence thresholds. GEODIS policy varies by site, so these are
@@ -264,6 +265,21 @@
     return post('schedule=1&period=' + encodeURIComponent(period), doc);
   }
   // Which days have stored checks, for the review picker.
+  /* ---------- payroll periods ---------- */
+  function loadPayrollPeriods() {
+    return getJson(API + '?payroll=1')
+      .then(function (d) { return d.periods || []; })
+      .catch(function (err) { console.warn('Could not list payroll periods.', err); return []; });
+  }
+  function loadPayrollPeriod(week) {
+    return getJson(API + '?payroll=1&week=' + encodeURIComponent(week))
+      .then(function (d) { return d.period || {}; })
+      .catch(function (err) { console.warn('Could not load the payroll period.', err); return {}; });
+  }
+  function savePayrollClose(week, closesAt) {
+    return post('payroll=1&week=' + encodeURIComponent(week), { closesAt: closesAt });
+  }
+
   function loadCoverageDates() {
     return getJson(API + '?coverage=1')
       .then(function (d) { return d.dates || []; })
@@ -284,10 +300,13 @@
   // Load every shared collection at once. Individual failures degrade to an
   // empty list rather than taking the whole suite down.
   function loadAll() {
-    return Promise.all(['attendance', 'timeoff', 'requisitions', 'performance', 'shifts']
+    return Promise.all(['attendance', 'timeoff', 'requisitions', 'performance', 'shifts', 'discrepancies']
       .map(function (n) { return loadCollection(n); }))
       .then(function (r) {
-        return { attendance: r[0], timeOff: r[1], requisitions: r[2], performance: r[3], shifts: r[4] };
+        return {
+          attendance: r[0], timeOff: r[1], requisitions: r[2],
+          performance: r[3], shifts: r[4], discrepancies: r[5]
+        };
       });
   }
 
@@ -311,6 +330,9 @@
     saveSchedule: saveSchedule,
     loadCoverage: loadCoverage,
     loadCoverageDates: loadCoverageDates,
+    loadPayrollPeriods: loadPayrollPeriods,
+    loadPayrollPeriod: loadPayrollPeriod,
+    savePayrollClose: savePayrollClose,
     saveCheck: saveCheck,
     saveDocumentation: saveDocumentation
   };

@@ -47,10 +47,10 @@ w.fetch = (url, opt) => {
   }
   if (/schedule=1|coverage=1/.test(u)) return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
   const k = u.match(/\?(\w+)=1/)[1];
-  const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions', performance: 'performance', shifts: 'shifts' };
+  const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions', performance: 'performance', shifts: 'shifts', discrepancies: 'discrepancies' };
   return Promise.resolve({ ok: true, json: () => Promise.resolve({ [map[k]]: stores[map[k]] }) });
 };
-['suite-data.js', 'schedule-core.js', 'shift-key.js', 'timeoff-core.js', 'suite.js']
+['suite-data.js', 'schedule-core.js', 'shift-key.js', 'pipeline-core.js', 'timeoff-core.js', 'payroll-core.js', 'suite.js']
   .forEach(f => w.eval(fs.readFileSync(R + f, 'utf8')));
 const d = w.document, $ = s => d.querySelector(s), $$ = s => Array.from(d.querySelectorAll(s));
 const click = el => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));

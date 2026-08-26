@@ -20,13 +20,15 @@ const dom=new JSDOM(`<!doctype html><html><body class="suite-active">
 </body></html>`,{runScripts:'outside-only',url:'https://geodis.ebtools.pro/'});
 const w=dom.window;
 w.fetch=(url)=>{ const key=String(url).match(/\?(\w+)=1/)[1];
-  const map={attendance:'attendance',timeoff:'timeOff',requisitions:'requisitions',performance:'performance',shifts:'shifts'};
+  const map={attendance:'attendance',timeoff:'timeOff',requisitions:'requisitions',performance:'performance',shifts:'shifts',discrepancies:'discrepancies'};
   return Promise.resolve({ok:true,json:()=>Promise.resolve({[map[key]]:stores[map[key]]})}); };
 w.alert=()=>{}; w.confirm=()=>true; w.scrollTo=()=>{}; w.scrollTo=()=>{};
 w.eval(fs.readFileSync(R+'suite-data.js','utf8'));
 w.eval(fs.readFileSync(R+'schedule-core.js','utf8'));
 w.eval(fs.readFileSync(R+'shift-key.js','utf8'));
+w.eval(fs.readFileSync(R+'pipeline-core.js','utf8'));
 w.eval(fs.readFileSync(R+'timeoff-core.js','utf8'));
+w.eval(fs.readFileSync(R+'payroll-core.js','utf8'));
 w.eval(fs.readFileSync(R+'suite.js','utf8'));
 const d=w.document, $=s=>d.querySelector(s), $$=s=>Array.from(d.querySelectorAll(s));
 const click=el=>el.dispatchEvent(new w.MouseEvent('click',{bubbles:true}));
@@ -34,7 +36,7 @@ const click=el=>el.dispatchEvent(new w.MouseEvent('click',{bubbles:true}));
 setTimeout(()=>{
 console.log('— boot before the roster arrives —');
 t('shell renders', !!$('.suite-nav'));
-t('all seven nav items present', $$('.suite-nav-btn').length===7);
+t('all eight nav items present', $$('.suite-nav-btn').length===8);
 t('empty roster prompts for the snapshot', d.body.textContent.includes('Waiting on the morning assignment snapshot'));
 t('no fabricated associates anywhere', !d.body.textContent.includes('James Dixon'));
 

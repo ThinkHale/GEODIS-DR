@@ -157,3 +157,9 @@ body.suite-active>header,body.suite-active>main,body.suite-active>.foot{display:
 .connect-hit>div:nth-child(2){flex:1;min-width:0}
 .connect-hit span:last-child{color:var(--suite-muted)}
 .connect-hint{padding:14px 4px;font-size:12.5px;color:var(--suite-muted)}
+
+/* ---- payroll ---- */
+.payroll-tabs{gap:8px;margin-bottom:14px}
+.detail-cell{max-width:340px;font-size:12px;line-height:1.45}
+.delta-up{color:var(--suite-green);font-weight:600}
+.delta-down{color:var(--suite-red);font-weight:600}

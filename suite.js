@@ -38,8 +38,8 @@
   };
   var NAV = [
     ['overview', 'Overview'], ['associates', 'Associates'], ['coverage', 'Coverage'],
-    ['attendance', 'Attendance'], ['timeoff', 'Time Off'], ['requisitions', 'Requisitions'],
-    ['reconciliation', 'Assignment Reconciliation']
+    ['attendance', 'Attendance'], ['timeoff', 'Time Off'], ['payroll', 'Payroll'],
+    ['requisitions', 'Requisitions'], ['reconciliation', 'Assignment Reconciliation']
   ];
 
   var state = {
@@ -55,7 +55,8 @@
     updatedAt: null,
     profiles: new Map(),
     stores: { attendance: [], timeOff: [], requisitions: [], performance: [], shifts: [] },
-    connectFor: '', connectQuery: '',   // the request being linked to an associate
+    connectFor: '', connectQuery: '', connectKind: 'timeoff',
+    payroll: { periods: [], week: '', period: null, tab: 'discrepancies', loading: false },
     shiftKey: null,          // parsed "Geodis Key" vocabulary, when a workbook is loaded
     shiftImport: null,       // last import result, for the report shown after
     storesLoaded: false,
@@ -194,6 +195,7 @@
       coverage: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
       attendance: '<rect x="3" y="5" width="18" height="16" rx="1"/><path d="M8 3v4m8-4v4M3 10h18m-13 5l2 2 5-5"/>',
       timeoff: '<path d="M3 12a9 9 0 0118 0H3zm9 0v9m-4 0h8"/>',
+      payroll: '<rect x="3" y="6" width="18" height="12" rx="1"/><circle cx="12" cy="12" r="2.5"/>',
       requisitions: '<path d="M6 3h9l4 4v14H6zM14 3v5h5M9 13h7M9 17h7"/>',
       reconciliation: '<rect x="5" y="4" width="14" height="17" rx="1"/><path d="M9 4V2h6v2M8 9h8m-8 4h5m-5 4h7"/>'
     }[name] || '';
@@ -217,6 +219,7 @@
       coverage: ['Coverage', 'Scheduled shifts vs. who is actually on premise'],
       attendance: ['Attendance', 'Occurrences and points'],
       timeoff: ['Time Off', 'PTO and VTO tracking'],
+      payroll: ['Payroll', 'Hours changes and discrepancy tracking'],
       requisitions: ['Requisitions', 'Staffing demand and fulfillment'],
       reconciliation: ['Assignment Reconciliation', 'Beeline ⇆ RC active-assignment crosscheck']
     };
@@ -716,6 +719,25 @@
 
   // Pull back this week's plan and today's checks, so a profile can show a
   // schedule and a presence history without re-uploading anything.
+  function loadPayrollIndex() {
+    return SuiteData.loadPayrollPeriods().then(function (periods) {
+      state.payroll.periods = periods;
+      render();
+      if (periods.length) return openPayrollWeek(periods[periods.length - 1]);
+    });
+  }
+  function openPayrollWeek(week) {
+    state.payroll.week = week;
+    if (!week) { state.payroll.period = null; render(); return Promise.resolve(); }
+    state.payroll.loading = true;
+    render();
+    return SuiteData.loadPayrollPeriod(week).then(function (period) {
+      state.payroll.period = period;
+      state.payroll.loading = false;
+      render();
+    });
+  }
+
   function loadStoredCoverage() {
     var todayIso = ScheduleCore.isoDate(new Date());
     var week = SuiteData.weekStart(todayIso);
@@ -1312,12 +1334,17 @@
      status is a dropdown. Every change is attributed and logged -- see
      timeoff-core.js. An unrecognised status (older data, or something set by
      hand) is offered as-is rather than quietly relabelled. */
+  // Which pipeline governs a collection, so one handler serves both.
+  var PIPELINES = { timeoff: TimeOffCore, discrepancies: PayrollCore.pipeline };
+  var LOCAL_OF = { timeoff: 'timeOff', discrepancies: 'discrepancies' };
+
   function statusSelect(t) {
     var meta = TimeOffCore.statusMeta(t.status);
     var keys = TimeOffCore.STATUS_KEYS.slice();
     if (meta.unknown) keys.unshift(meta.key);
     var last = TimeOffCore.lastChange(t);
-    return '<select class="suite-select status-select ' + esc(meta.cls) + '" data-status="' + esc(t.id) + '"' +
+    return '<select class="suite-select status-select ' + esc(meta.cls) + '" data-status="' + esc(t.id) +
+      '" data-status-kind="timeoff"' +
       (last ? ' title="' + esc(changeTitle(t)) + '"' : '') + '>' +
       keys.map(function (k) {
         var m = TimeOffCore.statusMeta(k);
@@ -1347,10 +1374,12 @@
      A request arrives with a name and no badge when the name was typed
      differently from the roster. Rather than guess, this searches the roster so
      a person picks. */
-  function connectModal(id) {
-    var t = state.stores.timeOff.filter(function (x) { return x.id === id; })[0];
+  function connectModal(id, kind) {
+    kind = kind || 'timeoff';
+    var t = (state.stores[LOCAL_OF[kind]] || []).filter(function (x) { return x.id === id; })[0];
     if (!t) return;
     state.connectFor = id;
+    state.connectKind = kind;
     state.connectQuery = t.name || '';
     document.body.insertAdjacentHTML('beforeend',
       '<div class="suite-modal-backdrop" id="suite-modal"><div class="suite-modal">' +
@@ -1382,6 +1411,158 @@
         (p.status === 'Ended' ? ' · <b class="warn-text">Ended</b>' : '') + '</div></div>' +
         '<span>›</span></button>';
     }).join('');
+  }
+
+  /* ---------- payroll ----------
+     Two things that are really one thing: hours moving after somebody thought
+     they were final. The discrepancy form is the team reporting it; the Beeline
+     hours watch is the system noticing it. */
+  function payrollView() {
+    var pr = state.payroll;
+    return hero('Payroll', 'Discrepancies raised by the team, and hours that changed after a period closed.', '', '') +
+      '<div class="filter-row payroll-tabs">' +
+      [['discrepancies', 'Discrepancies'], ['hours', 'Beeline hours']].map(function (x) {
+        return '<button class="suite-btn ' + (pr.tab === x[0] ? 'primary' : '') +
+          '" data-payroll-tab="' + x[0] + '">' + esc(x[1]) + '</button>';
+      }).join('') + '</div>' +
+      (pr.tab === 'hours' ? payrollHours() : payrollDiscrepancies());
+  }
+
+  function payrollDiscrepancies() {
+    if (!state.storesLoaded) return loadingPanel('discrepancies');
+    var q = state.query.trim().toLowerCase();
+    var all = (state.stores.discrepancies || []).filter(function (dsc) {
+      var p = profile(dsc.badge);
+      if (p ? !inMarket(p) : state.market !== 'all' && dsc.badge) return false;
+      if (!q) return true;
+      return ((p ? p.name : dsc.name || '') + ' ' + dsc.badge + ' ' + dsc.location + ' ' +
+        dsc.details + ' ' + dsc.status).toLowerCase().indexOf(q) !== -1;
+    }).sort(function (a, b) { return String(b.date || '').localeCompare(String(a.date || '')); });
+    var rows = all.slice(0, MAX_ROWS);
+    var open = all.filter(function (dsc) { return PayrollCore.pipeline.needsAction(dsc.status); }).length;
+    var orphans = (state.stores.discrepancies || []).filter(function (dsc) { return !profile(dsc.badge); });
+
+    return '<div class="metric-strip">' +
+      metric('Open discrepancies', open, 'Not yet corrected or closed', open ? 'orange' : 'green') +
+      metric('Total raised', all.length, 'In this market') +
+      metric('Unmatched', orphans.length, 'Need connecting to an associate', orphans.length ? 'orange' : 'green') +
+      '</div>' +
+      (orphans.length ? '<div class="warn-banner"><b>' + orphans.length + '</b> discrepanc' +
+        (orphans.length === 1 ? 'y' : 'ies') + ' could not be matched to an associate — usually a name ' +
+        'typed differently on the form. Use Connect to link them.</div>' : '') +
+      '<section class="suite-panel">' +
+      '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
+      '" placeholder="Search by name, location, detail, or status…"></div>' +
+      (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
+        '<th>Associate</th><th>Location</th><th>Date</th><th>Week ending</th><th>Details</th>' +
+        '<th>Status</th><th></th></tr></thead><tbody>' +
+        rows.map(function (dsc) {
+          var p = profile(dsc.badge);
+          return '<tr' + (p ? '' : ' class="cov-row warn"') + '><td>' +
+            (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div>' +
+                 '<div class="sub">' + esc(p.badge) + '</div>'
+               : '<div class="name">' + esc(dsc.name || 'Unknown') + '</div>' +
+                 '<div class="sub warn-text">Not matched to a profile</div>') + '</td>' +
+            '<td>' + esc(dsc.location || '—') + '</td>' +
+            '<td>' + esc(dsc.date || '<span class="warn-text">not set</span>') + '</td>' +
+            '<td>' + esc(dsc.weekEnding || '—') + '</td>' +
+            '<td class="detail-cell">' + esc(dsc.details || '') + '</td>' +
+            '<td>' + pipelineSelect(dsc, PayrollCore.pipeline, 'discrepancies') + '</td>' +
+            '<td>' + (p ? '' : '<button class="suite-btn" data-connect="' + esc(dsc.id) +
+              '" data-connect-kind="discrepancies">Connect…</button> ') +
+            '<button class="suite-btn danger" data-del="discrepancies|' + esc(dsc.id) + '">Remove</button></td></tr>';
+        }).join('') + '</tbody></table></div>' + rowCap(rows.length, all.length)
+        : empty('No discrepancies yet', 'They arrive from the GEODIS Payroll Discrepancy Form.')) +
+      '</section>';
+  }
+
+  /* Hours pulled from Beeline, period by period. The interesting number is what
+     moved AFTER the period closed -- money already out the door being changed
+     behind it. Nothing is flagged until a close time has been recorded, because
+     a guessed cutoff would either cry wolf or stay silent. */
+  function payrollHours() {
+    var pr = state.payroll;
+    var picker = '<div class="filter-row cov-controls">' +
+      '<label class="cov-ctl">Pay period<select class="suite-select" id="payroll-week">' +
+      (pr.periods.length
+        ? pr.periods.slice().sort().reverse().map(function (w) {
+            return '<option value="' + esc(w) + '" ' + (pr.week === w ? 'selected' : '') + '>' +
+              'Week ending ' + esc(w) + '</option>';
+          }).join('')
+        : '<option value="">No periods yet</option>') +
+      '</select></label>' +
+      (pr.week ? '<label class="cov-ctl">Payroll closed<input class="suite-input" type="datetime-local" ' +
+        'id="payroll-close" value="' + esc(dtValue(closeDate())) + '"></label>' +
+        '<span class="cov-asof-note">' + (pr.period && pr.period.closesAt
+          ? 'Changes after this are flagged' : 'Set this to flag post-close changes') + '</span>' : '') +
+      '</div>';
+
+    if (pr.loading) return picker + loadingPanel('this pay period');
+    if (!pr.periods.length) {
+      return picker + '<section class="suite-panel"><div class="workflow-empty">' +
+        'No hours have been posted yet. An automation posts each pull of the Beeline hours report to ' +
+        '<code>?payroll=1&amp;week=YYYY-MM-DD</code>, and every pull after the first is compared with the one ' +
+        'before it.</div></section>';
+    }
+    var period = pr.period || {};
+    var snaps = period.snapshots || [];
+    var changes = (period.changes || []).slice().reverse();
+    var afterClose = changes.filter(function (c) { return c.afterClose; });
+    var latest = snaps.length ? snaps[snaps.length - 1] : null;
+    var sum = (latest && latest.summary) || {};
+
+    return picker +
+      '<div class="metric-strip">' +
+      metric('Changed after close', afterClose.length, period.closesAt ? 'Since ' + esc(shortWhen(period.closesAt)) : 'No close date set',
+        afterClose.length ? 'orange' : 'green') +
+      metric('Hours on file', sum.totalHours == null ? '—' : sum.totalHours, (sum.people || 0) + ' associates') +
+      metric('Changes this period', (period.changes || []).length, 'Across ' + snaps.length + ' pull' + (snaps.length === 1 ? '' : 's')) +
+      metric('Net hours moved', sum.net == null ? '—' : (sum.net > 0 ? '+' : '') + sum.net, 'Latest pull vs the one before') +
+      '</div>' +
+      (afterClose.length ? '<div class="warn-banner"><b>' + afterClose.length + '</b> hour change' +
+        (afterClose.length === 1 ? '' : 's') + ' landed after this period closed. Those are the ones to check ' +
+        'against what was already paid.</div>' : '') +
+      '<section class="suite-panel"><div class="suite-panel-head"><h2>Hour changes</h2></div>' +
+      (changes.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
+        '<th>Associate</th><th>Change</th><th>Before</th><th>After</th><th>Delta</th><th>Seen</th></tr></thead><tbody>' +
+        changes.slice(0, MAX_ROWS).map(function (c) {
+          var p = profile(c.badge);
+          return '<tr class="' + (c.afterClose ? 'cov-row bad' : '') + '"><td>' +
+            (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div>'
+               : '<div class="name">' + esc(c.name || c.badge) + '</div>') +
+            '<div class="sub">' + esc(c.badge) + '</div></td>' +
+            '<td><span class="cov-status ' + (c.kind === 'removed' ? 'bad' : c.kind === 'added' ? 'warn' : '') + '">' +
+            esc(c.kind) + '</span>' + (c.afterClose ? '<span class="cov-flag bad">after close</span>' : '') + '</td>' +
+            '<td>' + esc(c.from) + '</td><td>' + esc(c.to) + '</td>' +
+            '<td class="' + (c.delta > 0 ? 'delta-up' : c.delta < 0 ? 'delta-down' : '') + '">' +
+            (c.delta > 0 ? '+' : '') + esc(c.delta) + '</td>' +
+            '<td>' + esc(shortWhen(c.at)) + '</td></tr>';
+        }).join('') + '</tbody></table></div>' + rowCap(Math.min(changes.length, MAX_ROWS), changes.length)
+        : empty('No changes recorded', snaps.length < 2
+            ? 'The first pull is a baseline. Changes appear from the second pull onward.'
+            : 'Hours have not moved since the first pull.')) +
+      '</section>';
+  }
+  function closeDate() {
+    var c = state.payroll.period && state.payroll.period.closesAt;
+    var d = c ? new Date(c) : null;
+    return d && !isNaN(d.getTime()) ? d : new Date();
+  }
+
+  /* One status dropdown, driven by whichever pipeline the record belongs to. */
+  function pipelineSelect(rec, pipe, collection) {
+    var meta = pipe.statusMeta(rec.status);
+    var keys = pipe.STATUS_KEYS.slice();
+    if (meta.unknown) keys.unshift(meta.key);
+    var last = pipe.lastChange(rec);
+    return '<select class="suite-select status-select ' + esc(meta.cls) + '" data-status="' + esc(rec.id) +
+      '" data-status-kind="' + esc(collection) + '"' +
+      (last ? ' title="' + esc(changeTitle(rec)) + '"' : '') + '>' +
+      keys.map(function (k) {
+        return '<option value="' + esc(k) + '" ' + (meta.key === k ? 'selected' : '') + '>' +
+          esc(pipe.statusMeta(k).label) + '</option>';
+      }).join('') + '</select>' +
+      (last ? '<div class="sub">' + esc(last.by) + ' · ' + esc(shortWhen(last.at)) + '</div>' : '');
   }
 
   /* ---------- requisitions ---------- */
@@ -1438,7 +1619,7 @@
   var VIEWS = {
     overview: overview, associates: associates, profile: profileView,
     coverage: coverageView, attendance: attendance, timeoff: timeoff,
-    requisitions: requisitions, reconciliation: reconciliation
+    payroll: payrollView, requisitions: requisitions, reconciliation: reconciliation
   };
   function render() {
     unmountRecon();   // rescue the reconciliation DOM before innerHTML wipes it
@@ -1536,7 +1717,8 @@
       alert('That record could not be removed.\n\n' + err.message);
     });
   }
-  var LOCAL_KEY = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions' };
+  var LOCAL_KEY = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions',
+    discrepancies: 'discrepancies' };
 
   /* ---------- events ---------- */
   root.addEventListener('click', function (e) {
@@ -1559,7 +1741,15 @@
       return;
     }
     var conn = e.target.closest('[data-connect]');
-    if (conn) { connectModal(conn.dataset.connect); return; }
+    if (conn) { connectModal(conn.dataset.connect, conn.dataset.connectKind || 'timeoff'); return; }
+    var ptab = e.target.closest('[data-payroll-tab]');
+    if (ptab) {
+      state.payroll.tab = ptab.dataset.payrollTab;
+      state.query = '';
+      render();
+      if (state.payroll.tab === 'hours' && !state.payroll.periods.length) loadPayrollIndex();
+      return;
+    }
     if (e.target.closest('[data-cov-now]')) { state.coverage.asOf = new Date(); render(); return; }
     if (e.target.closest('[data-cov-clear]')) {
       if (!confirm('Clear the loaded schedule and on-premise files?')) return;
@@ -1643,12 +1833,28 @@
   }
   root.addEventListener('change', function (e) {
     if (e.target.classList.contains('status-select')) {
+      var kind = e.target.dataset.statusKind || 'timeoff';
+      var pipe = PIPELINES[kind];
+      var local = LOCAL_OF[kind];
       var id = e.target.dataset.status;
-      var rec = state.stores.timeOff.filter(function (x) { return x.id === id; })[0];
-      if (!rec) return;
+      var rec = (state.stores[local] || []).filter(function (x) { return x.id === id; })[0];
+      if (!rec || !pipe) return;
       var actor = currentActor(true);
       if (!actor) { render(); return; }   // they cancelled the name prompt
-      persist('timeoff', TimeOffCore.applyStatus(rec, e.target.value, actor), 'timeOff');
+      persist(kind, pipe.applyStatus(rec, e.target.value, actor), local);
+      return;
+    }
+    if (e.target.id === 'payroll-week') { openPayrollWeek(e.target.value); return; }
+    if (e.target.id === 'payroll-close') {
+      var week = state.payroll.week;
+      if (!week) return;
+      var iso = e.target.value ? new Date(e.target.value).toISOString() : '';
+      SuiteData.savePayrollClose(week, iso).then(function () {
+        return SuiteData.loadPayrollPeriod(week);
+      }).then(function (period) {
+        state.payroll.period = period;
+        render();
+      }).catch(function (err) { alert('That close date could not be saved.\n\n' + err.message); });
       return;
     }
     if (e.target.id === 'review-date') {
@@ -1724,13 +1930,15 @@
   document.addEventListener('click', function (e) {
     var hit = e.target.closest('[data-connect-to]');
     if (hit) {
-      var rec = state.stores.timeOff.filter(function (x) { return x.id === state.connectFor; })[0];
-      if (!rec) return;
+      var kind = state.connectKind || 'timeoff';
+      var local = LOCAL_OF[kind], pipe = PIPELINES[kind];
+      var rec = (state.stores[local] || []).filter(function (x) { return x.id === state.connectFor; })[0];
+      if (!rec || !pipe) return;
       var actor = currentActor(true);
       if (!actor) return;
       var modal = document.getElementById('suite-modal');
       if (modal) modal.remove();
-      persist('timeoff', TimeOffCore.applyConnection(rec, hit.dataset.connectTo, actor), 'timeOff');
+      persist(kind, pipe.applyConnection(rec, hit.dataset.connectTo, actor), local);
       return;
     }
     if (e.target.closest('[data-close]')) {

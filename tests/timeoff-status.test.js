@@ -87,7 +87,7 @@ t('the status is unchanged by linking', conn.status === undefined);
 t('does not mutate', orphan.badge === '');
 
 console.log('— shared modules stay in sync —');
-['reconcile-core.js', 'schedule-core.js', 'form-intake.js', 'timeoff-core.js'].forEach(f => {
+['reconcile-core.js', 'schedule-core.js', 'form-intake.js', 'pipeline-core.js', 'timeoff-core.js', 'payroll-core.js'].forEach(f => {
   const a = path.join(__dirname, '..', f), b = path.join(__dirname, '..', 'functions', f);
   t(f + ' present in functions/', fs.existsSync(b));
   if (fs.existsSync(b)) t(f + ' byte-identical', fs.readFileSync(a, 'utf8') === fs.readFileSync(b, 'utf8'));

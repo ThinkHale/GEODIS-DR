@@ -32,6 +32,7 @@ const Core = require('./reconcile-core.js');
 const Sched = require('./schedule-core.js');
 const Intake = require('./form-intake.js');
 const TimeOff = require('./timeoff-core.js');
+const Payroll = require('./payroll-core.js');
 
 // Shared secret proving a request came from our Power Automate flow.
 // Set with: firebase functions:secrets:set SYNC_KEY
@@ -67,6 +68,12 @@ const COLLECTIONS = {
   shifts:       { path: 'shifts/assignments.json',       responseKey: 'shifts',
                   fields: { eid: 'str', nameKey: 'str', name: 'str', shift: 'str', building: 'str',
                             dept: 'str', hours: 'str', badge: 'str', source: 'str' } },
+  // Payroll discrepancies raised on the GEODIS Payroll Discrepancy Form.
+  discrepancies:{ path: 'payroll/discrepancies.json',    responseKey: 'discrepancies',
+                  fields: { badge: 'str', name: 'str', location: 'str', date: 'str', weekEnding: 'str',
+                            details: 'str', status: 'str', source: 'str', submittedAt: 'str',
+                            statusUpdatedAt: 'str', statusUpdatedBy: 'str', connectedBy: 'str',
+                            connectedAt: 'str', notes: 'str', statusHistory: 'log' } },
   performance:  { path: 'performance/metrics.json',      responseKey: 'performance',
                   fields: { badge: 'str', period: 'str', quality: 'num', productivity: 'num', safety: 'num',
                             units: 'num', hours: 'num', notes: 'str' } }
@@ -81,6 +88,11 @@ const MAX_LOG_ENTRIES = 40;
 
    The date is part of the storage path, so it is validated as a strict ISO date
    and never interpolated raw -- see dateKeyOf(). */
+// Hours submitted to Beeline, one document per pay period. Each pull is compared
+// with the one before it; what moved after the period closed is the point.
+const PAYROLL_DIR = 'payroll/periods';    // {weekEnding}.json
+const MAX_HOURS_ROWS = 20000;
+const MAX_SNAPSHOTS = 40;
 const SCHEDULE_DIR = 'schedule/weeks';    // {periodStart}.json -- the plan
 const COVERAGE_DIR = 'coverage/days';     // {date}.json        -- the observations
 const MAX_SCHEDULE_PEOPLE = 5000;
@@ -512,6 +524,156 @@ async function handlePtoIntake(req, res) {
   });
 }
 
+/* ---------- payroll discrepancy intake ----------
+   Same contract as the PTO intake, including the raw-response + field-map shape,
+   so both Power Automate flows are built the same way. */
+async function handleDiscrepancyIntake(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
+  const expected = SYNC_KEY.value();
+  if (!expected || req.get('x-sync-key') !== expected) {
+    res.status(401).json({ ok: false, error: 'Unauthorized' }); return;
+  }
+  const body = req.body || {};
+  const subs = Array.isArray(body.submissions) ? body.submissions : [body];
+  if (!subs.length || subs.length > 200) {
+    res.status(400).json({ ok: false, error: 'Expected 1-200 submissions' }); return;
+  }
+
+  const profiles = await rosterProfiles();
+  if (!profiles.length) {
+    res.status(503).json({ ok: false, error: 'No roster snapshot available yet; retry after the morning sync.' });
+    return;
+  }
+  const byName = Intake.buildNameIndex(profiles, Sched.rosterKey);
+  const list = await readJsonArray(COLLECTIONS.discrepancies.path);
+  const results = [];
+  let written = 0;
+
+  for (const sub of subs) {
+    const flat = Intake.normalizeSubmission(sub, ['name', 'location', 'date', 'details']);
+    if (!flat || !String(flat.name || '').trim()) {
+      results.push({ ok: false, error: 'Missing name', name: '' });
+      continue;
+    }
+    const out = Payroll.toDiscrepancy(flat, { byName, rosterKey: Sched.rosterKey });
+    const clean = sanitizeRecord(out.record, COLLECTIONS.discrepancies.fields);
+    clean.id = String(out.record.id).slice(0, 64);
+    clean.updatedAt = new Date().toISOString();
+    const i = list.findIndex(x => x && x.id === clean.id);
+    if (i === -1) { list.push(clean); }
+    else {
+      // A re-run must not drag a discrepancy back to Received once somebody has
+      // started working it.
+      const current = Payroll.pipeline.normalizeStatus(list[i].status);
+      const kept = current !== Payroll.pipeline.DEFAULT_STATUS ? list[i].status : clean.status;
+      list[i] = Object.assign({}, list[i], clean, { status: kept });
+    }
+    written++;
+    results.push({
+      ok: true, id: clean.id, name: flat.name, badge: clean.badge || '',
+      matched: out.matched, ambiguous: out.ambiguous, warnings: out.warnings
+    });
+  }
+
+  if (list.length > MAX_COLLECTION_RECORDS) {
+    res.status(400).json({ ok: false, error: 'Discrepancy collection is full' }); return;
+  }
+  await bucket.file(COLLECTIONS.discrepancies.path).save(JSON.stringify(list), {
+    contentType: 'application/json',
+    metadata: { cacheControl: 'no-cache, max-age=0' }
+  });
+  res.status(200).json({
+    ok: true, written: written,
+    unmatched: results.filter(r => r.ok && !r.matched).map(r => r.name),
+    results: results
+  });
+}
+
+/* ---------- hours submitted to Beeline ----------
+   GET  ?payroll=1                     -> { periods: [...] }
+   GET  ?payroll=1&week=YYYY-MM-DD     -> that period
+   POST ?payroll=1&week=... { rows, takenAt, source }  -> add a pull, diff it
+   POST ?payroll=1&week=... { closesAt }               -> record when it closed
+
+   Writing hours needs the sync key, because that is an automation. Recording a
+   close date is a person in the browser, so it takes the origin check instead. */
+async function handlePayroll(req, res) {
+  setKvCors(res);
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  const week = dateKeyOf(req.query.week);
+
+  if (req.method === 'GET') {
+    res.set('Cache-Control', 'no-cache, max-age=0');
+    if (!week) { res.status(200).json({ ok: true, periods: await listDateKeys(PAYROLL_DIR) }); return; }
+    res.status(200).json({ ok: true, period: await readJsonFile(PAYROLL_DIR + '/' + week + '.json') });
+    return;
+  }
+  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
+  if (!week) { res.status(400).json({ ok: false, error: 'Missing/invalid week' }); return; }
+
+  const body = req.body || {};
+  const path = PAYROLL_DIR + '/' + week + '.json';
+  const existing = await readJsonFile(path);
+  const period = {
+    weekEnding: week,
+    closesAt: existing.closesAt || '',
+    snapshots: Array.isArray(existing.snapshots) ? existing.snapshots : [],
+    changes: Array.isArray(existing.changes) ? existing.changes : [],
+    updatedAt: new Date().toISOString()
+  };
+
+  if (body.closesAt !== undefined) {
+    // A person setting the cutoff, from the browser.
+    if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
+    period.closesAt = String(body.closesAt || '').slice(0, 40);
+  } else if (Array.isArray(body.rows)) {
+    // An automation posting a pull of the hours report.
+    if (req.get('x-sync-key') !== SYNC_KEY.value()) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
+    if (body.rows.length > MAX_HOURS_ROWS) { res.status(400).json({ ok: false, error: 'Too many rows' }); return; }
+    const takenAt = String(body.takenAt || new Date().toISOString()).slice(0, 40);
+    const prior = period.snapshots.length ? period.snapshots[period.snapshots.length - 1] : null;
+    const next = { weekEnding: week, takenAt: takenAt, rows: body.rows };
+    const diff = Payroll.compareHours(prior, next, { closesAt: period.closesAt });
+
+    period.snapshots.push({
+      takenAt: takenAt,
+      source: String(body.source || '').slice(0, 200),
+      summary: diff.summary,
+      // Only the last pull keeps its full rows; older ones keep their summary and
+      // the changes they produced. A period holds weeks of pulls otherwise.
+      rows: next.rows.map(r => ({
+        badge: String((r && r.badge) || '').slice(0, 64),
+        name: String((r && r.name) || '').slice(0, 120),
+        hours: Number(r && r.hours) || 0,
+        location: String((r && r.location) || '').slice(0, 200),
+        status: String((r && r.status) || '').slice(0, 60)
+      }))
+    });
+    period.snapshots.forEach((s, i) => { if (i < period.snapshots.length - 1) delete s.rows; });
+    if (period.snapshots.length > MAX_SNAPSHOTS) period.snapshots = period.snapshots.slice(-MAX_SNAPSHOTS);
+    if (diff.changes.length) period.changes = period.changes.concat(diff.changes).slice(-MAX_HOURS_ROWS);
+
+    await bucket.file(path).save(JSON.stringify(period), {
+      contentType: 'application/json',
+      metadata: { cacheControl: 'no-cache, max-age=0' }
+    });
+    res.status(200).json({
+      ok: true, weekEnding: week, baseline: diff.baseline,
+      afterClose: diff.afterClose, changes: diff.changes.length, summary: diff.summary
+    });
+    return;
+  } else {
+    res.status(400).json({ ok: false, error: 'Expected rows or closesAt' });
+    return;
+  }
+
+  await bucket.file(path).save(JSON.stringify(period), {
+    contentType: 'application/json',
+    metadata: { cacheControl: 'no-cache, max-age=0' }
+  });
+  res.status(200).json({ ok: true, weekEnding: week, closesAt: period.closesAt });
+}
+
 function parseToState(buffer, side) {
   const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -531,6 +693,8 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
       return;
     }
     if (req.query.ptoIntake !== undefined) { await handlePtoIntake(req, res); return; }
+    if (req.query.discrepancyIntake !== undefined) { await handleDiscrepancyIntake(req, res); return; }
+    if (req.query.payroll !== undefined) { await handlePayroll(req, res); return; }
     if (req.query.schedule !== undefined) { await handleSchedule(req, res); return; }
     if (req.query.coverage !== undefined) { await handleCoverage(req, res); return; }
     // Suite collections: ?attendance=1, ?timeoff=1, ?requisitions=1, ?performance=1

@@ -292,10 +292,55 @@ All of the matching and shaping lives in `schedule-core.js` with no DOM access, 
 same arrangement `reconcile-core.js` has, so a scheduled Cloud Function can reuse it
 verbatim when these reports are automated rather than uploaded.
 
+## Payroll
+
+Two jobs, both about hours that move after somebody thought they were final.
+
+### Discrepancies
+
+Raised by the team on the GEODIS Payroll Discrepancy Form, ingested at
+`?discrepancyIntake=1` with the same contract as the PTO intake — the same
+`x-sync-key`, the same raw-response + field-map payload, the same name-to-badge
+resolution and the same Connect button for a name typed differently.
+
+Question 3 is a date **picker**, so unlike the PTO dates field it only has to
+cope with what Forms emits: an ISO date, an ISO timestamp, or `M/D/YYYY`.
+Anything else leaves the date blank and says so rather than guessing. The date is
+also normalised to its **week ending** (Sunday), which is what lines a
+discrepancy up with the hours snapshot for the same period.
+
+Its pipeline is its own — `Received → Researching → Submitted to Payroll →
+Corrected`, plus `No Adjustment Needed` and `Cancelled`. **Submitted to Payroll
+is not resolved**: it has been handed over, not yet fixed.
+
+### Beeline hours
+
+```text
+payroll/periods/{weekEnding}.json
+  { weekEnding, closesAt, snapshots: [...], changes: [...] }
+```
+
+An automation posts each pull of the hours report to `?payroll=1&week=…` with the
+sync key. Every pull after the first is compared with the one before it, and what
+moved is appended to the period. **The first pull is a baseline, not a set of
+changes** — otherwise every person would read as newly added.
+
+Only the latest snapshot keeps its rows; older ones keep their summary and the
+changes they produced, so a period does not grow without bound.
+
+`afterClose` is the point of the whole exercise: hours that changed once the
+period was closed, which is money already out the door being changed behind it.
+**It is only ever set when a close time has actually been recorded** — an unset
+close date means no flag, not a guessed cutoff that would either cry wolf or stay
+silent. Recording the close date is a person in the browser, so it takes the
+origin check; posting hours is an automation, so it takes the sync key.
+
 ## Time-off status pipeline
 
 A request moves through a pipeline, not a yes/no. The vocabulary lives in
-`timeoff-core.js` so the browser, the Cloud Function, and the form intake cannot
+`timeoff-core.js`, and the machinery underneath it — normalising, legacy aliases,
+the change log, the actor — lives once in `pipeline-core.js` and is shared with
+the payroll discrepancy pipeline. It so the browser, the Cloud Function, and the form intake cannot
 disagree about what a status means.
 
 | Status | Excuses the absence | Needs action |

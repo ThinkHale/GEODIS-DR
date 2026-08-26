@@ -23,10 +23,10 @@ w.fetch=(url,opt)=>{
   if(u.includes('snapshots')) return Promise.resolve({ok:true,json:()=>Promise.resolve(snapshot)});
   if(u.includes('notes=1'))     return Promise.resolve({ok:true,json:()=>Promise.resolve({notes:{'1003':{note:'Waiting on I-9'}}})});
   if(u.includes('overrides=1')) return Promise.resolve({ok:true,json:()=>Promise.resolve({overrides:{'1003':{action:'matched'}}})});
-  const k=u.match(/\?(\w+)=1/); const map={attendance:'attendance',timeoff:'timeOff',requisitions:'requisitions',performance:'performance',shifts:'shifts'};
+  const k=u.match(/\?(\w+)=1/); const map={attendance:'attendance',timeoff:'timeOff',requisitions:'requisitions',performance:'performance',shifts:'shifts',discrepancies:'discrepancies'};
   return Promise.resolve({ok:true,json:()=>Promise.resolve({[map[k[1]]]:[]})});
 };
-['reconcile-core.js','suite-data.js','schedule-core.js','shift-key.js','timeoff-core.js'].forEach(f=>w.eval(fs.readFileSync(R+f,'utf8')));
+['reconcile-core.js','suite-data.js','schedule-core.js','shift-key.js','pipeline-core.js','timeoff-core.js','payroll-core.js'].forEach(f=>w.eval(fs.readFileSync(R+f,'utf8')));
 w.eval(html.match(/<script>\n"use strict";([\s\S]*?)<\/script>/)[1]);
 w.eval(fs.readFileSync(R+'suite.js','utf8'));
 

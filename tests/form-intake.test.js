@@ -196,7 +196,7 @@ t('and still produces records',
     { byName, rosterKey: SC.rosterKey, now: NOW }).records.length === 1);
 
 console.log('— shared modules stay in sync between root and functions —');
-['reconcile-core.js', 'schedule-core.js', 'form-intake.js'].forEach(f => {
+['reconcile-core.js', 'schedule-core.js', 'form-intake.js', 'pipeline-core.js', 'timeoff-core.js', 'payroll-core.js'].forEach(f => {
   const rootFile = path.join(__dirname, '..', f);
   const fnFile = path.join(__dirname, '..', 'functions', f);
   t(f + ' copied into functions/', fs.existsSync(fnFile));

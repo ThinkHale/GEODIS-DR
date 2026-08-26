@@ -152,6 +152,12 @@
       if (!p.performance || String(m.period || '') > String(p.performance.period || '')) p.performance = m;
     });
 
+    // Site number -> the client's name, from the admin Locations list.
+    var siteName = {};
+    (stores.locations || []).forEach(function (l) {
+      if (l && l.code && l.name && l.active !== false) siteName[String(l.code).trim()] = l.name;
+    });
+
     var notes = stores.notes || {};
     byBadge.forEach(function (p) {
       p.points = p.attendance.reduce(function (n, e) { return n + num(e.points); }, 0);
@@ -167,7 +173,12 @@
         p.shiftHours = sr.hours || '';
         p.shiftSource = sr.source || '';
         p.location = sr.building || '';
-        p.account = sr.account || '';
+        /* The Key names the account for most rows, but not all -- some buildings
+           run a single client the Key never spells out. A site default fills that
+           in, and because it is read HERE rather than baked in at import, an
+           admin renaming a location in Settings changes every associate at that
+           site without a re-import. */
+        p.account = sr.account || siteName[String(sr.building || '').trim()] || '';
         // One readable string for tables and sorting. Site first, so sorting by
         // it groups a building together rather than scattering it by client.
         p.locationLabel = [p.location, p.account].filter(Boolean).join(' · ');
@@ -337,12 +348,16 @@
   // Load every shared collection at once. Individual failures degrade to an
   // empty list rather than taking the whole suite down.
   function loadAll() {
-    return Promise.all(['attendance', 'timeoff', 'requisitions', 'performance', 'shifts', 'discrepancies', 'associatePto']
+    return Promise.all(['attendance', 'timeoff', 'requisitions', 'performance', 'shifts',
+      'discrepancies', 'associatePto', 'locations']
       .map(function (n) { return loadCollection(n); }))
       .then(function (r) {
         return {
           attendance: r[0], timeOff: r[1], requisitions: r[2],
-          performance: r[3], shifts: r[4], discrepancies: r[5], associatePto: r[6]
+          performance: r[3], shifts: r[4], discrepancies: r[5], associatePto: r[6],
+          // Loaded for everyone, not just admins: it supplies the default account
+          // name for sites the Key does not spell out.
+          locations: r[7]
         };
       });
   }

@@ -150,6 +150,7 @@
       timeOff: state.stores.timeOff,
       performance: state.stores.performance,
       shifts: state.stores.shifts,
+      locations: state.stores.locations,
       associatePto: state.stores.associatePto,
       shiftKeyOf: ScheduleCore.rosterKey,
       notes: state.notes

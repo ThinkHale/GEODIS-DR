@@ -80,5 +80,27 @@ t('initials derived', P.get('1001').initials==='AR');
 t('empty roster is safe', SuiteData.buildProfiles([], {}).size===0);
 t('null stores are safe', SuiteData.buildProfiles(records, null).size===5);
 
+console.log('— a site default names the account the Key does not —');
+const locs = [{ code: '1559', name: 'Post', active: true },
+              { code: '1536', name: 'Redbull', active: true },
+              { code: '1519', name: 'Retired Site', active: false }];
+const shiftRows = [
+  { id: 's1', nameKey: 'ava reed', shift: 'B', building: '1559', account: '' },
+  { id: 's2', nameKey: 'ben ortiz', shift: '2nd', building: '1536', account: 'REDBULL SPECIFIC' },
+  { id: 's3', nameKey: 'cleo nash', shift: 'A', building: '1519', account: '' },
+  { id: 's4', nameKey: 'eve kim', shift: '1st', building: '9999', account: '' }
+];
+const rosterKey = n => String(n||'').toLowerCase().replace(/[^a-z\s,]/g,'')
+  .replace(/,/g,' ').trim().split(/\s+/).filter(Boolean).sort().join(' ');
+const P2 = SuiteData.buildProfiles(records, { shifts: shiftRows, shiftKeyOf: rosterKey, locations: locs });
+t('a bare site gets the default name', P2.get('1001').account === 'Post');
+t('and reads as site · account', P2.get('1001').locationLabel === '1559 · Post');
+t('the Key still wins where it has one', P2.get('1002').account === 'REDBULL SPECIFIC');
+t('an INACTIVE location supplies no default', P2.get('1003').account === '');
+t('but the site number still shows', P2.get('1003').locationLabel === '1519');
+t('a site with no entry at all is left alone', P2.get('1005').account === '');
+t('no locations list is safe',
+  SuiteData.buildProfiles(records, { shifts: shiftRows, shiftKeyOf: rosterKey }).get('1001').account === '');
+
 console.log('\n'+pass+' passed, '+fail+' failed');
 process.exit(fail?1:0);

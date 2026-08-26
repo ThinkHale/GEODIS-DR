@@ -29,6 +29,8 @@ const { defineSecret } = require('firebase-functions/params');
 const admin = require('firebase-admin');
 const XLSX = require('xlsx');
 const Core = require('./reconcile-core.js');
+const Sched = require('./schedule-core.js');
+const Intake = require('./form-intake.js');
 
 // Shared secret proving a request came from our Power Automate flow.
 // Set with: firebase functions:secrets:set SYNC_KEY
@@ -52,7 +54,9 @@ const COLLECTIONS = {
   attendance:   { path: 'attendance/events.json',        responseKey: 'attendance',
                   fields: { badge: 'str', date: 'str', type: 'str', minutes: 'num', points: 'num', notes: 'str' } },
   timeoff:      { path: 'timeoff/requests.json',         responseKey: 'timeOff',
-                  fields: { badge: 'str', type: 'str', start: 'str', end: 'str', hours: 'num', status: 'str', notes: 'str' } },
+                  fields: { badge: 'str', name: 'str', type: 'str', start: 'str', end: 'str', hours: 'num',
+                            status: 'str', notes: 'str', shift: 'str', location: 'str', source: 'str',
+                            submittedAt: 'str' } },
   requisitions: { path: 'requisitions/requisitions.json', responseKey: 'requisitions',
                   fields: { title: 'str', department: 'str', shift: 'str', market: 'str', openings: 'num',
                             filled: 'num', priority: 'str', status: 'str', due: 'str', notes: 'str' } },
@@ -388,6 +392,108 @@ async function handleCoverage(req, res) {
   res.status(200).json({ ok: true, date: date, checks: doc.checks.length });
 }
 
+/* ---------- PTO requests from Microsoft Forms ----------
+   Power Automate posts one canonical payload per submission, for either form.
+   This runs server-side rather than in the flow because the form gives a NAME
+   and the roster is keyed by badge, so the name has to be resolved against the
+   current snapshot -- and because "which date(s)" is free text. See
+   form-intake.js.
+
+   Authenticated with the same x-sync-key as the report ingest: this is a
+   server-to-server call, so there is no browser origin to check. */
+async function rosterProfiles() {
+  try {
+    const [buf] = await bucket.file(SNAPSHOT_PATH).download();
+    const snap = JSON.parse(buf.toString());
+    return (snap.records || []).map(r => ({
+      badge: String(r.badge || ''),
+      name: r.person || r.crmName || r.beeName || '',
+      market: r.market || ''
+    })).filter(p => p.badge && p.name);
+  } catch (err) {
+    return [];
+  }
+}
+
+async function handlePtoIntake(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
+  const expected = SYNC_KEY.value();
+  if (!expected || req.get('x-sync-key') !== expected) {
+    res.status(401).json({ ok: false, error: 'Unauthorized' }); return;
+  }
+
+  const body = req.body || {};
+  // One submission, or a batch if the flow is catching up.
+  const subs = Array.isArray(body.submissions) ? body.submissions : [body];
+  if (!subs.length || subs.length > 200) {
+    res.status(400).json({ ok: false, error: 'Expected 1-200 submissions' }); return;
+  }
+
+  const profiles = await rosterProfiles();
+  if (!profiles.length) {
+    // Without a roster every request would land unattached. Refuse rather than
+    // quietly filing a day of PTO against nobody.
+    res.status(503).json({ ok: false, error: 'No roster snapshot available yet; retry after the morning sync.' });
+    return;
+  }
+  const byName = Intake.buildNameIndex(profiles, Sched.rosterKey);
+
+  const list = await readJsonArray(COLLECTIONS.timeoff.path);
+  const results = [];
+  let written = 0;
+
+  for (const sub of subs) {
+    if (!sub || !String(sub.name || '').trim()) {
+      results.push({ ok: false, error: 'Missing name', name: '' });
+      continue;
+    }
+    const out = Intake.toRequests(sub, { byName, rosterKey: Sched.rosterKey });
+    if (!out.records.length) {
+      results.push({
+        ok: false, name: sub.name, error: 'No usable dates in "' + String(sub.dates || '') + '"',
+        warnings: out.warnings
+      });
+      continue;
+    }
+    out.records.forEach(rec => {
+      const clean = sanitizeRecord(rec, COLLECTIONS.timeoff.fields);
+      clean.id = String(rec.id).slice(0, 64);
+      clean.updatedAt = new Date().toISOString();
+      const i = list.findIndex(x => x && x.id === clean.id);
+      // A re-run of the same Forms response updates its request rather than
+      // creating a second one -- but never silently overwrites an approval that
+      // someone has already made.
+      if (i === -1) { list.push(clean); written++; }
+      else {
+        const kept = list[i].status && list[i].status !== 'Pending' ? list[i].status : clean.status;
+        list[i] = Object.assign({}, list[i], clean, { status: kept });
+        written++;
+      }
+    });
+    results.push({
+      ok: true, name: sub.name, badge: out.records[0].badge || '',
+      matched: out.matched, ambiguous: out.ambiguous,
+      requests: out.records.map(r => ({ id: r.id, start: r.start, end: r.end, hours: r.hours })),
+      warnings: out.warnings
+    });
+  }
+
+  if (list.length > MAX_COLLECTION_RECORDS) {
+    res.status(400).json({ ok: false, error: 'Time-off collection is full' }); return;
+  }
+  if (written) {
+    await bucket.file(COLLECTIONS.timeoff.path).save(JSON.stringify(list), {
+      contentType: 'application/json',
+      metadata: { cacheControl: 'no-cache, max-age=0' }
+    });
+  }
+  res.status(200).json({
+    ok: true, written: written,
+    unmatched: results.filter(r => r.ok && !r.matched).map(r => r.name),
+    results: results
+  });
+}
+
 function parseToState(buffer, side) {
   const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -406,6 +512,7 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
       await handleKv(req, res, { path: OVERRIDES_PATH, field: 'action', responseKey: 'overrides', maxLen: 40, allowed: Object.keys(Core.ACTIONS) });
       return;
     }
+    if (req.query.ptoIntake !== undefined) { await handlePtoIntake(req, res); return; }
     if (req.query.schedule !== undefined) { await handleSchedule(req, res); return; }
     if (req.query.coverage !== undefined) { await handleCoverage(req, res); return; }
     // Suite collections: ?attendance=1, ?timeoff=1, ?requisitions=1, ?performance=1

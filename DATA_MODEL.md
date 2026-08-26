@@ -292,6 +292,49 @@ All of the matching and shaping lives in `schedule-core.js` with no DOM access, 
 same arrangement `reconcile-core.js` has, so a scheduled Cloud Function can reuse it
 verbatim when these reports are automated rather than uploaded.
 
+## PTO requests from Microsoft Forms
+
+Two forms feed the time-off collection, English and Spanish. Power Automate posts
+one canonical payload per submission to `?ptoIntake=1` — it does the per-form
+field mapping, so a reworded question or a third form is a change in the flow, not
+in the code.
+
+The work happens server-side (`form-intake.js`) because the form cannot give:
+
+1. **A badge.** It asks for a name, and the roster is badge-keyed, so the name is
+   resolved against the current snapshot with `rosterKey()` — the same bridge the
+   coverage view uses, so "Grachen, Luz" and "Luz Grachen" both land.
+2. **Real dates.** "Which date(s)" is free text, arriving as anything from
+   `08/25/26` to `8/25 and 8/26` to `8/25/26 - 8/27/26`. A bare `8/25` takes the
+   submission's year unless that is more than 180 days past, when it rolls
+   forward — someone asking in December for `1/2` means January.
+3. **One row per stretch.** Consecutive days become one request; a gap splits it.
+
+### Authentication
+
+`x-sync-key`, the same shared secret as the report ingest. This is a
+server-to-server call, so there is no browser origin to check.
+
+### What is never silently dropped
+
+- An **unresolved name** still produces a request, with the name on it and no
+  badge, listed under a banner in the Time Off tab. A lost PTO request is
+  somebody who shows up expecting to be off.
+- A **duplicated name** on the roster is reported, not assigned to whichever came
+  first.
+- An **unreadable date** is reported and kept in the record's notes.
+- A **backwards or absurd range** (over 60 days) is refused rather than creating
+  hundreds of records.
+- With **no roster snapshot** the whole call returns 503, because every request
+  would otherwise file against nobody.
+
+### Idempotency
+
+The request id derives from the Forms `responseId`, so a flow re-run updates the
+same request instead of creating a second one — and **an approval already made is
+never overwritten** by a re-run. Without a response id the id falls back to a hash
+of the submission, stable for the same answers and different for new ones.
+
 ## Shared collections
 
 Attendance, time off, requisitions, and performance live server-side, so every
@@ -303,7 +346,7 @@ snapshots/latest.json              reconciled roster (computed, read-only)
 notes/notes.json                   badge -> shared note
 overrides/overrides.json           badge -> manual status override
 attendance/events.json             [] occurrences
-timeoff/requests.json              [] PTO / VTO / sick requests
+timeoff/requests.json              [] PTO / VTO / sick requests (manual + form intake)
 requisitions/requisitions.json     [] open positions (not badge-keyed)
 performance/metrics.json           [] scorecard metrics per badge per period
 shifts/assignments.json            [] shift tag per associate (EID- or name-keyed)

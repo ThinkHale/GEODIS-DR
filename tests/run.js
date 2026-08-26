@@ -17,6 +17,8 @@ const SUITES = [
   { file: 'sheet-export.test.js', name: 'GEODIS headcount spreadsheet export', dom: false },
   { file: 'shift-tags.test.js', name: 'shift tags from the PLX workbook', dom: false },
   { file: 'attendance-state.test.js', name: 'one attendance state per day + Present override', dom: false },
+  { file: 'form-intake.test.js', name: 'PTO requests from Microsoft Forms', dom: false },
+  { file: 'pto-endpoint.test.js', name: 'PTO intake endpoint (functions/index.js)', dom: false },
   { file: 'report-pairing.test.js', name: 'pairing the two WFM reports', dom: false },
   { file: 'shift-import.test.js', name: 'PLX workbook import + per-associate shift (DOM)', dom: true },
   { file: 'coverage-review.test.js', name: 'reviewing a stored check (DOM)', dom: true },

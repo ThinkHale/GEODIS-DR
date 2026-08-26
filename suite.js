@@ -1250,13 +1250,20 @@
     var q = state.query.trim().toLowerCase();
     var all = state.stores.timeOff.filter(function (t) {
       var p = profile(t.badge);
-      if (!inMarket(p)) return false;
+      // A request from a form carries a name but may have no badge, so it has no
+      // market either. Hiding it would lose a PTO request nobody has actioned.
+      if (p ? !inMarket(p) : state.market !== 'all' && t.badge) return false;
       if (!q) return true;
-      return ((p ? p.name : '') + ' ' + t.badge + ' ' + t.type + ' ' + t.status).toLowerCase().indexOf(q) !== -1;
+      return ((p ? p.name : t.name || '') + ' ' + t.badge + ' ' + t.type + ' ' +
+        t.status + ' ' + (t.source || '')).toLowerCase().indexOf(q) !== -1;
     }).sort(function (a, b) { return String(b.start || '').localeCompare(String(a.start || '')); });
     var rows = all.slice(0, MAX_ROWS);
 
+    var orphans = state.stores.timeOff.filter(function (t) { return !profile(t.badge); });
     return hero('PTO / VTO tracking', 'Approved time off is excused and carries no attendance points.', 'timeoff', 'New request') +
+      (orphans.length ? '<div class="warn-banner"><b>' + orphans.length + '</b> request' +
+        (orphans.length === 1 ? '' : 's') + ' could not be matched to an associate on the roster — usually a ' +
+        'name typed differently on the form. They are listed below and still need actioning.</div>' : '') +
       '<section class="suite-panel">' +
       '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
       '" placeholder="Search by name, badge, type, or status…"></div>' +
@@ -1264,8 +1271,11 @@
         '<th>Associate</th><th>Type</th><th>Dates</th><th>Hours</th><th>Status</th><th>Attendance tie-in</th><th></th></tr></thead><tbody>' +
         rows.map(function (t) {
           var p = profile(t.badge);
-          return '<tr><td>' + (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div><div class="sub">' + esc(p.badge) + '</div>'
-            : '<div class="name">Badge ' + esc(t.badge) + '</div><div class="sub warn-text">Not on roster</div>') + '</td>' +
+          return '<tr' + (p ? '' : ' class="cov-row warn"') + '><td>' +
+            (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div><div class="sub">' + esc(p.badge) + '</div>'
+               : '<div class="name">' + esc(t.name || 'Badge ' + t.badge) + '</div>' +
+                 '<div class="sub warn-text">Not matched to a profile</div>') +
+            (t.source ? '<div class="sub">' + esc(t.source) + '</div>' : '') + '</td>' +
             '<td><span class="row-type ' + (t.type === 'VTO' ? 'vto' : t.type === 'Sick' ? 'sick' : '') + '">' + esc(t.type) + '</span></td>' +
             '<td>' + esc(t.start) + (t.end && t.end !== t.start ? ' → ' + esc(t.end) : '') + '</td>' +
             '<td>' + esc(t.hours || 0) + '</td>' +

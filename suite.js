@@ -37,9 +37,9 @@
     'Other': { type: 'Absent', points: 0 }
   };
   var NAV = [
-    ['overview', 'Overview'], ['associates', 'Associates'], ['coverage', 'Coverage'],
+    ['overview', 'Overview'], ['associates', 'Associates'], ['coverage', 'On-Premise'],
     ['attendance', 'Attendance'], ['timeoff', 'Time Off'], ['payroll', 'Payroll'],
-    ['requisitions', 'Requisitions'], ['reconciliation', 'Assignment Reconciliation']
+    ['requisitions', 'Beeline Requests'], ['reconciliation', 'Assignment Reconciliation']
   ];
 
   var state = {
@@ -218,11 +218,11 @@
       overview: ['Overview', 'Workforce command center'],
       associates: ['Associates', 'Roster, scorecards, and profile detail'],
       profile: ['Associate Profile', 'Assignment, attendance, time off, and performance'],
-      coverage: ['Coverage', 'Scheduled shifts vs. who is actually on premise'],
+      coverage: ['On-Premise', 'Scheduled shifts vs. who is actually on premise'],
       attendance: ['Attendance', 'Occurrences and points'],
       timeoff: ['Time Off', 'PTO and VTO tracking'],
       payroll: ['Payroll', 'Hours changes and discrepancy tracking'],
-      requisitions: ['Requisitions', 'Staffing demand and fulfillment'],
+      requisitions: ['Beeline Requests', 'Staffing demand and fulfillment'],
       reconciliation: ['Assignment Reconciliation', 'Beeline ⇆ RC active-assignment crosscheck']
     };
     var x = labels[state.view] || labels.overview;
@@ -424,9 +424,9 @@
       '<section class="suite-panel"><div class="suite-panel-head"><h2>Attendance rate trend</h2>' +
       '<div class="suite-actions"><button class="suite-btn" data-nav="attendance">View report</button></div></div>' +
       t.html + '</section>' +
-      '<section class="suite-panel"><div class="suite-panel-head"><h2>Staffing &amp; requisition coverage</h2>' +
-      '<div class="suite-actions"><button class="suite-btn" data-nav="requisitions">View requisitions</button></div></div>' +
-      (reqs.length ? reqTable(reqs.slice(0, 5), true) : empty('No requisitions yet')) +
+      '<section class="suite-panel"><div class="suite-panel-head"><h2>Beeline requests &amp; coverage</h2>' +
+      '<div class="suite-actions"><button class="suite-btn" data-nav="requisitions">View requests</button></div></div>' +
+      (reqs.length ? reqTable(reqs.slice(0, 5), true) : empty('No Beeline requests yet')) +
       '</section></div><div class="suite-stack">' +
       '<section class="suite-panel"><div class="suite-panel-head"><h2>Time off activity</h2>' +
       '<div class="suite-actions"><button class="suite-btn" data-nav="timeoff">View all</button></div></div>' +
@@ -434,7 +434,7 @@
       '</section><section class="suite-panel"><div class="suite-panel-head"><h2>Operational action queue</h2></div>' +
       alertRow(exceptions, 'Assignment reconciliation exceptions', 'reconciliation') +
       alertRow(pending, 'Pending time-off approvals', 'timeoff') +
-      alertRow(open, 'Unfilled requisition positions', 'requisitions') +
+      alertRow(open, 'Unfilled Beeline request positions', 'requisitions') +
       alertRow(atRisk, 'Associates at 5+ attendance points', 'attendance') +
       '</section></div></div>';
   }
@@ -586,7 +586,7 @@
     var body;
     if (!mine && !att.checks) {
       body = empty('No schedule on file',
-        week ? 'This associate is not on the stored weekly schedule.' : 'Upload a weekly schedule in Shift coverage.');
+        week ? 'This associate is not on the stored weekly schedule.' : 'Upload a weekly schedule in On-Premise.');
     } else {
       var dates = mine ? Object.keys(mine.shifts).sort() : [];
       body = (mine ? '<div class="sched-week">' + dates.map(function (d) {
@@ -606,7 +606,7 @@
       (p.shiftBuilding ? '<em>Building ' + esc(p.shiftBuilding) + '</em>' : '') +
       (p.shiftSource ? '<em>' + esc(p.shiftSource) + '</em>' : '') + '</div>';
     return '<section class="suite-panel"><div class="suite-panel-head"><h2>Schedule &amp; presence</h2>' +
-      '<div class="suite-actions"><button class="suite-btn" data-nav="coverage">Coverage</button></div></div>' +
+      '<div class="suite-actions"><button class="suite-btn" data-nav="coverage">On-Premise</button></div></div>' +
       tag + body + '</section>';
   }
 
@@ -1193,7 +1193,7 @@
 
   function coverageView() {
     var c = state.coverage;
-    var head = hero('Shift coverage', 'The weekly schedule crossed with the on-premise snapshot. Both are saved to Firebase, so absences stay documented.') +
+    var head = hero('On-Premise', 'The weekly schedule crossed with the on-premise snapshot. Both are saved to Firebase, so absences stay documented.') +
       covSources() + covSaveNote();
     /* Reviewing comes first: the point of it is reading a pull SOMEONE ELSE
        uploaded, so it must not require having loaded the reports yourself. */
@@ -1600,11 +1600,11 @@
       if (!q) return true;
       return (r.id + ' ' + r.title + ' ' + r.department + ' ' + r.shift + ' ' + r.priority + ' ' + r.status).toLowerCase().indexOf(q) !== -1;
     });
-    return hero('Requisition tracking', 'Hiring demand from opening through fulfillment.', 'requisition', 'New requisition') +
+    return hero('Beeline Requests', 'Hiring demand from opening through fulfillment.', 'requisition', 'New request') +
       '<section class="suite-panel">' +
       '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
       '" placeholder="Search requisitions…"></div>' +
-      (rows.length ? reqTable(rows, false) : empty('No requisitions yet')) + '</section>';
+      (rows.length ? reqTable(rows, false) : empty('No Beeline requests yet')) + '</section>';
   }
 
   /* ---------- reconciliation ----------
@@ -1745,7 +1745,7 @@
         field('Status', 'status', 'select', TimeOffCore.DEFAULT_STATUS, TimeOffCore.STATUS_KEYS) +
         field('Notes', 'notes', 'text', '');
     } else {
-      title = 'New requisition';
+      title = 'New Beeline request';
       fields = field('Req ID', 'id', 'text', 'REQ-' + Date.now().toString().slice(-6)) +
         field('Job title', 'title', 'text', '') +
         field('Department', 'department', 'select', 'Warehouse Operations',

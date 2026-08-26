@@ -106,7 +106,7 @@ w.GEODISSuite.reload().then(()=>{
 
   console.log('— coverage: before any report is loaded —');
   click($('[data-nav="coverage"]'));
-  t('coverage tab renders', d.body.textContent.includes('Shift coverage'));
+  t('on-premise tab renders', d.body.textContent.includes('On-Premise'));
   t('both file pickers are offered', $$('[data-cov]').length===2);
   t('it asks for both reports before showing numbers',
     d.body.textContent.includes('Load both reports'));

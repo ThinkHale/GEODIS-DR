@@ -135,6 +135,25 @@ const snapshot = {
   t('empty batch refused', (await post({ submissions: [] })).code === 400);
   t('oversized batch refused', (await post({ submissions: new Array(201).fill({ name: 'x', dates: '9/1/26' }) })).code === 400);
 
+  console.log('— the endpoint accepts the raw Forms body too —');
+  r = await post({
+    language: 'en', responseId: '77',
+    fields: { name: 'rNAME', dates: 'rDATES', duration: 'rDUR', shift: 'rSHIFT' },
+    response: {
+      rNAME: 'Abel Munoz', rSHIFT: '2nd',
+      rDATES: '12/1/26\n12/2/26',      // the multi-line case
+      rDUR: 'A full day'
+    }
+  });
+  t('accepted', r.code === 200 && r.body.ok === true);
+  t('name resolved through the map', r.body.results[0].name === 'Abel Munoz');
+  t('matched to a badge', r.body.results[0].matched === true);
+  const multi = requests().find(x => x.id === 'FORM-77-0');
+  t('newline-separated dates became one range', multi.start === '2026-12-01' && multi.end === '2026-12-02');
+  t('shift came through the map', multi.shift === '2nd');
+  t('missing name is still caught with the map shape',
+    (await post({ fields: { name: 'rNAME' }, response: {} })).body.results[0].error === 'Missing name');
+
   console.log('— warnings reach the caller —');
   r = await post({ name: 'Luz Grachen', dates: '11/1/26', duration: 'A partial day', responseId: '60' });
   t('partial-day hours warning surfaced', r.body.results[0].warnings.some(x => x.indexOf('no hours were given') !== -1));

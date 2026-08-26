@@ -169,12 +169,53 @@
     return { badge: hit.badge, how: 'name', ambiguous: false, market: hit.market || '' };
   }
 
+  /* ---------- Power Automate payload shapes ----------
+     Building a JSON body by splicing answers into a string template breaks the
+     moment someone types a newline or a double quote -- and "Which date(s)" is a
+     multi-line box, so that is a matter of time, not luck.
+
+     So the flow may instead send the whole "Get response details" body untouched
+     as `response`, plus a `fields` map naming which question id holds what. Every
+     value in the flow's own JSON is then a static id, and the free text never
+     touches the template.
+
+         { language, responseId, fields: { name: 'r6fc...', dates: 'r0ca...' },
+           response: <the whole Get response details body> }
+
+     The flat shape still works, so an existing flow does not have to change. */
+  var CANONICAL = ['name', 'shift', 'location', 'dates', 'duration', 'hours', 'reason', 'email'];
+
+  function normalizeSubmission(body) {
+    body = body || {};
+    var resp = body.response;
+    if (!resp || typeof resp !== 'object') return body;
+    var map = body.fields || {};
+    var out = {
+      language: body.language,
+      responseId: body.responseId,
+      submittedAt: body.submittedAt
+    };
+    CANONICAL.forEach(function (k) {
+      if (body[k] != null && body[k] !== '') { out[k] = body[k]; return; }
+      var id = map[k];
+      if (!id) return;
+      // Forms sometimes prefixes the key; accept it with or without.
+      var v = resp[id];
+      if (v == null) v = resp['body/' + id];
+      if (v != null) out[k] = v;
+    });
+    // Fall back to the response's own id when the flow did not send one.
+    if (!out.responseId && resp.responseId) out.responseId = resp.responseId;
+    if (!out.submittedAt && resp.submitDate) out.submittedAt = resp.submitDate;
+    return out;
+  }
+
   /* ---------- a submission -> time-off records ----------
      sub:  { name, shift, location, dates, duration, hours, reason, language,
              responseId, submittedAt }
      opts: { profiles, rosterKey, now } */
   function toRequests(sub, opts) {
-    sub = sub || {};
+    sub = normalizeSubmission(sub);
     opts = opts || {};
     var rosterKey = opts.rosterKey || function (v) { return String(v || '').toLowerCase().trim(); };
     var now = (opts.now && typeof opts.now.getTime === 'function') ? opts.now : new Date();
@@ -274,6 +315,8 @@
     FULL_DAY_HOURS: FULL_DAY_HOURS,
     PARTIAL_DAY_HOURS: PARTIAL_DAY_HOURS,
     MAX_RANGE_DAYS: MAX_RANGE_DAYS,
+    CANONICAL: CANONICAL,
+    normalizeSubmission: normalizeSubmission,
     durationOf: durationOf,
     parseOne: parseOne,
     parseDates: parseDates,

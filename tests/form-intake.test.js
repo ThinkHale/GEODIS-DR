@@ -138,6 +138,63 @@ t('but a different submission differs', other.records[0].id !== c1.records[0].id
 const split = FI.toRequests(Object.assign({}, sub, { dates: '8/25/26, 8/29/26' }), { byName, rosterKey: SC.rosterKey, now: NOW });
 t('two ranges get two distinct ids', split.records.length === 2 && split.records[0].id !== split.records[1].id);
 
+console.log('— the raw Forms body plus a field map —');
+/* Splicing free text into a JSON template breaks on a newline or a quote, and
+   "Which date(s)" is a multi-line box. Sending the whole response object plus a
+   map of question ids keeps every value in the flow's own JSON static. */
+const FIELDS = {
+  name: 'rc6fca2485d3244b480f0bd64957e6d8c',
+  shift: 'rb862870f041743bbb5a27c895810b36b',
+  location: 'rdc2ac75aba6f4c5f965a2b69df0e5479',
+  dates: 'r0ca2a28b610e4e649900652fbe5f8b5e',
+  duration: 'rb2b6e9b563dd4cf0a958c465d05f197c'
+};
+const rawBody = {
+  language: 'en', responseId: '99', fields: FIELDS,
+  response: {
+    responseId: '99', submitDate: '2026-08-25T09:00:00Z',
+    'rc6fca2485d3244b480f0bd64957e6d8c': 'Luz Grachen',
+    'rb862870f041743bbb5a27c895810b36b': '1st',
+    'rdc2ac75aba6f4c5f965a2b69df0e5479': 'lego',
+    // Exactly what breaks a string template: newlines and a quote.
+    'r0ca2a28b610e4e649900652fbe5f8b5e': '08/25/26\n08/26/26\n"maybe 8/29/26"',
+    'rb2b6e9b563dd4cf0a958c465d05f197c': 'A full day'
+  }
+};
+let flat = FI.normalizeSubmission(rawBody);
+t('name picked out by question id', flat.name === 'Luz Grachen');
+t('shift picked out', flat.shift === '1st');
+t('location picked out', flat.location === 'lego');
+t('duration picked out', flat.duration === 'A full day');
+t('language carried through', flat.language === 'en');
+t('responseId carried through', flat.responseId === '99');
+t('a newline in the answer is just text now', flat.dates.indexOf('\n') !== -1);
+
+out = FI.toRequests(rawBody, { byName, rosterKey: SC.rosterKey, now: NOW });
+t('newline-separated dates parse', out.dates.length >= 2);
+t('the quoted junk is reported, not fatal', out.unparsed.length === 1);
+t('still resolves to a badge', out.records[0].badge === '215001');
+t('id still comes from the response id', out.records[0].id.indexOf('FORM-99-') === 0);
+t('a quote in the answer cannot break anything', out.records.length >= 1);
+
+t('responseId falls back to the response body',
+  FI.normalizeSubmission({ fields: FIELDS, response: rawBody.response }).responseId === '99');
+t('submitDate falls back too',
+  FI.normalizeSubmission({ fields: FIELDS, response: rawBody.response }).submittedAt === '2026-08-25T09:00:00Z');
+t('a "body/" prefixed key is accepted',
+  FI.normalizeSubmission({ fields: { name: 'abc' }, response: { 'body/abc': 'Someone' } }).name === 'Someone');
+t('an explicit top-level value wins over the map',
+  FI.normalizeSubmission(Object.assign({ name: 'Override Me' }, rawBody)).name === 'Override Me');
+t('a missing question id is simply absent',
+  FI.normalizeSubmission({ fields: { name: 'nope' }, response: {} }).name === undefined);
+
+console.log('— the flat shape still works —');
+t('no response object means pass-through',
+  FI.normalizeSubmission({ name: 'Luz Grachen', dates: '8/25/26' }).name === 'Luz Grachen');
+t('and still produces records',
+  FI.toRequests({ name: 'Luz Grachen', dates: '8/25/26', duration: 'A full day', responseId: '1' },
+    { byName, rosterKey: SC.rosterKey, now: NOW }).records.length === 1);
+
 console.log('— shared modules stay in sync between root and functions —');
 ['reconcile-core.js', 'schedule-core.js', 'form-intake.js'].forEach(f => {
   const rootFile = path.join(__dirname, '..', f);

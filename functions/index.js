@@ -443,14 +443,15 @@ async function handlePtoIntake(req, res) {
   let written = 0;
 
   for (const sub of subs) {
-    if (!sub || !String(sub.name || '').trim()) {
+    const flat = Intake.normalizeSubmission(sub);
+    if (!flat || !String(flat.name || '').trim()) {
       results.push({ ok: false, error: 'Missing name', name: '' });
       continue;
     }
-    const out = Intake.toRequests(sub, { byName, rosterKey: Sched.rosterKey });
+    const out = Intake.toRequests(flat, { byName, rosterKey: Sched.rosterKey });
     if (!out.records.length) {
       results.push({
-        ok: false, name: sub.name, error: 'No usable dates in "' + String(sub.dates || '') + '"',
+        ok: false, name: flat.name, error: 'No usable dates in "' + String(flat.dates || '') + '"',
         warnings: out.warnings
       });
       continue;
@@ -471,7 +472,7 @@ async function handlePtoIntake(req, res) {
       }
     });
     results.push({
-      ok: true, name: sub.name, badge: out.records[0].badge || '',
+      ok: true, name: flat.name, badge: out.records[0].badge || '',
       matched: out.matched, ambiguous: out.ambiguous,
       requests: out.records.map(r => ({ id: r.id, start: r.start, end: r.end, hours: r.hours })),
       warnings: out.warnings

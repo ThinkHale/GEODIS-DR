@@ -177,3 +177,8 @@ body.suite-active>header,body.suite-active>main,body.suite-active>.foot{display:
 .suite-table th.sortable:hover{color:var(--suite-blue)}
 .suite-table th.sorted{color:var(--suite-blue)}
 .sort-arrow{display:inline-block;width:10px;margin-left:3px;font-size:8px;vertical-align:middle}
+
+/* ---- settings / sign-in ---- */
+.signin-form{display:flex;flex-direction:column;gap:12px;max-width:380px}
+.signin-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:2px}
+.settings-note{font-size:12px;color:var(--suite-muted)}

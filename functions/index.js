@@ -37,6 +37,7 @@ const TransitionImport = require('./transition-import.js');
 const TransitionPto = require('./transition-pto.js');
 const AttendanceImport = require('./attendance-import.js');
 const ShiftKey = require('./shift-key.js');
+const Auth = require('./auth-core.js');
 
 // Shared secret proving a request came from our Power Automate flow.
 // Set with: firebase functions:secrets:set SYNC_KEY
@@ -86,6 +87,15 @@ const COLLECTIONS = {
                             details: 'str', status: 'str', source: 'str', submittedAt: 'str',
                             statusUpdatedAt: 'str', statusUpdatedBy: 'str', connectedBy: 'str',
                             connectedAt: 'str', notes: 'str', statusHistory: 'log' } },
+  /* Accounts and the things an admin configures. Keyed by email for users, and
+     by a stable id for the rest, so they upsert like every other collection. */
+  users:        { path: 'admin/users.json',              responseKey: 'users',
+                  fields: { email: 'str', uid: 'str', name: 'str', role: 'str', enabled: 'bool',
+                            markets: 'list', createdAt: 'str', lastSeenAt: 'str' } },
+  locations:    { path: 'admin/locations.json',          responseKey: 'locations',
+                  fields: { code: 'str', name: 'str', market: 'str', active: 'bool', notes: 'str' } },
+  shiftTypes:   { path: 'admin/shift-types.json',        responseKey: 'shiftTypes',
+                  fields: { key: 'str', label: 'str', location: 'str', hours: 'str', active: 'bool' } },
   performance:  { path: 'performance/metrics.json',      responseKey: 'performance',
                   fields: { badge: 'str', period: 'str', quality: 'num', productivity: 'num', safety: 'num',
                             units: 'num', hours: 'num', notes: 'str' } }
@@ -200,6 +210,11 @@ function sanitizeRecord(raw, fields) {
     if (fields[k] === 'num') {
       const n = Number(raw[k]);
       if (Number.isFinite(n)) out[k] = n;
+    } else if (fields[k] === 'bool') {
+      out[k] = raw[k] === true || raw[k] === 'true';
+    } else if (fields[k] === 'list') {
+      if (!Array.isArray(raw[k])) return;
+      out[k] = raw[k].slice(0, 100).map(v => String(v == null ? '' : v).slice(0, 120)).filter(Boolean);
     } else if (fields[k] === 'log') {
       // An append-only change log: who set which status, when. Entries are
       // shaped here rather than trusted, and the log is capped so a client
@@ -985,6 +1000,79 @@ async function handlePlxRefresh(req, res) {
   }
 }
 
+/* ---------- who is calling ----------
+   Sign-in is email + password via Firebase Auth. The browser sends its ID token
+   as `Authorization: Bearer <token>`; this verifies it and pairs it with the
+   stored account, which is where the role and market restrictions live.
+
+   NOT enforced yet. Every write is still gated by the CORS origin check exactly
+   as before, because turning enforcement on before everyone has an account would
+   lock the team out of a tool they use every morning. This exists so that switch
+   is a one-line change rather than a rewrite -- see identityOf() callers. */
+async function identityOf(req) {
+  const header = String(req.get('authorization') || '');
+  const m = header.match(/^Bearer\s+(.+)$/i);
+  if (!m) return null;
+  let decoded;
+  try {
+    decoded = await admin.auth().verifyIdToken(m[1]);
+  } catch (err) {
+    return null;                       // an invalid token is an anonymous caller
+  }
+  const email = Auth.normalizeEmail(decoded.email);
+  // A verified token from outside the approved domains is still nobody here.
+  if (!email || !Auth.domainAllowed(email)) return null;
+  const users = await readJsonArray(COLLECTIONS.users.path);
+  const rec = users.filter(u => u && Auth.normalizeEmail(u.email) === email)[0];
+  return Auth.normalizeUser(Object.assign({ email: email, uid: decoded.uid, name: decoded.name || '' }, rec || {}));
+}
+
+/* First sign-in from an approved domain creates the account, so an admin does
+   not have to add everybody by hand. It starts as a viewer -- signing in is not
+   the same as being trusted with the data. */
+async function handleSignIn(req, res) {
+  setKvCors(res);
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
+  if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
+
+  const header = String(req.get('authorization') || '');
+  const m = header.match(/^Bearer\s+(.+)$/i);
+  if (!m) { res.status(401).json({ ok: false, error: 'Missing token' }); return; }
+  let decoded;
+  try {
+    decoded = await admin.auth().verifyIdToken(m[1]);
+  } catch (err) {
+    res.status(401).json({ ok: false, error: 'Invalid token' }); return;
+  }
+  const email = Auth.normalizeEmail(decoded.email);
+  if (!Auth.domainAllowed(email)) {
+    res.status(403).json({ ok: false, error: 'Only ' + Auth.ALLOWED_DOMAINS.join(' and ') + ' addresses can be used here.' });
+    return;
+  }
+
+  const users = await readJsonArray(COLLECTIONS.users.path);
+  const now = new Date().toISOString();
+  const i = users.findIndex(u => u && Auth.normalizeEmail(u.email) === email);
+  let rec;
+  if (i === -1) {
+    const made = Auth.accountFor(email, decoded.name || req.body && req.body.name || '');
+    rec = Object.assign({}, made.user, { uid: decoded.uid, lastSeenAt: now });
+    users.push(sanitizeRecord(Object.assign({ id: email }, rec), COLLECTIONS.users.fields));
+    users[users.length - 1].id = email;
+  } else {
+    // Never resurrect a disabled account or re-grant a role on sign-in.
+    rec = Auth.normalizeUser(users[i]);
+    users[i] = Object.assign({}, users[i], { uid: decoded.uid, lastSeenAt: now, id: email });
+    rec.uid = decoded.uid;
+    rec.lastSeenAt = now;
+  }
+  await bucket.file(COLLECTIONS.users.path).save(JSON.stringify(users), {
+    contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+  });
+  res.status(200).json({ ok: true, user: Auth.normalizeUser(rec) });
+}
+
 function parseToState(buffer, side) {
   const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -1008,6 +1096,7 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
     if (req.query.attendanceImport !== undefined) { await handleAttendanceImport(req, res); return; }
     if (req.query.discrepancyIntake !== undefined) { await handleDiscrepancyIntake(req, res); return; }
     if (req.query.payroll !== undefined) { await handlePayroll(req, res); return; }
+    if (req.query.signIn !== undefined) { await handleSignIn(req, res); return; }
     if (req.query.plx !== undefined) { await handlePlx(req, res); return; }
     if (req.query.plxRefresh !== undefined) { await handlePlxRefresh(req, res); return; }
     if (req.query.schedule !== undefined) { await handleSchedule(req, res); return; }

@@ -26,7 +26,10 @@
     performance: 'performance',
     shifts: 'shifts',
     discrepancies: 'discrepancies',
-    associatePto: 'associatePto'
+    associatePto: 'associatePto',
+    users: 'users',
+    locations: 'locations',
+    shiftTypes: 'shiftTypes'
   };
 
   /* Attendance occurrence thresholds. GEODIS policy varies by site, so these are
@@ -281,6 +284,13 @@
     return post('schedule=1&period=' + encodeURIComponent(period), doc);
   }
   // Which days have stored checks, for the review picker.
+  /* Admin collections, loaded only when the Settings page is opened -- most
+     visits never need them. */
+  function loadAdmin() {
+    return Promise.all(['users', 'locations', 'shiftTypes'].map(loadCollection))
+      .then(function (r) { return { users: r[0], locations: r[1], shiftTypes: r[2] }; });
+  }
+
   /* ---------- the live PLX workbook ----------
      Power Automate pushes it here from SharePoint; the browser cannot read
      SharePoint itself. loadPlxSync() is what the workbook last produced;
@@ -357,6 +367,7 @@
     saveSchedule: saveSchedule,
     loadCoverage: loadCoverage,
     loadCoverageDates: loadCoverageDates,
+    loadAdmin: loadAdmin,
     loadPlxSync: loadPlxSync,
     requestPlxRefresh: requestPlxRefresh,
     loadPayrollPeriods: loadPayrollPeriods,

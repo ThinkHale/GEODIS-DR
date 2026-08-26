@@ -39,7 +39,8 @@
   var NAV = [
     ['overview', 'Overview'], ['associates', 'Associates'], ['coverage', 'On-Premise'],
     ['attendance', 'Attendance'], ['timeoff', 'Time Off'], ['payroll', 'Payroll'],
-    ['requisitions', 'Beeline Requests'], ['reconciliation', 'Assignment Reconciliation']
+    ['requisitions', 'Beeline Requests'], ['reconciliation', 'Assignment Reconciliation'],
+    ['settings', 'Settings']
   ];
 
   var state = {
@@ -59,6 +60,8 @@
     connectFor: '', connectQuery: '', connectKind: 'timeoff',
     payroll: { periods: [], week: '', period: null, tab: 'discrepancies', loading: false },
     plx: { sync: null, busy: false, note: '' },   // the live workbook from SharePoint
+    auth: { signedIn: false, email: '', account: null, loading: false, error: '' },
+    admin: { users: [], locations: [], shiftTypes: [], loaded: false, tab: 'account' },
     shiftKey: null,          // parsed "Geodis Key" vocabulary, when a workbook is loaded
     shiftImport: null,       // last import result, for the report shown after
     storesLoaded: false,
@@ -104,6 +107,13 @@
      it stay put. See timeoff-core.js. */
   var ACTOR_KEY = 'geodis.actorName';
   function currentActor(promptIfMissing) {
+    /* Once somebody is signed in, that IS the actor. This is the single place
+       the switch happens, which is why the change log was built to carry an id
+       and a source from the start. */
+    if (state.auth.signedIn && state.auth.account) {
+      var acct = state.auth.account;
+      return PipelineCore.actorOf(acct.name || acct.email, acct.email, 'account');
+    }
     var name = '';
     try { name = localStorage.getItem(ACTOR_KEY) || ''; } catch (e) { /* private mode */ }
     if (!name && promptIfMissing) {
@@ -229,6 +239,7 @@
       attendance: '<rect x="3" y="5" width="18" height="16" rx="1"/><path d="M8 3v4m8-4v4M3 10h18m-13 5l2 2 5-5"/>',
       timeoff: '<path d="M3 12a9 9 0 0118 0H3zm9 0v9m-4 0h8"/>',
       payroll: '<rect x="3" y="6" width="18" height="12" rx="1"/><circle cx="12" cy="12" r="2.5"/>',
+      settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10l2 2M19 5l-2 2M7 17l-2 2"/>',
       requisitions: '<path d="M6 3h9l4 4v14H6zM14 3v5h5M9 13h7M9 17h7"/>',
       reconciliation: '<rect x="5" y="4" width="14" height="17" rx="1"/><path d="M9 4V2h6v2M8 9h8m-8 4h5m-5 4h7"/>'
     }[name] || '';
@@ -253,6 +264,7 @@
       attendance: ['Attendance', 'Occurrences and points'],
       timeoff: ['Time Off', 'PTO and VTO tracking'],
       payroll: ['Payroll', 'Hours changes and discrepancy tracking'],
+      settings: ['Settings', 'Accounts, locations and shifts'],
       requisitions: ['Beeline Requests', 'Staffing demand and fulfillment'],
       reconciliation: ['Assignment Reconciliation', 'Beeline ⇆ RC active-assignment crosscheck']
     };
@@ -1647,6 +1659,162 @@
       (last ? '<div class="sub">' + esc(last.by) + ' · ' + esc(shortWhen(last.at)) + '</div>' : '');
   }
 
+  /* ---------- settings ----------
+     Accounts, locations and shifts. Sign-in is not enforced yet, so this page is
+     reachable by anyone today; once it is, everything here needs the admin role.
+     The page says so rather than pretending to be locked. */
+  function settingsView() {
+    var a = state.auth;
+    var admin = a.account && AuthCore.isAdmin(a.account);
+    var tabs = [['account', 'Account'], ['users', 'Users'], ['locations', 'Locations'], ['shifts', 'Shifts']];
+    if (!state.admin.loaded && state.admin.tab !== 'account') loadAdminData();
+    return hero('Settings', 'Accounts, roles, locations and shifts.', '', '') +
+      (a.signedIn && !admin
+        ? '<div class="warn-banner">You are signed in as <b>' + esc(a.email) + '</b> with the ' +
+          esc(AuthCore.roleMeta(a.account && a.account.role).label) + ' role. Changing accounts, ' +
+          'locations or shifts needs an administrator.</div>'
+        : '') +
+      '<div class="filter-row payroll-tabs">' + tabs.map(function (x) {
+        return '<button class="suite-btn ' + (state.admin.tab === x[0] ? 'primary' : '') +
+          '" data-settings-tab="' + x[0] + '">' + esc(x[1]) + '</button>';
+      }).join('') + '</div>' +
+      (state.admin.tab === 'account' ? accountPanel()
+        : !state.admin.loaded ? loadingPanel('settings')
+        : state.admin.tab === 'users' ? usersPanel(admin)
+        : state.admin.tab === 'locations' ? listPanel('locations', admin)
+        : listPanel('shiftTypes', admin));
+  }
+
+  function accountPanel() {
+    var a = state.auth;
+    if (a.signedIn) {
+      var role = AuthCore.roleMeta(a.account && a.account.role);
+      var mk = (a.account && a.account.markets) || [];
+      return '<section class="suite-panel"><div class="suite-panel-head"><h2>Signed in</h2>' +
+        '<div class="suite-actions"><button class="suite-btn" data-sign-out>Sign out</button></div></div>' +
+        '<dl class="detail-list">' +
+        detail('Email', a.email) +
+        detail('Role', role.label + (role.unknown ? ' — not a role this build knows, so it grants nothing' : '')) +
+        detail('Markets', mk.length ? mk.join(', ') : 'All markets') +
+        detail('Account', a.account && a.account.enabled === false ? 'Disabled' : 'Active') +
+        '</dl>' +
+        (a.error ? '<div class="warn-banner">' + esc(a.error) + '</div>' : '') +
+        '<p class="perf-note">Sign-in is not enforced yet, so the tool works signed out exactly as it ' +
+        'did before. What signing in changes today is that status changes are attributed to your ' +
+        'account rather than a name typed into this browser.</p></section>';
+    }
+    return '<section class="suite-panel"><div class="suite-panel-head"><h2>Sign in</h2></div>' +
+      '<form class="signin-form" data-signin>' +
+      '<label class="suite-field"><span>Work email</span>' +
+      '<input name="email" type="email" autocomplete="username" placeholder="you@geodis.com" required></label>' +
+      '<label class="suite-field"><span>Password</span>' +
+      '<input name="password" type="password" autocomplete="current-password" minlength="6" required></label>' +
+      '<div class="signin-actions">' +
+      '<button class="suite-btn primary" data-signin-do="in"' + (a.loading ? ' disabled' : '') + '>' +
+      (a.loading ? 'Working…' : 'Sign in') + '</button>' +
+      '<button type="button" class="suite-btn" data-signin-do="create">Create account</button>' +
+      '<button type="button" class="suite-btn" data-signin-do="reset">Forgot password</button>' +
+      '</div></form>' +
+      (a.error ? '<div class="warn-banner">' + esc(a.error) + '</div>' : '') +
+      '<p class="perf-note">Open to <b>' + esc(AuthCore.ALLOWED_DOMAINS.join('</b> and <b>')) + '</b> ' +
+      'addresses. A new account starts as a viewer until an administrator changes it.</p></section>';
+  }
+
+  function usersPanel(admin) {
+    var rows = state.admin.users.map(AuthCore.normalizeUser)
+      .sort(function (x, y) { return x.email.localeCompare(y.email); });
+    var me = state.auth.account;
+    var markets = allMarkets();
+    return '<section class="suite-panel">' +
+      (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
+        '<th>Email</th><th>Name</th><th>Role</th><th>Markets</th><th>Status</th><th>Last seen</th></tr></thead><tbody>' +
+        rows.map(function (u) {
+          // An admin cannot edit their own access, so the row is shown read-only
+          // rather than offering a control that would be refused.
+          var editable = admin && AuthCore.canManage(me, u);
+          return '<tr><td><div class="name">' + esc(u.email) + '</div>' +
+            (me && me.email === u.email ? '<div class="sub">This is you</div>' : '') + '</td>' +
+            '<td>' + esc(u.name || '—') + '</td>' +
+            '<td>' + (editable
+              ? '<select class="suite-select" data-user-role="' + esc(u.email) + '">' +
+                AuthCore.grantableRoles(me).map(function (k) {
+                  return '<option value="' + esc(k) + '" ' + (u.role === k ? 'selected' : '') + '>' +
+                    esc(AuthCore.roleMeta(k).label) + '</option>';
+                }).join('') + '</select>'
+              : esc(AuthCore.roleMeta(u.role).label)) + '</td>' +
+            '<td>' + (editable
+              ? '<input class="suite-input" data-user-markets="' + esc(u.email) + '" value="' +
+                esc(u.markets.join(', ')) + '" placeholder="All markets">' +
+                '<div class="sub">' + esc(markets.join(', ') || 'no markets yet') + '</div>'
+              : esc(u.markets.length ? u.markets.join(', ') : 'All markets')) + '</td>' +
+            '<td>' + (editable
+              ? '<button class="suite-btn ' + (u.enabled ? 'danger' : '') + '" data-user-toggle="' + esc(u.email) + '">' +
+                (u.enabled ? 'Disable' : 'Enable') + '</button>'
+              : '<span class="status ' + (u.enabled ? '' : 'closed') + '">' + (u.enabled ? 'Active' : 'Disabled') + '</span>') + '</td>' +
+            '<td>' + esc(u.lastSeenAt ? shortWhen(u.lastSeenAt) : 'never') + '</td></tr>';
+        }).join('') + '</tbody></table></div>'
+        : empty('No accounts yet', 'Accounts appear here the first time someone signs in.')) +
+      '</section>';
+  }
+
+  /* Locations and shifts are the same shape -- a short list an admin maintains --
+     so they share a panel rather than two near-identical copies. */
+  var LISTS = {
+    locations: {
+      title: 'Locations', add: 'Add location',
+      cols: [['code', 'Site number'], ['name', 'Name'], ['market', 'Market']],
+      blank: function () { return { code: '', name: '', market: '', active: true }; }
+    },
+    shiftTypes: {
+      title: 'Shifts', add: 'Add shift',
+      cols: [['key', 'Shift'], ['label', 'Label'], ['location', 'Site'], ['hours', 'Hours']],
+      blank: function () { return { key: '', label: '', location: '', hours: '', active: true }; }
+    }
+  };
+  function listPanel(which, admin) {
+    var spec = LISTS[which];
+    var rows = (state.admin[which] || []).slice();
+    return '<section class="suite-panel"><div class="suite-panel-head"><h2>' + esc(spec.title) + '</h2>' +
+      (admin ? '<div class="suite-actions"><button class="suite-btn primary" data-list-add="' + which +
+        '">+ ' + esc(spec.add) + '</button></div>' : '') + '</div>' +
+      '<p class="perf-note">These supplement what the PLX workbook already provides — the Geodis Key ' +
+      'supplies the shifts each building runs, and the HC tabs supply each associate’s. Add here only ' +
+      'what the workbook does not cover.</p>' +
+      (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
+        spec.cols.map(function (c) { return '<th>' + esc(c[1]) + '</th>'; }).join('') +
+        '<th>Status</th>' + (admin ? '<th></th>' : '') + '</tr></thead><tbody>' +
+        rows.map(function (r) {
+          return '<tr>' + spec.cols.map(function (c) {
+            return '<td>' + (admin
+              ? '<input class="suite-input" data-list-field="' + which + '|' + esc(r.id) + '|' + c[0] +
+                '" value="' + esc(r[c[0]] || '') + '">'
+              : esc(r[c[0]] || '—')) + '</td>';
+          }).join('') +
+            '<td><span class="status ' + (r.active === false ? 'closed' : '') + '">' +
+            (r.active === false ? 'Inactive' : 'Active') + '</span></td>' +
+            (admin ? '<td><button class="suite-btn" data-list-toggle="' + which + '|' + esc(r.id) + '">' +
+              (r.active === false ? 'Activate' : 'Deactivate') + '</button> ' +
+              '<button class="suite-btn danger" data-del="' + which + '|' + esc(r.id) + '">Remove</button></td>' : '') +
+            '</tr>';
+        }).join('') + '</tbody></table></div>'
+        : empty('Nothing added yet', admin ? 'Use ' + spec.add + ' above.' : 'An administrator can add these.')) +
+      '</section>';
+  }
+  function allMarkets() { return markets(); }
+
+  function loadAdminData() {
+    if (state.admin.loading) return;
+    state.admin.loading = true;
+    SuiteData.loadAdmin().then(function (d) {
+      state.admin.users = d.users;
+      state.admin.locations = d.locations;
+      state.admin.shiftTypes = d.shiftTypes;
+      state.admin.loaded = true;
+      state.admin.loading = false;
+      render();
+    });
+  }
+
   /* ---------- requisitions ---------- */
   function reqTable(rows, compact) {
     return '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
@@ -1764,7 +1932,8 @@
   var VIEWS = {
     overview: overview, associates: associates, profile: profileView,
     coverage: coverageView, attendance: attendance, timeoff: timeoff,
-    payroll: payrollView, requisitions: requisitions, reconciliation: reconciliation
+    payroll: payrollView, requisitions: requisitions, reconciliation: reconciliation,
+    settings: settingsView
   };
   function render() {
     unmountRecon();   // rescue the reconciliation DOM before innerHTML wipes it
@@ -1865,7 +2034,22 @@
     });
   }
   var LOCAL_KEY = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions',
-    discrepancies: 'discrepancies' };
+    discrepancies: 'discrepancies', users: 'users', locations: 'locations', shiftTypes: 'shiftTypes' };
+
+  /* Settings rows live in state.admin, not state.stores, so they get their own
+     writer. It reloads the collection after each write rather than patching in
+     place: an admin page is low-traffic, and being certain what was stored
+     matters more than saving a round trip. */
+  function persistAdmin(which, patch) {
+    SuiteData.saveRecord(which, patch).then(function () {
+      return SuiteData.loadCollection(which);
+    }).then(function (rows) {
+      state.admin[which] = rows;
+      render();
+    }).catch(function (err) {
+      alert('That change could not be saved.\n\n' + err.message);
+    });
+  }
 
   /* ---------- events ---------- */
   root.addEventListener('click', function (e) {
@@ -1875,6 +2059,47 @@
     var sh = e.target.closest('[data-set-shift]');
     if (sh) { setShift(sh.dataset.setShift); return; }
 
+    var stab = e.target.closest('[data-settings-tab]');
+    if (stab) {
+      state.admin.tab = stab.dataset.settingsTab;
+      if (state.admin.tab !== 'account' && !state.admin.loaded) loadAdminData();
+      render();
+      return;
+    }
+    if (e.target.closest('[data-sign-out]')) { SuiteAuth.signOut(); return; }
+    var doSign = e.target.closest('[data-signin-do]');
+    if (doSign) {
+      e.preventDefault();
+      var form = doSign.closest('[data-signin]');
+      var email = form.querySelector('[name="email"]').value;
+      var pw = form.querySelector('[name="password"]').value;
+      var what = doSign.dataset.signinDo;
+      if (what === 'reset') SuiteAuth.resetPassword(email);
+      else if (what === 'create') SuiteAuth.createAccount(email, pw);
+      else SuiteAuth.signIn(email, pw);
+      return;
+    }
+    var addTo = e.target.closest('[data-list-add]');
+    if (addTo) {
+      var which = addTo.dataset.listAdd;
+      var rec = LISTS[which].blank();
+      rec.id = which.slice(0, 3).toUpperCase() + Date.now();
+      persistAdmin(which, rec);
+      return;
+    }
+    var lt = e.target.closest('[data-list-toggle]');
+    if (lt) {
+      var bits = lt.dataset.listToggle.split('|');
+      var row = (state.admin[bits[0]] || []).filter(function (x) { return x.id === bits[1]; })[0];
+      if (row) persistAdmin(bits[0], { id: row.id, active: row.active === false });
+      return;
+    }
+    var ut = e.target.closest('[data-user-toggle]');
+    if (ut) {
+      var u = state.admin.users.filter(function (x) { return AuthCore.normalizeEmail(x.email) === ut.dataset.userToggle; })[0];
+      if (u) persistAdmin('users', { id: AuthCore.normalizeEmail(u.email), email: u.email, enabled: !(u.enabled !== false) });
+      return;
+    }
     var sortCell = e.target.closest('[data-sort]');
     if (sortCell) {
       var parts = sortCell.dataset.sort.split(':'), tbl = parts[0], col = parts[1];
@@ -1894,7 +2119,14 @@
     var del = e.target.closest('[data-del]');
     if (del) {
       var parts = del.dataset.del.split('|'), name = parts[0], id = parts.slice(1).join('|');
-      if (confirm('Remove this record for everyone?')) remove(name, LOCAL_KEY[name], id);
+      if (!confirm('Remove this record for everyone?')) return;
+      if (state.admin[name] !== undefined) {
+        SuiteData.deleteRecord(name, id).then(function () {
+          return SuiteData.loadCollection(name);
+        }).then(function (rows) { state.admin[name] = rows; render(); });
+      } else {
+        remove(name, LOCAL_KEY[name], id);
+      }
       return;
     }
     var conn = e.target.closest('[data-connect]');
@@ -1990,6 +2222,25 @@
     });
   }
   root.addEventListener('change', function (e) {
+    if (e.target.dataset && e.target.dataset.userRole) {
+      persistAdmin('users', { id: e.target.dataset.userRole, email: e.target.dataset.userRole, role: e.target.value });
+      return;
+    }
+    var lf = e.target.dataset && e.target.dataset.listField;
+    if (lf) {
+      var f = lf.split('|'), patch = { id: f[1] };
+      patch[f[2]] = e.target.value;
+      persistAdmin(f[0], patch);
+      return;
+    }
+    var um = e.target.dataset && e.target.dataset.userMarkets;
+    if (um) {
+      // Blank means every market, which is why it is not a multi-select: an
+      // empty selection reads as "none" to most people, and it means the opposite.
+      var list = e.target.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+      persistAdmin('users', { id: um, email: um, markets: list });
+      return;
+    }
     if (e.target.classList.contains('status-select')) {
       var kind = e.target.dataset.statusKind || 'timeoff';
       var pipe = PIPELINES[kind];
@@ -2144,6 +2395,12 @@
   restoreSchedule();
 
   loadStoredCoverage();
+  SuiteAuth.onChange(function (snap) {
+    state.auth = snap;
+    if (state.view === 'settings') render();
+  });
+  SuiteAuth.resume();
+
   SuiteData.loadPlxSync().then(function (sync) {
     state.plx.sync = sync;
     if (state.view === 'reconciliation') render();

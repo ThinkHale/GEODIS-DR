@@ -62,7 +62,7 @@ w.fetch = (url, opt) => {
   const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions', performance: 'performance', shifts: 'shifts', discrepancies: 'discrepancies' };
   return Promise.resolve({ ok: true, json: () => Promise.resolve({ [map[k]]: [] }) });
 };
-['suite-data.js', 'schedule-core.js', 'shift-key.js', 'pipeline-core.js', 'timeoff-core.js', 'payroll-core.js', 'suite.js'].forEach(f => w.eval(fs.readFileSync(R + f, 'utf8')));
+['auth-core.js', 'tests/suite-auth-stub.js', 'suite-data.js', 'schedule-core.js', 'shift-key.js', 'pipeline-core.js', 'timeoff-core.js', 'payroll-core.js', 'suite.js'].forEach(f => w.eval(fs.readFileSync(R + f, 'utf8')));
 const d = w.document, $ = s => d.querySelector(s);
 const click = el => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
 const upload = (kind, aoa, name) => {

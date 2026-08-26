@@ -1,0 +1,153 @@
+/* GEODIS Management Suite -- sign-in.
+ *
+ * Email and password via Firebase Auth, open to the approved company domains in
+ * auth-core.js. The SDK is loaded lazily from the CDN the first time somebody
+ * actually signs in, so the tool keeps working -- and loading fast -- for anyone
+ * who has not signed in yet.
+ *
+ * Deliberately NOT enforced. Nothing here blocks the app: an unauthenticated
+ * visitor gets exactly what they got before. What signing in changes today is
+ * that actions are attributed to a real account rather than a name typed into a
+ * browser, and that an admin can see and manage the account list. Enforcement is
+ * a separate decision, taken once everyone has an account.
+ */
+(function (root) {
+  'use strict';
+
+  var SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
+  var API = 'https://syncreport-eusvh7xq5q-uc.a.run.app/';
+  var state = { app: null, auth: null, user: null, account: null, loading: false, error: '' };
+  var listeners = [];
+
+  function notify() { listeners.forEach(function (fn) { try { fn(snapshot()); } catch (e) { console.warn(e); } }); }
+  function onChange(fn) { listeners.push(fn); fn(snapshot()); }
+  function snapshot() {
+    return {
+      signedIn: !!state.user,
+      email: state.user ? state.user.email : '',
+      account: state.account,
+      loading: state.loading,
+      error: state.error
+    };
+  }
+
+  // Loaded on demand: most page loads never need it.
+  function sdk() {
+    if (state.app) return Promise.resolve(state.auth);
+    return Promise.all([
+      import(SDK + 'firebase-app.js'),
+      import(SDK + 'firebase-auth.js')
+    ]).then(function (mods) {
+      var appMod = mods[0], authMod = mods[1];
+      state.app = appMod.initializeApp(root.GEODIS_FIREBASE);
+      state.auth = authMod.getAuth(state.app);
+      state.authMod = authMod;
+      authMod.onAuthStateChanged(state.auth, function (u) {
+        state.user = u;
+        if (!u) { state.account = null; notify(); return; }
+        register().then(notify);
+      });
+      return state.auth;
+    });
+  }
+
+  /* Tell the server we are here. It creates the account on a first sign-in and
+     hands back the stored role and markets, which is the thing the UI cares
+     about -- the Firebase user object knows nothing about either. */
+  function register() {
+    if (!state.user) return Promise.resolve(null);
+    return state.user.getIdToken().then(function (token) {
+      return fetch(API + '?signIn=1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body: JSON.stringify({ name: state.user.displayName || '' })
+      });
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (!d.ok) { state.error = d.error || 'Could not register this account.'; state.account = null; }
+      else { state.account = d.account || d.user; state.error = ''; }
+      return state.account;
+    }).catch(function (err) {
+      state.error = 'Signed in, but the account could not be loaded: ' + err.message;
+      return null;
+    });
+  }
+
+  function guardDomain(email) {
+    if (root.AuthCore && !root.AuthCore.domainAllowed(email)) {
+      return 'Only ' + root.AuthCore.ALLOWED_DOMAINS.join(' and ') + ' addresses can be used here.';
+    }
+    return '';
+  }
+
+  function run(fn) {
+    state.loading = true; state.error = ''; notify();
+    return fn().catch(function (err) {
+      // Firebase error codes are not sentences. Turn the ones people actually
+      // hit into something that says what to do next.
+      state.error = friendly(err);
+    }).then(function () { state.loading = false; notify(); });
+  }
+  function friendly(err) {
+    var c = String((err && err.code) || '');
+    if (c.indexOf('wrong-password') !== -1 || c.indexOf('invalid-credential') !== -1) return 'That email and password do not match.';
+    if (c.indexOf('user-not-found') !== -1) return 'No account for that address yet — use Create account.';
+    if (c.indexOf('email-already-in-use') !== -1) return 'That address already has an account — sign in instead.';
+    if (c.indexOf('weak-password') !== -1) return 'Passwords need at least six characters.';
+    if (c.indexOf('too-many-requests') !== -1) return 'Too many attempts. Wait a minute and try again.';
+    if (c.indexOf('operation-not-allowed') !== -1) return 'Email sign-in is not switched on for this project yet.';
+    if (c.indexOf('network') !== -1) return 'No connection to the sign-in service.';
+    return (err && err.message) || 'Sign-in failed.';
+  }
+
+  function signIn(email, password) {
+    var bad = guardDomain(email);
+    if (bad) { state.error = bad; notify(); return Promise.resolve(); }
+    return run(function () {
+      return sdk().then(function (auth) {
+        return state.authMod.signInWithEmailAndPassword(auth, email.trim(), password);
+      });
+    });
+  }
+  function createAccount(email, password) {
+    var bad = guardDomain(email);
+    if (bad) { state.error = bad; notify(); return Promise.resolve(); }
+    return run(function () {
+      return sdk().then(function (auth) {
+        return state.authMod.createUserWithEmailAndPassword(auth, email.trim(), password);
+      });
+    });
+  }
+  function resetPassword(email) {
+    var bad = guardDomain(email);
+    if (bad) { state.error = bad; notify(); return Promise.resolve(); }
+    return run(function () {
+      return sdk().then(function (auth) {
+        return state.authMod.sendPasswordResetEmail(auth, email.trim()).then(function () {
+          state.error = 'Sent. Check ' + email.trim() + ' for the reset link.';
+        });
+      });
+    });
+  }
+  function signOut() {
+    return run(function () {
+      return sdk().then(function (auth) { return state.authMod.signOut(auth); });
+    });
+  }
+  // Restores a session on load without pulling the SDK for visitors who never
+  // sign in: only worth it if this browser has signed in before.
+  function resume() {
+    var seen = false;
+    try { seen = !!localStorage.getItem('geodis.signedInBefore'); } catch (e) {}
+    if (seen) sdk();
+  }
+  onChange(function (s) {
+    if (!s.signedIn) return;
+    try { localStorage.setItem('geodis.signedInBefore', '1'); } catch (e) {}
+  });
+
+  root.SuiteAuth = {
+    onChange: onChange, snapshot: snapshot, resume: resume,
+    signIn: signIn, createAccount: createAccount, resetPassword: resetPassword, signOut: signOut,
+    idToken: function () { return state.user ? state.user.getIdToken() : Promise.resolve(''); }
+  };
+})(typeof window !== 'undefined' ? window : this);

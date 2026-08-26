@@ -760,11 +760,32 @@ async function handlePlx(req, res) {
   warnings.push(...hc.warnings, ...ShiftKey.validateAgainstKey(hc, key));
   const shiftRecords = ShiftKey.toShiftRecords(hc, key);
   if (shiftRecords.length) {
-    await bucket.file(COLLECTIONS.shifts.path).save(JSON.stringify(
-      shiftRecords.map(r => Object.assign(sanitizeRecord(r, COLLECTIONS.shifts.fields), {
-        id: String(r.id).slice(0, 64), updatedAt: new Date().toISOString()
-      }))
-    ), { contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' } });
+    /* A shift set by hand in the suite is not in the workbook, so replacing the
+       collection wholesale would erase it on every push -- and this runs on a
+       schedule. Hand-set tags are kept, EXCEPT where the workbook now covers the
+       same person: two records for one name would poison each other in
+       buildProfiles and leave them with no shift at all. The workbook is the
+       system of record, so it wins, and the ones it supersedes are named. */
+    const fromBook = shiftRecords.map(r => Object.assign(
+      sanitizeRecord(r, COLLECTIONS.shifts.fields),
+      { id: String(r.id).slice(0, 64), updatedAt: new Date().toISOString() }
+    ));
+    const bookNames = new Set(fromBook.map(r => r.nameKey).filter(Boolean));
+    const existingShifts = await readJsonArray(COLLECTIONS.shifts.path);
+    const superseded = [];
+    const kept = existingShifts.filter(r => {
+      if (!r || r.source === 'PLX workbook') return false;   // replaced by this push
+      if (r.nameKey && bookNames.has(r.nameKey)) { superseded.push(r.name || r.nameKey); return false; }
+      return true;
+    });
+    if (superseded.length) {
+      warnings.push(superseded.length + ' shift tag(s) set by hand are now in the workbook and were ' +
+        'replaced by it: ' + superseded.slice(0, 8).join(', ') +
+        (superseded.length > 8 ? ' and ' + (superseded.length - 8) + ' more' : '') + '.');
+    }
+    await bucket.file(COLLECTIONS.shifts.path).save(JSON.stringify(fromBook.concat(kept)), {
+      contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+    });
   } else {
     warnings.push('No "<site> - HC" tabs were found, so shift tags were left as they were.');
   }

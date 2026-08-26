@@ -132,6 +132,35 @@ const shifts = () => { try { return JSON.parse(files[COLLECTIONS.shifts.path]); 
   t('but the sheet still updates openings', after.openings === 2);
   t('no duplicates from re-pushing', reqs().length === 2);
 
+  console.log('— a scheduled push must not erase a shift set by hand —');
+  let sh = shifts();
+  const UMA = Sched.rosterKey('Uma Untagged');
+  sh.push({ id: 'name:' + UMA, nameKey: UMA, name: 'Uma Untagged', shift: '2nd', source: 'Set in the suite' });
+  files[COLLECTIONS.shifts.path] = JSON.stringify(sh);
+  await push({ fileBase64: makeBook() });
+  t('the hand-set tag survives the push',
+    shifts().some(x => x.nameKey === UMA && x.shift === '2nd'));
+  t('and it is still marked as hand-set',
+    shifts().find(x => x.nameKey === UMA).source === 'Set in the suite');
+  t('the workbook tags are still there', shifts().some(x => x.eid === '80-LGRACH3897'));
+  t('no duplicate workbook records build up', shifts().filter(x => x.eid === '80-LGRACH3897').length === 1);
+
+  // Now the workbook gains that person -- it is the system of record, and two
+  // records for one name would poison each other.
+  sh = shifts();
+  const LUZ = Sched.rosterKey('Grachen, Luz');
+  sh.push({ id: 'name:' + LUZ, nameKey: LUZ, name: 'Grachen, Luz', shift: '3rd', source: 'Set in the suite' });
+  files[COLLECTIONS.shifts.path] = JSON.stringify(sh);
+  r = await push({ fileBase64: makeBook() });
+  t('the workbook wins for someone it now covers',
+    !shifts().some(x => x.source === 'Set in the suite' && x.nameKey === LUZ));
+  t('leaving exactly one record for that name',
+    shifts().filter(x => x.nameKey === LUZ).length === 1);
+  t('and the override is reported, not silent',
+    r.body.sync.warnings.some(x => x.indexOf('set by hand') !== -1));
+  t('the unrelated hand-set tag is untouched',
+    shifts().some(x => x.nameKey === UMA));
+
   console.log('— a req that left the sheet is closed, not deleted —');
   const shrunk = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(shrunk, XLSX.utils.aoa_to_sheet([reqAoa[0], reqAoa[1], reqAoa[2]]), '2026 - Beeline Reqs');
@@ -143,7 +172,7 @@ const shifts = () => { try { return JSON.parse(files[COLLECTIONS.shifts.path]); 
   t('a workbook with no HC tabs says so, and keeps the old tags',
     (await push({ fileBase64: XLSX.write(shrunk, { type: 'base64', bookType: 'xlsx' }) }))
       .body.sync.warnings.some(x => x.indexOf('HC') !== -1));
-  t('and the tags were not wiped', shifts().length === 1);
+  t('and the workbook tag was not wiped', shifts().some(x => x.eid === '80-LGRACH3897'));
 
   console.log('— asking for a fresh pull —');
   r = await call(handlePlxRefresh, { method: 'POST', query: {}, get: () => 'https://evil.example' });

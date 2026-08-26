@@ -211,5 +211,20 @@ t('a duplicated roster name is never matched by name', (() => {
 })());
 t('an empty roster is a no-op, not a crash', C.linkRoster([{ wfmId: 'x', nameKey: 'y' }], new Map()).length === 1);
 
+/* Market derivation lives in reconcile-core, but it decides which market every
+   coverage row belongs to, so it is exercised alongside them. */
+console.log('— a building can override the region it is filed under —');
+const RC = require('../reconcile-core.js');
+t('a Chicago path stays Chicago', RC.regionOf('LLC;North Central;Chicago;1519-18109') === 'Chicago');
+t('an Illinois building in that path stays', RC.regionOf('LLC;North Central;Chicago;1526-18041') === 'Chicago');
+t('4905 Pleasant Prairie is Wisconsin', RC.regionOf('LLC;North Central;Chicago;4905-17466') === 'Wisconsin');
+t('4941 Fond du Lac is Wisconsin', RC.regionOf('LLC;North Central;Chicago;4941-00014') === 'Wisconsin');
+t('every account at an overridden building follows it',
+  RC.regionOf('LLC;North Central;Chicago;4905-18140') === 'Wisconsin');
+t('the building comes from the 4th segment', RC.buildingOf('LLC;North Central;Chicago;4905-17466') === '4905');
+t('a path with no building segment still resolves', RC.regionOf('LLC;North Central;Chicago') === 'Chicago');
+t('a bare value passes through', RC.regionOf('Chicago') === 'Chicago');
+t('empty stays empty', RC.regionOf('') === '' && RC.regionOf(null) === '');
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

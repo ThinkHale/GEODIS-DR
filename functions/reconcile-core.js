@@ -146,10 +146,27 @@
     return s.replace(/,/g, '').replace(/\s+/g, '');
   }
   function isActive(v) { return v != null && String(v).trim().toLowerCase() === 'active'; }
+  /* A Beeline profit centre reads "LLC;North Central;Chicago;1519-18109": the
+     third segment is the managing region and the fourth carries the building
+     number. Those usually agree, but a few buildings are managed out of one
+     region and physically sit in another -- 4905 (Pleasant Prairie) and 4941
+     (Fond du Lac) are in Wisconsin while Beeline files them under Chicago. The
+     building is where the work happens, so it wins. */
+  var BUILDING_MARKETS = {
+    '4905': 'Wisconsin',
+    '4941': 'Wisconsin'
+  };
+  function buildingOf(v) {
+    var parts = String(v == null ? '' : v).split(';');
+    if (parts.length < 4) return '';
+    return (parts[3].trim().split('-')[0] || '').trim();
+  }
   function regionOf(v) {
     if (v == null) return '';
     var s = String(v).trim();
     if (s === '') return '';
+    var byBuilding = BUILDING_MARKETS[buildingOf(s)];
+    if (byBuilding) return byBuilding;
     var parts = s.split(';').map(function (x) { return x.trim(); });
     return parts.length >= 3 ? parts[2] : s;
   }
@@ -647,6 +664,8 @@
     normBadge: normBadge,
     isActive: isActive,
     regionOf: regionOf,
+    buildingOf: buildingOf,
+    BUILDING_MARKETS: BUILDING_MARKETS,
     parseDateVal: parseDateVal,
     fmtDate: fmtDate,
     daysAgo: daysAgo,

@@ -5,6 +5,7 @@ const path = require('path');
 const Sched = require('../schedule-core.js');
 const Intake = require('../form-intake.js');
 const Core = require('../reconcile-core.js');
+const TimeOff = require('../timeoff-core.js');
 
 let pass = 0, fail = 0;
 const t = (n, c) => { if (c) pass++; else { fail++; console.log('  FAIL: ' + n); } };
@@ -28,10 +29,10 @@ async function readJsonFile(p) { try { return JSON.parse(files[p]); } catch (e) 
 const SYNC_KEY = { value: () => KEY };
 
 const built = new Function(
-  'bucket', 'readJsonFile', 'SYNC_KEY', 'SNAPSHOT_PATH', 'Sched', 'Intake', 'console',
+  'bucket', 'readJsonFile', 'SYNC_KEY', 'SNAPSHOT_PATH', 'Sched', 'Intake', 'TimeOff', 'console',
   consts + helpers + handler +
   '\nreturn {handlePtoIntake, rosterProfiles, COLLECTIONS};'
-)(bucket, readJsonFile, SYNC_KEY, SNAPSHOT_PATH, Sched, Intake, console);
+)(bucket, readJsonFile, SYNC_KEY, SNAPSHOT_PATH, Sched, Intake, TimeOff, console);
 const { handlePtoIntake, COLLECTIONS } = built;
 
 const mkRes = () => { const r = { code: null, body: null, set() { return r }, status(c) { r.code = c; return r }, json(b) { r.body = b; return r }, send() { return r } }; return r; };
@@ -76,7 +77,7 @@ const snapshot = {
   let list = requests();
   t('stored in the time-off collection', list.length === 1);
   t('badge resolved from the snapshot', list[0].badge === '215001');
-  t('Pending, awaiting approval', list[0].status === 'Pending');
+  t('starts at Received, awaiting action', list[0].status === 'Received');
   t('16 hours for two full days', list[0].hours === 16);
   t('the name survived the whitelist', list[0].name === 'Luz Grachen');
   t('so did shift and location', list[0].shift === '1st' && list[0].location === 'lego');
@@ -98,6 +99,12 @@ const snapshot = {
     name: 'Luz Grachen', dates: '08/25/26, 08/26/26', duration: 'A full day', language: 'en', responseId: '42'
   });
   t('the approval stands', requests()[0].status === 'Approved');
+
+  console.log('— a re-run cannot roll a request backwards —');
+  list = requests(); list[0].status = 'Submitted to Payroll';
+  files[COLLECTIONS.timeoff.path] = JSON.stringify(list);
+  await post({ name: 'Luz Grachen', dates: '08/25/26, 08/26/26', duration: 'A full day', responseId: '42' });
+  t('a status further down the pipeline is kept', requests()[0].status === 'Submitted to Payroll');
 
   console.log('— an unknown name is filed, not lost —');
   r = await post({ name: 'Nobody Here', dates: '9/1/26', duration: 'A full day', responseId: '43' });

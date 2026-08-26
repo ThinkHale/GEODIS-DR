@@ -26,6 +26,7 @@ w.alert=()=>{}; w.confirm=()=>true; w.scrollTo=()=>{}; w.scrollTo=()=>{};
 w.eval(fs.readFileSync(R+'suite-data.js','utf8'));
 w.eval(fs.readFileSync(R+'schedule-core.js','utf8'));
 w.eval(fs.readFileSync(R+'shift-key.js','utf8'));
+w.eval(fs.readFileSync(R+'timeoff-core.js','utf8'));
 w.eval(fs.readFileSync(R+'suite.js','utf8'));
 const d=w.document, $=s=>d.querySelector(s), $$=s=>Array.from(d.querySelectorAll(s));
 const click=el=>el.dispatchEvent(new w.MouseEvent('click',{bubbles:true}));

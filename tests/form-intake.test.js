@@ -81,7 +81,7 @@ const rec = out.records[0];
 t('resolved to a badge', rec.badge === '215001');
 t('reported as matched', out.matched === true);
 t('typed as PTO', rec.type === 'PTO');
-t('lands Pending for approval', rec.status === 'Pending');
+t('lands at the start of the pipeline', rec.status === 'Received');
 t('start and end set', rec.start === '2026-08-25' && rec.end === '2026-08-26');
 t('8 hours per full day', rec.hours === 16);
 t('the name is kept for review', rec.name === 'Luz Grachen');

@@ -31,6 +31,7 @@ const XLSX = require('xlsx');
 const Core = require('./reconcile-core.js');
 const Sched = require('./schedule-core.js');
 const Intake = require('./form-intake.js');
+const TimeOff = require('./timeoff-core.js');
 
 // Shared secret proving a request came from our Power Automate flow.
 // Set with: firebase functions:secrets:set SYNC_KEY
@@ -56,7 +57,8 @@ const COLLECTIONS = {
   timeoff:      { path: 'timeoff/requests.json',         responseKey: 'timeOff',
                   fields: { badge: 'str', name: 'str', type: 'str', start: 'str', end: 'str', hours: 'num',
                             status: 'str', notes: 'str', shift: 'str', location: 'str', source: 'str',
-                            submittedAt: 'str' } },
+                            submittedAt: 'str', statusUpdatedAt: 'str', statusUpdatedBy: 'str',
+                            connectedBy: 'str', connectedAt: 'str', statusHistory: 'log' } },
   requisitions: { path: 'requisitions/requisitions.json', responseKey: 'requisitions',
                   fields: { title: 'str', department: 'str', shift: 'str', market: 'str', openings: 'num',
                             filled: 'num', priority: 'str', status: 'str', due: 'str', notes: 'str' } },
@@ -70,6 +72,7 @@ const COLLECTIONS = {
                             units: 'num', hours: 'num', notes: 'str' } }
 };
 const MAX_COLLECTION_RECORDS = 20000;
+const MAX_LOG_ENTRIES = 40;
 
 /* Date-partitioned documents. Unlike the collections above these are split by
    date, because they grow forever: a weekly schedule per week, and a day's worth
@@ -166,6 +169,19 @@ function sanitizeRecord(raw, fields) {
     if (fields[k] === 'num') {
       const n = Number(raw[k]);
       if (Number.isFinite(n)) out[k] = n;
+    } else if (fields[k] === 'log') {
+      // An append-only change log: who set which status, when. Entries are
+      // shaped here rather than trusted, and the log is capped so a client
+      // cannot grow a record without bound.
+      if (!Array.isArray(raw[k])) return;
+      out[k] = raw[k].slice(-MAX_LOG_ENTRIES).map(e => ({
+        status: String((e && e.status) || '').slice(0, 60),
+        at: String((e && e.at) || '').slice(0, 40),
+        by: String((e && e.by) || '').slice(0, 80),
+        byId: String((e && e.byId) || '').slice(0, 64),
+        source: String((e && e.source) || '').slice(0, 24),
+        note: String((e && e.note) || '').slice(0, 200)
+      }));
     } else {
       out[k] = String(raw[k]).slice(0, 500);
     }
@@ -466,7 +482,8 @@ async function handlePtoIntake(req, res) {
       // someone has already made.
       if (i === -1) { list.push(clean); written++; }
       else {
-        const kept = list[i].status && list[i].status !== 'Pending' ? list[i].status : clean.status;
+        const current = TimeOff.normalizeStatus(list[i].status);
+        const kept = current !== TimeOff.DEFAULT_STATUS ? list[i].status : clean.status;
         list[i] = Object.assign({}, list[i], clean, { status: kept });
         written++;
       }

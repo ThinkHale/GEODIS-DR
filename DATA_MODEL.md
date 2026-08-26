@@ -292,6 +292,58 @@ All of the matching and shaping lives in `schedule-core.js` with no DOM access, 
 same arrangement `reconcile-core.js` has, so a scheduled Cloud Function can reuse it
 verbatim when these reports are automated rather than uploaded.
 
+## Time-off status pipeline
+
+A request moves through a pipeline, not a yes/no. The vocabulary lives in
+`timeoff-core.js` so the browser, the Cloud Function, and the form intake cannot
+disagree about what a status means.
+
+| Status | Excuses the absence | Needs action |
+| --- | --- | --- |
+| `Received` | no | yes |
+| `Sent for Client Approval` | no | yes |
+| `Approved` | **yes** | no |
+| `Submitted to Payroll` | **yes** | no |
+| `Completed` | **yes** | no |
+| `Denied` | no | no |
+| `Cancelled` | no | no |
+
+`excused` is the one that carries weight: it decides whether attendance points
+apply. Being *sent* for approval is not the same as having it, so it does not
+excuse. "Needs action" is not "not approved" — a denied request is finished, it
+just did not end in time off, so the overview's pending count means *awaiting
+attention*.
+
+Requests written before the pipeline say `Pending`; that reads as `Received`. An
+unrecognised status is shown as itself rather than coerced — silently relabelling
+someone's data is worse than an oddity — and never excuses an absence.
+
+### Who changed it, and when
+
+There is no authentication yet, so the actor is a display name the user sets once
+in their browser (`geodis.actorName`). Every write goes through `applyStatus()` or
+`applyConnection()`, which stamp an actor and append to `statusHistory`:
+
+```text
+{ status, at, by, byId, source, note? }
+```
+
+`source` is `local` today, `import` for the seeded first entry. The log is capped
+at 40 entries, shaped server-side rather than trusted, and seeded with where the
+request started so a first change does not look like it arrived in that state.
+
+**When sign-in arrives, only `currentActor()` in `suite.js` changes.** The record
+shape, the change log, and every reader of it stay exactly as they are — which is
+the reason for building it before the auth exists.
+
+### Connecting an unmatched request
+
+A form request arrives with a name and no badge when the name was typed
+differently from the roster. Rather than guess, the Time Off page offers a
+**Connect** button that searches the roster so a person picks — and records who
+linked it in the same change log, because that is as much a decision as a status
+change.
+
 ## PTO requests from Microsoft Forms
 
 Two forms feed the time-off collection, English and Spanish. Power Automate posts

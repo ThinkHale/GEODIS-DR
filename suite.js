@@ -55,6 +55,7 @@
     updatedAt: null,
     profiles: new Map(),
     stores: { attendance: [], timeOff: [], requisitions: [], performance: [], shifts: [] },
+    connectFor: '', connectQuery: '',   // the request being linked to an associate
     shiftKey: null,          // parsed "Geodis Key" vocabulary, when a workbook is loaded
     shiftImport: null,       // last import result, for the report shown after
     storesLoaded: false,
@@ -93,6 +94,25 @@
     if (!e.detail || e.detail.source === 'suite') return;
     setMarket(e.detail.market, true);
   });
+
+  /* Until there is sign-in, the person making a change is a name they type once
+     into this browser. Every status change records it, so when real identity
+     arrives only this function changes -- the stored shape and every reader of
+     it stay put. See timeoff-core.js. */
+  var ACTOR_KEY = 'geodis.actorName';
+  function currentActor(promptIfMissing) {
+    var name = '';
+    try { name = localStorage.getItem(ACTOR_KEY) || ''; } catch (e) { /* private mode */ }
+    if (!name && promptIfMissing) {
+      name = (window.prompt('Your name, so status changes can be attributed.\n\n' +
+        'This is stored in this browser only, until sign-in is added.', '') || '').trim();
+      if (!name) return null;
+      try { localStorage.setItem(ACTOR_KEY, name); } catch (e) { /* ignore */ }
+    }
+    var id = '';
+    try { id = localStorage.getItem('geodisSuite.localUserId') || ''; } catch (e) { /* ignore */ }
+    return TimeOffCore.actorOf(name, id, 'local');
+  }
 
   var root = document.getElementById('suite-root');
   var esc = function (s) {
@@ -384,7 +404,7 @@
     var reqs = requisitionsInMarket();
     var active = all.filter(function (p) { return p.status === 'Active'; });
     var exceptions = all.filter(function (p) { return !p.reconciled; }).length;
-    var pending = timeOff.filter(function (t) { return t.status === 'Pending'; }).length;
+    var pending = timeOff.filter(function (t) { return TimeOffCore.needsAction(t.status); }).length;
     var open = reqs.filter(function (r) { return r.status !== 'Filled'; })
       .reduce(function (n, r) { return n + Math.max(0, Number(r.openings || 0) - Number(r.filled || 0)); }, 0);
     var atRisk = all.filter(function (p) { return p.points >= 5; }).length;
@@ -454,7 +474,7 @@
       '<div class="initial">' + esc(p ? p.initials : SuiteData.initialsOf(t.badge)) + '</div><div>' +
       '<div class="row-title">' + esc(p ? p.name : 'Badge ' + t.badge) + '</div>' +
       '<div class="row-sub">' + esc(t.start || '') + (t.end && t.end !== t.start ? ' → ' + esc(t.end) : '') +
-      ' · ' + esc(t.hours || 0) + ' hours · ' + esc(t.status || '') + '</div></div>' +
+      ' · ' + esc(t.hours || 0) + ' hours · ' + esc(TimeOffCore.statusMeta(t.status).label) + '</div></div>' +
       '<div class="row-type ' + (t.type === 'VTO' ? 'vto' : t.type === 'Sick' ? 'sick' : '') + '">' + esc(t.type) + '</div></div>';
   }
   function alertRow(n, label, nav) {
@@ -505,7 +525,8 @@
       '<div class="metric-strip">' +
       metric('Attendance points', p.points, p.standing, p.points >= 5 ? 'orange' : 'green') +
       metric('Performance score', p.score == null ? '—' : p.score, m ? 'Period ' + (m.period || 'current') : 'No performance record') +
-      metric('Time-off requests', p.timeOff.length, p.timeOff.filter(function (t) { return t.status === 'Pending'; }).length + ' pending') +
+      metric('Time-off requests', p.timeOff.length,
+        p.timeOff.filter(function (t) { return TimeOffCore.needsAction(t.status); }).length + ' awaiting action') +
       metric('Assignment', p.status, p.status === 'Ended' && p.endDate ? 'Ended ' + esc(p.endDate) : 'Per RC / Beeline snapshot') +
       '</div>' +
 
@@ -1279,12 +1300,88 @@
             '<td><span class="row-type ' + (t.type === 'VTO' ? 'vto' : t.type === 'Sick' ? 'sick' : '') + '">' + esc(t.type) + '</span></td>' +
             '<td>' + esc(t.start) + (t.end && t.end !== t.start ? ' → ' + esc(t.end) : '') + '</td>' +
             '<td>' + esc(t.hours || 0) + '</td>' +
-            '<td><span class="status ' + (t.status === 'Pending' ? 'pending' : t.status === 'Denied' ? 'closed' : '') + '">' + esc(t.status) + '</span></td>' +
-            '<td>' + (t.status === 'Approved' ? 'Excused · 0 points' : t.status === 'Denied' ? 'Points still apply' : 'Not posted') + '</td>' +
-            '<td><button class="suite-btn" data-toggle="' + esc(t.id) + '">' + (t.status === 'Pending' ? 'Approve' : 'Set pending') + '</button> ' +
+            '<td>' + statusSelect(t) + '</td>' +
+            '<td>' + tieIn(t) + '</td>' +
+            '<td>' + (p ? '' : '<button class="suite-btn" data-connect="' + esc(t.id) + '">Connect…</button> ') +
             '<button class="suite-btn danger" data-del="timeoff|' + esc(t.id) + '">Remove</button></td></tr>';
         }).join('') + '</tbody></table></div>' + rowCap(rows.length, all.length)
         : empty('No time-off requests')) + '</section>';
+  }
+
+  /* A request moves through a pipeline rather than being approved or not, so the
+     status is a dropdown. Every change is attributed and logged -- see
+     timeoff-core.js. An unrecognised status (older data, or something set by
+     hand) is offered as-is rather than quietly relabelled. */
+  function statusSelect(t) {
+    var meta = TimeOffCore.statusMeta(t.status);
+    var keys = TimeOffCore.STATUS_KEYS.slice();
+    if (meta.unknown) keys.unshift(meta.key);
+    var last = TimeOffCore.lastChange(t);
+    return '<select class="suite-select status-select ' + esc(meta.cls) + '" data-status="' + esc(t.id) + '"' +
+      (last ? ' title="' + esc(changeTitle(t)) + '"' : '') + '>' +
+      keys.map(function (k) {
+        var m = TimeOffCore.statusMeta(k);
+        return '<option value="' + esc(k) + '" ' + (meta.key === k ? 'selected' : '') + '>' + esc(m.label) + '</option>';
+      }).join('') + '</select>' +
+      (last ? '<div class="sub">' + esc(last.by) + ' · ' + esc(shortWhen(last.at)) + '</div>' : '');
+  }
+  function tieIn(t) {
+    if (TimeOffCore.isExcused(t.status)) return 'Excused · 0 points';
+    var meta = TimeOffCore.statusMeta(t.status);
+    if (meta.key === 'Denied' || meta.key === 'Cancelled') return 'Points still apply';
+    return 'Not yet excused';
+  }
+  function shortWhen(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  // The whole trail, on hover. It is the thing an audit would ask for.
+  function changeTitle(t) {
+    return (t.statusHistory || []).map(function (e) {
+      return shortWhen(e.at) + ' · ' + e.status + ' · ' + e.by + (e.note ? ' · ' + e.note : '');
+    }).join('\n');
+  }
+
+  /* ---------- connecting an unmatched request ----------
+     A request arrives with a name and no badge when the name was typed
+     differently from the roster. Rather than guess, this searches the roster so
+     a person picks. */
+  function connectModal(id) {
+    var t = state.stores.timeOff.filter(function (x) { return x.id === id; })[0];
+    if (!t) return;
+    state.connectFor = id;
+    state.connectQuery = t.name || '';
+    document.body.insertAdjacentHTML('beforeend',
+      '<div class="suite-modal-backdrop" id="suite-modal"><div class="suite-modal">' +
+      '<div class="suite-modal-head"><h3>Connect “' + esc(t.name || 'this request') + '”</h3>' +
+      '<button class="suite-btn" data-close>×</button></div>' +
+      '<div class="connect-body">' +
+      '<p class="perf-note">Search the roster for the associate this request belongs to. ' +
+      'Linking is recorded against your name.</p>' +
+      '<input class="suite-input" id="connect-search" value="' + esc(state.connectQuery) +
+      '" placeholder="Search by name or badge…" autofocus>' +
+      '<div id="connect-results">' + connectResults() + '</div></div>' +
+      '<div class="suite-modal-actions"><button type="button" class="suite-btn" data-close>Cancel</button></div>' +
+      '</div></div>');
+    var box = document.getElementById('connect-search');
+    if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+  }
+  function connectResults() {
+    var q = (state.connectQuery || '').trim().toLowerCase();
+    if (!q) return '<div class="connect-hint">Type a name to search ' + state.profiles.size + ' associates.</div>';
+    var hits = allProfiles().filter(function (p) {
+      return (p.name + ' ' + p.badge + ' ' + p.empNumber + ' ' + p.market).toLowerCase().indexOf(q) !== -1;
+    }).sort(function (a, b) { return a.name.localeCompare(b.name); }).slice(0, 25);
+    if (!hits.length) return '<div class="connect-hint">No associate matches “' + esc(q) + '”.</div>';
+    return hits.map(function (p) {
+      return '<button class="connect-hit" data-connect-to="' + esc(p.badge) + '">' +
+        '<div class="initial">' + esc(p.initials) + '</div>' +
+        '<div><div class="name">' + esc(p.name) + '</div>' +
+        '<div class="sub">' + esc(p.badge) + ' · ' + esc(p.market) +
+        (p.status === 'Ended' ? ' · <b class="warn-text">Ended</b>' : '') + '</div></div>' +
+        '<span>›</span></button>';
+    }).join('');
   }
 
   /* ---------- requisitions ---------- */
@@ -1395,7 +1492,7 @@
         field('Type', 'type', 'select', 'PTO', TIME_OFF_TYPES) +
         field('Start', 'start', 'date', today()) + field('End', 'end', 'date', today()) +
         field('Hours', 'hours', 'number', '8') +
-        field('Status', 'status', 'select', 'Pending', ['Pending', 'Approved', 'Denied']) +
+        field('Status', 'status', 'select', TimeOffCore.DEFAULT_STATUS, TimeOffCore.STATUS_KEYS) +
         field('Notes', 'notes', 'text', '');
     } else {
       title = 'New requisition';
@@ -1461,12 +1558,8 @@
       if (confirm('Remove this record for everyone?')) remove(name, LOCAL_KEY[name], id);
       return;
     }
-    var tog = e.target.closest('[data-toggle]');
-    if (tog) {
-      var t = state.stores.timeOff.find(function (x) { return x.id === tog.dataset.toggle; });
-      if (t) persist('timeoff', { id: t.id, badge: t.badge, status: t.status === 'Pending' ? 'Approved' : 'Pending' }, 'timeOff');
-      return;
-    }
+    var conn = e.target.closest('[data-connect]');
+    if (conn) { connectModal(conn.dataset.connect); return; }
     if (e.target.closest('[data-cov-now]')) { state.coverage.asOf = new Date(); render(); return; }
     if (e.target.closest('[data-cov-clear]')) {
       if (!confirm('Clear the loaded schedule and on-premise files?')) return;
@@ -1549,6 +1642,15 @@
     });
   }
   root.addEventListener('change', function (e) {
+    if (e.target.classList.contains('status-select')) {
+      var id = e.target.dataset.status;
+      var rec = state.stores.timeOff.filter(function (x) { return x.id === id; })[0];
+      if (!rec) return;
+      var actor = currentActor(true);
+      if (!actor) { render(); return; }   // they cancelled the name prompt
+      persist('timeoff', TimeOffCore.applyStatus(rec, e.target.value, actor), 'timeOff');
+      return;
+    }
     if (e.target.id === 'review-date') {
       var date = e.target.value;
       state.coverage.reviewDate = date;
@@ -1613,7 +1715,24 @@
     if (pts) pts.value = TYPE_POINTS[e.target.value];
   });
 
+  document.addEventListener('input', function (e) {
+    if (e.target.id !== 'connect-search') return;
+    state.connectQuery = e.target.value;
+    var box = document.getElementById('connect-results');
+    if (box) box.innerHTML = connectResults();     // only the list, so focus is kept
+  });
   document.addEventListener('click', function (e) {
+    var hit = e.target.closest('[data-connect-to]');
+    if (hit) {
+      var rec = state.stores.timeOff.filter(function (x) { return x.id === state.connectFor; })[0];
+      if (!rec) return;
+      var actor = currentActor(true);
+      if (!actor) return;
+      var modal = document.getElementById('suite-modal');
+      if (modal) modal.remove();
+      persist('timeoff', TimeOffCore.applyConnection(rec, hit.dataset.connectTo, actor), 'timeOff');
+      return;
+    }
     if (e.target.closest('[data-close]')) {
       var m = e.target.closest('.suite-modal-backdrop');
       if (m) m.remove();

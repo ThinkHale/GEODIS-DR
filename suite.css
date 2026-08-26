@@ -142,3 +142,18 @@ body.suite-active>header,body.suite-active>main,body.suite-active>.foot{display:
 .review-banner{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;background:#eef3fb;border:1px solid #cfdcf0;border-left:3px solid var(--suite-blue);border-radius:0 8px 8px 0;padding:11px 14px;margin-bottom:14px}
 .review-banner strong{font:700 13px 'Barlow Semi Condensed';text-transform:uppercase;letter-spacing:.4px;color:var(--suite-blue)}
 .review-banner span{font-size:11.5px;color:var(--suite-muted)}
+
+/* ---- time-off status pipeline + connect ---- */
+.status-select{font:600 11.5px Inter;padding:5px 24px 5px 8px;min-width:150px}
+.status-select.pending{color:var(--suite-amber);border-color:#f2dcb4}
+.status-select.closed{color:var(--suite-muted)}
+.status-select.unknown{color:var(--suite-red);border-color:#f0c6c6}
+.connect-body{padding:4px 0 0}
+.connect-body .perf-note{margin:0 0 10px}
+#connect-results{margin-top:10px;max-height:320px;overflow:auto;display:flex;flex-direction:column;gap:4px}
+.connect-hit{display:flex;align-items:center;gap:11px;width:100%;text-align:left;border:1px solid var(--suite-line);background:#fff;border-radius:7px;padding:8px 11px;cursor:pointer;font:inherit}
+.connect-hit:hover{border-color:var(--suite-blue);background:#f6f9fe}
+.connect-hit .initial{width:30px;height:30px;border-radius:50%;flex:none;display:grid;place-items:center;background:var(--suite-navy);color:#fff;font:700 11px 'Barlow Semi Condensed'}
+.connect-hit>div:nth-child(2){flex:1;min-width:0}
+.connect-hit span:last-child{color:var(--suite-muted)}
+.connect-hint{padding:14px 4px;font-size:12.5px;color:var(--suite-muted)}

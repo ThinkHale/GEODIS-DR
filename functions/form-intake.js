@@ -263,7 +263,7 @@
         start: r.start,
         end: r.end,
         hours: perDay * r.days,
-        status: 'Pending',
+        status: 'Received',        // the pipeline's first state; see timeoff-core.js
         shift: sub.shift || '',
         location: sub.location || '',
         source: sub.language === 'es' ? 'Form (Spanish)' : 'Form (English)',

@@ -62,6 +62,7 @@ w.fetch = (url, opt) => {
   const wk = u.match(/payroll=1&week=([\d-]+)/);
   if (wk) return Promise.resolve({ ok: true, json: () => Promise.resolve({ period: periods[wk[1]] || {} }) });
   if (u.indexOf('payroll=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ periods: Object.keys(periods) }) });
+  if (u.indexOf('plx=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ sync: {} }) });
   if (/schedule=1|coverage=1/.test(u)) return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
   const k = u.match(/\?(\w+)=1/)[1];
   const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions',

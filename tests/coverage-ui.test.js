@@ -55,6 +55,7 @@ w.fetch = (url, opt) => {
     if (u.indexOf('schedule=1') !== -1) storedWeek = body;
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
   }
+  if (u.indexOf('plx=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ sync: {} }) });
   if (u.indexOf('schedule=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ schedule: storedWeek }) });
   if (u.indexOf('coverage=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ coverage: storedDay }) });
   const k = u.match(/\?(\w+)=1/)[1];

@@ -209,6 +209,47 @@ disposition to the occurrence a **one-click** action would create, and a disposi
 of `Approved time off`, `Reassigned`, or `Badge / system issue` maps to `null`, so a
 badge-reader gap can never become a disciplinary record.
 
+## The live PLX workbook
+
+The workbook lives in SharePoint, which **the browser cannot read**: it is a
+different origin and needs Microsoft 365 auth this tool does not have. So Power
+Automate reads it and posts it to `?plx=1` with the sync key, exactly as it
+already does for the daily reports.
+
+Two things come out of it:
+
+| Tab | Becomes |
+| --- | --- |
+| `Geodis Key` + `<site> - HC` | shift tags (`shifts` collection) |
+| `2026 - Beeline Reqs` | open orders (`requisitions` collection) |
+
+`plx/sync.json` records when it last landed, what came out of it, and any
+warnings, which is what the Refresh button on the reconciliation page shows.
+
+### A refresh never wipes a person's work
+
+The sheet does not track `filled` or where a requisition stands, so those are
+carried over from whatever was already stored. A req that has **left** the sheet
+is marked `Closed` rather than deleted, so its history and anything filled
+against it survive.
+
+### It refuses the wrong file
+
+`XLSX.read` does not throw on a file that is not a workbook — it reads rubbish as
+a single CSV-ish sheet. So the push is rejected unless at least one recognisable
+tab is present, and the error names the tabs it did find. Without that, the wrong
+file would record a perfectly successful-looking sync that produced nothing.
+
+### The Refresh button
+
+`?plxRefresh=1` (browser origin, not the sync key) calls a Power Automate
+**"When an HTTP request is received"** flow whose URL is held in the optional
+`PLX_FLOW_URL` secret — server-side, because anyone holding that URL could
+trigger the flow.
+
+The secret is optional. Without it the button still works: it reloads the last
+workbook that was pushed and says so, rather than failing opaquely.
+
 ## Shift tags
 
 The WFM weekly schedule only covers people who were rostered that week, so anyone

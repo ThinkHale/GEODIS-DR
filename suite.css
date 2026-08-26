@@ -163,3 +163,11 @@ body.suite-active>header,body.suite-active>main,body.suite-active>.foot{display:
 .detail-cell{max-width:340px;font-size:12px;line-height:1.45}
 .delta-up{color:var(--suite-green);font-weight:600}
 .delta-down{color:var(--suite-red);font-weight:600}
+
+/* ---- live workbook refresh ---- */
+.plx-bar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:14px}
+.plx-info{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+.plx-info strong{font:700 13px 'Barlow Semi Condensed';text-transform:uppercase;letter-spacing:.4px}
+.plx-info span{font-size:11.5px;color:var(--suite-muted)}
+.plx-info .plx-note{color:var(--suite-blue);font-weight:600}
+.plx-bar .suite-btn[disabled]{opacity:.6;cursor:default}

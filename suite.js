@@ -57,6 +57,7 @@
     stores: { attendance: [], timeOff: [], requisitions: [], performance: [], shifts: [] },
     connectFor: '', connectQuery: '', connectKind: 'timeoff',
     payroll: { periods: [], week: '', period: null, tab: 'discrepancies', loading: false },
+    plx: { sync: null, busy: false, note: '' },   // the live workbook from SharePoint
     shiftKey: null,          // parsed "Geodis Key" vocabulary, when a workbook is loaded
     shiftImport: null,       // last import result, for the report shown after
     storesLoaded: false,
@@ -1605,7 +1606,70 @@
      The existing tool is not reimplemented here. Its DOM (#recon-main, with all
      of its listeners) is MOVED into the suite content area, and moved back out
      before any re-render wipes the shell. */
-  function reconciliation() { return '<div id="recon-mount"></div>'; }
+  function reconciliation() { return plxBar() + '<div id="recon-mount"></div>'; }
+
+  /* The live PLX workbook lives in SharePoint, which the browser cannot read --
+     different origin, and it needs Microsoft 365 auth this tool does not have.
+     Power Automate pushes it here instead, so this button asks for a fresh pull
+     and then reloads. When no on-demand flow is configured it still reloads
+     whatever was last pushed, and says which of the two just happened. */
+  function plxBar() {
+    var p = state.plx, sync = p.sync;
+    var when = sync && sync.syncedAt ? shortWhen(sync.syncedAt) : '';
+    return '<section class="suite-panel plx-bar"><div class="plx-info">' +
+      '<strong>Roster, shifts and open orders</strong>' +
+      (sync && sync.syncedAt
+        ? '<span>From the PLX workbook · ' + esc(sync.shiftTags || 0) + ' shift tags across ' +
+          esc(sync.sites || 0) + ' sites · ' + esc(sync.openOrders || 0) + ' open orders · synced ' + esc(when) + '</span>'
+        : '<span>The PLX workbook has not been pushed from SharePoint yet.</span>') +
+      (p.note ? '<span class="plx-note">' + esc(p.note) + '</span>' : '') +
+      '</div>' +
+      '<button class="suite-btn primary" data-plx-refresh ' + (p.busy ? 'disabled' : '') + '>' +
+      (p.busy ? 'Refreshing…' : 'Refresh from SharePoint') + '</button></section>' +
+      (sync && sync.warnings && sync.warnings.length
+        ? '<div class="warn-banner cov-warn"><strong>From the last workbook</strong><ul>' +
+          sync.warnings.slice(0, 6).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') +
+          (sync.warnings.length > 6 ? '<li>…and ' + (sync.warnings.length - 6) + ' more.</li>' : '') +
+          '</ul></div>'
+        : '');
+  }
+
+  function refreshPlx() {
+    if (state.plx.busy) return;
+    state.plx.busy = true;
+    state.plx.note = '';
+    render();
+    var before = state.plx.sync && state.plx.sync.syncedAt;
+    SuiteData.requestPlxRefresh().then(function (r) {
+      // A triggered pull takes a moment to come back, so give the flow a beat
+      // before reading, then say plainly whether anything actually moved.
+      var wait = r && r.triggered ? 4000 : 0;
+      return new Promise(function (done) { setTimeout(done, wait); }).then(function () {
+        return SuiteData.loadPlxSync();
+      }).then(function (sync) {
+        state.plx.sync = sync;
+        if (r && r.triggered) {
+          state.plx.note = sync.syncedAt && sync.syncedAt !== before
+            ? 'Pulled a fresh copy just now.'
+            : 'Asked SharePoint for a fresh copy; it has not landed yet. Refresh again in a moment.';
+        } else {
+          state.plx.note = (r && r.message) || 'Reloaded the last workbook that was pushed.';
+        }
+        return SuiteData.loadCollection('shifts');
+      }).then(function (shifts) {
+        state.stores.shifts = shifts;
+        return SuiteData.loadCollection('requisitions');
+      }).then(function (reqs) {
+        state.stores.requisitions = reqs;
+        rebuild();
+      });
+    }).catch(function (err) {
+      state.plx.note = 'Could not refresh: ' + err.message;
+    }).then(function () {
+      state.plx.busy = false;
+      render();
+    });
+  }
   function mountRecon() {
     var main = document.getElementById('recon-main'), slot = document.getElementById('recon-mount');
     if (main && slot && main.parentNode !== slot) slot.appendChild(main);
@@ -1742,6 +1806,7 @@
     }
     var conn = e.target.closest('[data-connect]');
     if (conn) { connectModal(conn.dataset.connect, conn.dataset.connectKind || 'timeoff'); return; }
+    if (e.target.closest('[data-plx-refresh]')) { refreshPlx(); return; }
     var ptab = e.target.closest('[data-payroll-tab]');
     if (ptab) {
       state.payroll.tab = ptab.dataset.payrollTab;
@@ -1986,6 +2051,10 @@
   restoreSchedule();
 
   loadStoredCoverage();
+  SuiteData.loadPlxSync().then(function (sync) {
+    state.plx.sync = sync;
+    if (state.view === 'reconciliation') render();
+  });
 
   SuiteData.loadAll().then(function (stores) {
     state.stores = stores;

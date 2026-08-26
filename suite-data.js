@@ -265,6 +265,17 @@
     return post('schedule=1&period=' + encodeURIComponent(period), doc);
   }
   // Which days have stored checks, for the review picker.
+  /* ---------- the live PLX workbook ----------
+     Power Automate pushes it here from SharePoint; the browser cannot read
+     SharePoint itself. loadPlxSync() is what the workbook last produced;
+     requestPlxRefresh() asks for a fresh pull if a flow is configured. */
+  function loadPlxSync() {
+    return getJson(API + '?plx=1')
+      .then(function (d) { return d.sync || {}; })
+      .catch(function (err) { console.warn('Could not read the PLX sync state.', err); return {}; });
+  }
+  function requestPlxRefresh() { return post('plxRefresh=1', {}); }
+
   /* ---------- payroll periods ---------- */
   function loadPayrollPeriods() {
     return getJson(API + '?payroll=1')
@@ -330,6 +341,8 @@
     saveSchedule: saveSchedule,
     loadCoverage: loadCoverage,
     loadCoverageDates: loadCoverageDates,
+    loadPlxSync: loadPlxSync,
+    requestPlxRefresh: requestPlxRefresh,
     loadPayrollPeriods: loadPayrollPeriods,
     loadPayrollPeriod: loadPayrollPeriod,
     savePayrollClose: savePayrollClose,

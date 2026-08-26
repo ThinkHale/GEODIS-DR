@@ -62,6 +62,7 @@ w.fetch = (url, opt) => {
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
   }
   if (u.indexOf('shifts=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ shifts: stored }) });
+  if (u.indexOf('plx=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ sync: {} }) });
   if (u.indexOf('schedule=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ schedule: {} }) });
   if (u.indexOf('coverage=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ coverage: {} }) });
   const k = u.match(/\?(\w+)=1/)[1];

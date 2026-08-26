@@ -11,6 +11,11 @@ const records = [
   { badge: 'b2', person: 'Cleo Nash', action: 'matched', actionLabel: 'Matched', reason: '', market: 'STL', crmStart: '1/3/2026' }
 ];
 const K_AVA = 'b:b1', K_CLEO = 'b:b2';
+/* The profile shows TODAY's checks, so the fixture is keyed to today rather than
+   a fixed date -- otherwise this passes only on the day it was written. */
+const p2 = n => String(n).padStart(2, '0');
+const TODAY = (() => { const d = new Date(); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); })();
+const YESTERDAY = (() => { const d = new Date(); d.setDate(d.getDate() - 1); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); })();
 const ex = (key, name, badge, status, loc, mgr) => ({
   key, name, badge, wfmId: '80-X', status: status || 'missing',
   shift: '7:00 AM - 3:30 PM', location: 'GEODIS/US/CL/CL' + (loc || '1523') + '/' + (loc || '1523'),
@@ -19,16 +24,16 @@ const ex = (key, name, badge, status, loc, mgr) => ({
 const EXTRA = ex('n:eli extra', 'Extra, Eli', '', 'unscheduled', '1541', 'Other, O');
 // Three pulls: Ava absent then absent then present; Cleo absent throughout.
 const days = {
-  '2026-08-25': {
-    date: '2026-08-25',
+  [TODAY]: {
+    date: TODAY,
     checks: [
-      { id: 'C1', asOf: '2026-08-25T10:00:00', fileName: 'onprem-10.csv', summary: { onShift: 2, byStatus: { working: 0, missing: 2, unscheduled: 0 }, coverage: 0 }, presentKeys: [], exceptions: [ex(K_AVA, 'Reed, Ava', 'b1'), ex(K_CLEO, 'Nash, Cleo', 'b2'), EXTRA] },
-      { id: 'C2', asOf: '2026-08-25T10:15:00', fileName: 'onprem-1015.csv', summary: { onShift: 2, byStatus: { working: 0, missing: 2, unscheduled: 0 }, coverage: 0 }, presentKeys: [], exceptions: [ex(K_AVA, 'Reed, Ava', 'b1'), ex(K_CLEO, 'Nash, Cleo', 'b2')] },
-      { id: 'C3', asOf: '2026-08-25T10:30:00', fileName: 'onprem-1030.csv', summary: { onShift: 2, byStatus: { working: 1, missing: 1, unscheduled: 0 }, coverage: 50 }, presentKeys: [K_AVA], exceptions: [ex(K_CLEO, 'Nash, Cleo', 'b2')] }
+      { id: 'C1', asOf: TODAY + 'T10:00:00', fileName: 'onprem-10.csv', summary: { onShift: 2, byStatus: { working: 0, missing: 2, unscheduled: 0 }, coverage: 0 }, presentKeys: [], exceptions: [ex(K_AVA, 'Reed, Ava', 'b1'), ex(K_CLEO, 'Nash, Cleo', 'b2'), EXTRA] },
+      { id: 'C2', asOf: TODAY + 'T10:15:00', fileName: 'onprem-1015.csv', summary: { onShift: 2, byStatus: { working: 0, missing: 2, unscheduled: 0 }, coverage: 0 }, presentKeys: [], exceptions: [ex(K_AVA, 'Reed, Ava', 'b1'), ex(K_CLEO, 'Nash, Cleo', 'b2')] },
+      { id: 'C3', asOf: TODAY + 'T10:30:00', fileName: 'onprem-1030.csv', summary: { onShift: 2, byStatus: { working: 1, missing: 1, unscheduled: 0 }, coverage: 50 }, presentKeys: [K_AVA], exceptions: [ex(K_CLEO, 'Nash, Cleo', 'b2')] }
     ],
     documented: {}
   },
-  '2026-08-24': { date: '2026-08-24', checks: [{ id: 'B1', asOf: '2026-08-24T09:00:00', fileName: 'y.csv', summary: { onShift: 1, byStatus: { working: 1, missing: 0, unscheduled: 0 }, coverage: 100 }, presentKeys: [K_AVA], exceptions: [] }], documented: {} }
+  [YESTERDAY]: { date: YESTERDAY, checks: [{ id: 'B1', asOf: YESTERDAY + 'T09:00:00', fileName: 'y.csv', summary: { onShift: 1, byStatus: { working: 1, missing: 0, unscheduled: 0 }, coverage: 100 }, presentKeys: [K_AVA], exceptions: [ex(K_CLEO, 'Nash, Cleo', 'b2')] }], documented: {} }
 };
 
 const posts = [];
@@ -53,6 +58,7 @@ w.fetch = (url, opt) => {
   const dm = u.match(/coverage=1&date=([\d-]+)/);
   if (dm) return Promise.resolve({ ok: true, json: () => Promise.resolve({ coverage: days[dm[1]] || {} }) });
   if (u.indexOf('coverage=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ dates: Object.keys(days).sort() }) });
+  if (u.indexOf('plx=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ sync: {} }) });
   if (u.indexOf('schedule=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ schedule: {} }) });
   const k = u.match(/\?(\w+)=1/)[1];
   const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions', performance: 'performance', shifts: 'shifts', discrepancies: 'discrepancies' };
@@ -87,10 +93,10 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   click($('[data-nav="coverage"]'));
   t('a review picker is offered even with nothing uploaded', !!$('#review-date'));
   t('it lists the stored days', $$('#review-date option').length === 3);
-  t('newest first', $$('#review-date option')[1].value === '2026-08-25');
+  t('newest first', $$('#review-date option')[1].value === TODAY);
   t('and offers a way back to the live view', $$('#review-date option')[0].value === '');
 
-  pick('#review-date', '2026-08-25');
+  pick('#review-date', TODAY);
   await settle(60);
   t('a pull picker appears', !!$('#review-check'));
   t('all three pulls listed', $$('#review-check option').length === 3);
@@ -166,8 +172,23 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   await settle(60);
   const docPost = posts.filter(p => p.body && p.body.document).pop();
   t('documentation POSTed', !!docPost);
-  t('filed under the day being reviewed, not today', docPost.url.indexOf('date=2026-08-25') !== -1);
+  t('filed under the day on screen', docPost.url.indexOf('date=' + TODAY) !== -1);
   t('"Present" is an available disposition', docPost.body.document.disposition === 'Present');
+
+  console.log('— documenting a PAST day files against that day, not today —');
+  pick('#review-date', YESTERDAY);
+  await settle(60);
+  const pastRow = $$('.suite-table tbody tr').find(tr => tr.textContent.indexOf('Nash, Cleo') !== -1);
+  t('yesterday’s exception is shown', !!pastRow);
+  const pastDisp = pastRow.querySelector('.cov-disp');
+  pastDisp.value = 'Called in';
+  pastDisp.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(60);
+  const pastPost = posts.filter(p => p.body && p.body.document).pop();
+  t('filed against yesterday', pastPost.url.indexOf('date=' + YESTERDAY) !== -1);
+  t('and not against today', pastPost.url.indexOf('date=' + TODAY) === -1);
+  pick('#review-date', TODAY);
+  await settle(60);
 
   console.log('— Present clears the absence on the profile —');
   click($('[data-nav="associates"]'));

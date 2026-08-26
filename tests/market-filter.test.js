@@ -39,6 +39,7 @@ const w = dom.window;
 w.alert = () => {}; w.confirm = () => true; w.scrollTo = () => {};
 w.fetch = url => {
   const u = String(url);
+  if (u.indexOf('plx=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ sync: {} }) });
   if (u.indexOf('schedule=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ schedule: {} }) });
   if (u.indexOf('coverage=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ coverage: {} }) });
   const k = u.match(/\?(\w+)=1/)[1];

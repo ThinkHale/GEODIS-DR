@@ -33,10 +33,18 @@ const Sched = require('./schedule-core.js');
 const Intake = require('./form-intake.js');
 const TimeOff = require('./timeoff-core.js');
 const Payroll = require('./payroll-core.js');
+const ShiftKey = require('./shift-key.js');
 
 // Shared secret proving a request came from our Power Automate flow.
 // Set with: firebase functions:secrets:set SYNC_KEY
 const SYNC_KEY = defineSecret('SYNC_KEY');
+/* Optional. A Power Automate "When an HTTP request is received" flow that reads
+   the PLX workbook from SharePoint and posts it back here. Held server-side so
+   the browser never sees the URL -- anyone holding it could trigger the flow.
+   Set with: firebase functions:secrets:set PLX_FLOW_URL
+   Without it the refresh button still works; it just reloads what was last
+   pushed rather than asking for a fresh pull. */
+const PLX_FLOW_URL = defineSecret('PLX_FLOW_URL');
 
 admin.initializeApp();
 const bucket = admin.storage().bucket();
@@ -62,7 +70,8 @@ const COLLECTIONS = {
                             connectedBy: 'str', connectedAt: 'str', statusHistory: 'log' } },
   requisitions: { path: 'requisitions/requisitions.json', responseKey: 'requisitions',
                   fields: { title: 'str', department: 'str', shift: 'str', market: 'str', openings: 'num',
-                            filled: 'num', priority: 'str', status: 'str', due: 'str', notes: 'str' } },
+                            filled: 'num', priority: 'str', status: 'str', due: 'str', notes: 'str',
+                            building: 'str', reportTo: 'str', source: 'str' } },
   // Shift tags cross-referenced from the PLX workbook. Keyed by WFM EID where
   // there is one, name otherwise -- see shift-key.js.
   shifts:       { path: 'shifts/assignments.json',       responseKey: 'shifts',
@@ -90,6 +99,7 @@ const MAX_LOG_ENTRIES = 40;
    and never interpolated raw -- see dateKeyOf(). */
 // Hours submitted to Beeline, one document per pay period. Each pull is compared
 // with the one before it; what moved after the period closed is the point.
+const PLX_META_PATH = 'plx/sync.json';     // when the workbook last landed, and what came out of it
 const PAYROLL_DIR = 'payroll/periods';    // {weekEnding}.json
 const MAX_HOURS_ROWS = 20000;
 const MAX_SNAPSHOTS = 40;
@@ -674,6 +684,160 @@ async function handlePayroll(req, res) {
   res.status(200).json({ ok: true, weekEnding: week, closesAt: period.closesAt });
 }
 
+/* ---------- the live PLX workbook ----------
+   The browser cannot read SharePoint: it is a different origin and needs
+   Microsoft 365 auth, and this tool has none. So Power Automate reads the
+   workbook and posts it here, exactly as it already does for the daily reports.
+
+   Two things come out of it: the shift tag for every associate, and the open
+   orders on the Beeline Reqs tab. Both are merged over what is already stored --
+   a refresh must never wipe something a person filled in by hand. */
+async function handlePlx(req, res) {
+  setKvCors(res);
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+
+  if (req.method === 'GET') {
+    res.set('Cache-Control', 'no-cache, max-age=0');
+    res.status(200).json({ ok: true, sync: await readJsonFile(PLX_META_PATH) });
+    return;
+  }
+  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
+  if (req.get('x-sync-key') !== SYNC_KEY.value()) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
+
+  const body = req.body || {};
+  const b64 = String(body.fileBase64 || body.file || '');
+  if (!b64) { res.status(400).json({ ok: false, error: 'Missing fileBase64' }); return; }
+  let wb;
+  try {
+    wb = XLSX.read(Buffer.from(b64, 'base64'), { type: 'buffer' });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: 'Could not read the workbook: ' + err.message });
+    return;
+  }
+
+  const sheets = wb.SheetNames.map(n => ({
+    name: n,
+    aoa: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: '' })
+  }));
+  /* XLSX does not throw on a file that is not a workbook -- it happily reads
+     rubbish as a single CSV-ish sheet. Without this, the wrong file would record
+     a perfectly successful-looking sync that produced nothing. */
+  const recognised = sheets.filter(x =>
+    ShiftKey.KEY_SHEET.test(x.name) || ShiftKey.HC_SHEET.test(x.name) || ShiftKey.REQ_SHEET.test(x.name));
+  if (!recognised.length) {
+    res.status(400).json({
+      ok: false,
+      error: 'That file has none of the expected tabs (Geodis Key, "<site> - HC", Beeline Reqs). ' +
+        'Tabs found: ' + wb.SheetNames.slice(0, 10).join(', ')
+    });
+    return;
+  }
+  const warnings = [];
+
+  // --- shift tags, from the Key + HC tabs ---
+  const keySheet = sheets.filter(x => ShiftKey.KEY_SHEET.test(x.name))[0];
+  const key = keySheet ? ShiftKey.parseShiftKey(keySheet.aoa) : null;
+  if (!key) warnings.push('No "Geodis Key" tab was found, so shift hours are unknown.');
+  else warnings.push(...key.warnings);
+  const hc = ShiftKey.parseHeadcount(sheets, Sched.rosterKey);
+  warnings.push(...hc.warnings, ...ShiftKey.validateAgainstKey(hc, key));
+  const shiftRecords = ShiftKey.toShiftRecords(hc, key);
+  if (shiftRecords.length) {
+    await bucket.file(COLLECTIONS.shifts.path).save(JSON.stringify(
+      shiftRecords.map(r => Object.assign(sanitizeRecord(r, COLLECTIONS.shifts.fields), {
+        id: String(r.id).slice(0, 64), updatedAt: new Date().toISOString()
+      }))
+    ), { contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' } });
+  } else {
+    warnings.push('No "<site> - HC" tabs were found, so shift tags were left as they were.');
+  }
+
+  // --- open orders, from the Beeline Reqs tab ---
+  const reqSheet = sheets.filter(x => ShiftKey.REQ_SHEET.test(x.name))[0];
+  let reqCount = 0;
+  if (!reqSheet) {
+    warnings.push('No "Beeline Reqs" tab was found, so open orders were left as they were.');
+  } else {
+    const parsed = ShiftKey.parseRequisitions(reqSheet.aoa);
+    warnings.push(...parsed.warnings);
+    const incoming = ShiftKey.toRequisitionRecords(parsed);
+    const existing = await readJsonArray(COLLECTIONS.requisitions.path);
+    const byId = new Map(existing.map(r => [r.id, r]));
+    incoming.forEach(rec => {
+      const clean = sanitizeRecord(rec, COLLECTIONS.requisitions.fields);
+      clean.id = String(rec.id).slice(0, 64);
+      clean.updatedAt = new Date().toISOString();
+      const prior = byId.get(clean.id);
+      // The sheet does not track how many are filled or where a req stands, so
+      // those are whatever somebody last set here.
+      clean.filled = prior && Number.isFinite(Number(prior.filled)) ? Number(prior.filled) : 0;
+      const openings = Number(clean.openings) || 0;
+      clean.status = prior && prior.status ? prior.status
+        : (openings > 0 && clean.filled >= openings ? 'Filled' : 'Open');
+      byId.set(clean.id, Object.assign({}, prior || {}, clean));
+    });
+    // A req that has left the sheet has been closed out there. Mark it rather
+    // than deleting it, so its history and anything filled against it survive.
+    const live = new Set(incoming.map(r => r.id));
+    byId.forEach((rec, id) => {
+      if (rec.source === 'PLX workbook' && !live.has(id) && rec.status !== 'Closed') {
+        byId.set(id, Object.assign({}, rec, { status: 'Closed', updatedAt: new Date().toISOString() }));
+      }
+    });
+    const merged = Array.from(byId.values());
+    reqCount = incoming.length;
+    await bucket.file(COLLECTIONS.requisitions.path).save(JSON.stringify(merged), {
+      contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+    });
+  }
+
+  const meta = {
+    syncedAt: new Date().toISOString(),
+    fileName: String(body.fileName || '').slice(0, 300),
+    modifiedAt: String(body.modifiedAt || '').slice(0, 40),
+    shiftTags: shiftRecords.length,
+    sites: hc.sheets.length,
+    openOrders: reqCount,
+    warnings: warnings.slice(0, 20)
+  };
+  await bucket.file(PLX_META_PATH).save(JSON.stringify(meta), {
+    contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+  });
+  res.status(200).json({ ok: true, sync: meta });
+}
+
+/* Asking for a fresh pull. The browser calls this; this calls the Power Automate
+   flow that reads SharePoint. The flow URL stays server-side. */
+async function handlePlxRefresh(req, res) {
+  setKvCors(res);
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
+  if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
+
+  let url = '';
+  try { url = PLX_FLOW_URL.value(); } catch (err) { url = ''; }
+  if (!url) {
+    // Not configured is not an error: the scheduled push still works, so say
+    // what is and is not happening rather than failing opaquely.
+    res.status(200).json({
+      ok: true, triggered: false,
+      message: 'No on-demand flow is configured, so this shows the last workbook that was pushed. ' +
+        'Set the PLX_FLOW_URL secret to let this button ask for a fresh pull.'
+    });
+    return;
+  }
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestedAt: new Date().toISOString() })
+    });
+    res.status(200).json({ ok: true, triggered: r.ok, status: r.status });
+  } catch (err) {
+    res.status(502).json({ ok: false, error: 'Could not reach the refresh flow: ' + String(err.message || err) });
+  }
+}
+
 function parseToState(buffer, side) {
   const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -681,7 +845,7 @@ function parseToState(buffer, side) {
   return Core.buildState(aoa, side);
 }
 
-exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, async (req, res) => {
+exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY, PLX_FLOW_URL] }, async (req, res) => {
   try {
     // Shared browser stores (notes + status overrides). Separate from the sync path.
     if (req.query.notes !== undefined) {
@@ -695,6 +859,8 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
     if (req.query.ptoIntake !== undefined) { await handlePtoIntake(req, res); return; }
     if (req.query.discrepancyIntake !== undefined) { await handleDiscrepancyIntake(req, res); return; }
     if (req.query.payroll !== undefined) { await handlePayroll(req, res); return; }
+    if (req.query.plx !== undefined) { await handlePlx(req, res); return; }
+    if (req.query.plxRefresh !== undefined) { await handlePlxRefresh(req, res); return; }
     if (req.query.schedule !== undefined) { await handleSchedule(req, res); return; }
     if (req.query.coverage !== undefined) { await handleCoverage(req, res); return; }
     // Suite collections: ?attendance=1, ?timeoff=1, ?requisitions=1, ?performance=1

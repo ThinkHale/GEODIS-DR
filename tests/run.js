@@ -28,6 +28,7 @@ const SUITES = [
   { file: 'plx-sync.test.js', name: 'live PLX workbook sync + open orders', dom: false },
   { file: 'auth.test.js', name: 'accounts, roles and permissions', dom: false },
   { file: 'point-policy.test.js', name: 'attendance point scale (import == manual)', dom: false },
+  { file: 'rc-links.test.js', name: 'RC record ids for deep links', dom: false },
   { file: 'report-pairing.test.js', name: 'pairing the two WFM reports', dom: false },
   { file: 'shift-import.test.js', name: 'PLX workbook import + per-associate shift (DOM)', dom: true },
   { file: 'coverage-review.test.js', name: 'reviewing a stored check (DOM)', dom: true },

@@ -92,6 +92,11 @@ const COLLECTIONS = {
   users:        { path: 'admin/users.json',              responseKey: 'users',
                   fields: { email: 'str', uid: 'str', name: 'str', role: 'str', enabled: 'bool',
                             markets: 'list', createdAt: 'str', lastSeenAt: 'str' } },
+  /* App-level settings an admin owns. Keyed by a stable id so they upsert like
+     any other collection -- currently the RC (Salesforce) base URL, which turns
+     a stored record id into a link somebody can click. */
+  appConfig:    { path: 'admin/config.json',             responseKey: 'appConfig',
+                  fields: { key: 'str', value: 'str', label: 'str' } },
   locations:    { path: 'admin/locations.json',          responseKey: 'locations',
                   fields: { code: 'str', name: 'str', market: 'str', active: 'bool', notes: 'str' } },
   shiftTypes:   { path: 'admin/shift-types.json',        responseKey: 'shiftTypes',
@@ -1179,6 +1184,8 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
       records: records.map(r => ({
         badge: r.badge,
         empNumber: r.empNumber || '',
+        contactId: r.contactId || '',
+        assignmentId: r.assignmentId || '',
         person: r.person,
         altName: r.altName,
         action: r.action,

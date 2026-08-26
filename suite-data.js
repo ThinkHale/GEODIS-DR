@@ -29,7 +29,8 @@
     associatePto: 'associatePto',
     users: 'users',
     locations: 'locations',
-    shiftTypes: 'shiftTypes'
+    shiftTypes: 'shiftTypes',
+    appConfig: 'appConfig'
   };
 
   /* Attendance occurrence thresholds. GEODIS policy varies by site, so these are
@@ -91,6 +92,9 @@
       byBadge.set(badge, {
         badge: badge,
         empNumber: r.empNumber || '',
+        // RC (Salesforce) record ids, for deep links. Empty when RC has no record.
+        contactId: r.contactId || '',
+        assignmentId: r.assignmentId || '',
         name: name,
         initials: initialsOf(name),
         altName: r.altName || '',
@@ -298,8 +302,8 @@
   /* Admin collections, loaded only when the Settings page is opened -- most
      visits never need them. */
   function loadAdmin() {
-    return Promise.all(['users', 'locations', 'shiftTypes'].map(loadCollection))
-      .then(function (r) { return { users: r[0], locations: r[1], shiftTypes: r[2] }; });
+    return Promise.all(['users', 'locations', 'shiftTypes', 'appConfig'].map(loadCollection))
+      .then(function (r) { return { users: r[0], locations: r[1], shiftTypes: r[2], appConfig: r[3] }; });
   }
 
   /* ---------- the live PLX workbook ----------
@@ -349,7 +353,7 @@
   // empty list rather than taking the whole suite down.
   function loadAll() {
     return Promise.all(['attendance', 'timeoff', 'requisitions', 'performance', 'shifts',
-      'discrepancies', 'associatePto', 'locations']
+      'discrepancies', 'associatePto', 'locations', 'appConfig']
       .map(function (n) { return loadCollection(n); }))
       .then(function (r) {
         return {
@@ -357,7 +361,7 @@
           performance: r[3], shifts: r[4], discrepancies: r[5], associatePto: r[6],
           // Loaded for everyone, not just admins: it supplies the default account
           // name for sites the Key does not spell out.
-          locations: r[7]
+          locations: r[7], appConfig: r[8]
         };
       });
   }

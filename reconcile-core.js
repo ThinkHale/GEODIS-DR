@@ -124,6 +124,10 @@
       aoa: aoa, headerRow: headerRow, headers: headers,
       activeOnly: true, selectedRegions: null
     };
+    // RC record ids, found by value shape rather than header text.
+    var ids = detectRecordIdCols(aoa, headerRow);
+    st.contactIdCol = ids.contactIdCol;
+    st.assignmentIdCol = ids.assignmentIdCol;
     st.badgeCol  = pickCol(headers, DETECT[side].badge);
     st.nameCol   = pickCol(headers, DETECT[side].name);
     st.statusCol = pickCol(headers, DETECT[side].status);
@@ -370,6 +374,58 @@
   }
 
   /* ---------- indexing ---------- */
+  /* ---------- RC record ids ----------
+     RC is Salesforce, so every record has an 18-character id, and that is what a
+     deep link needs. Rather than guess what the export calls the columns, find
+     them by the SHAPE of the values: a Salesforce id is 15 or 18 alphanumeric
+     characters starting with a letter, which nothing else in this export looks
+     like. The header then only has to say WHICH id it is.
+
+     Header-first detection would break the moment somebody renames a column, and
+     "Assignment ID" already means the badge here. */
+  /* A Salesforce id is 15 or 18 alphanumeric characters. It begins with a
+     three-character object prefix that is usually numeric -- 003 for a Contact,
+     a0X for a custom object -- so it must NOT be required to start with a
+     letter. It must contain at least one letter though, which is what keeps a
+     long numeric code from qualifying. */
+  var SF_ID = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;
+  function looksLikeSfId(v) {
+    var s = String(v == null ? '' : v).trim();
+    if (s.length !== 15 && s.length !== 18) return false;
+    if (!SF_ID.test(s)) return false;
+    return /[a-zA-Z]/.test(s);
+  }
+  function detectRecordIdCols(aoa, headerRow) {
+    var headers = (aoa[headerRow] || []).map(function (h) { return String(h == null ? '' : h).trim(); });
+    var sample = aoa.slice(headerRow + 1, headerRow + 40);
+    var out = { contactIdCol: -1, assignmentIdCol: -1 };
+    var candidates = [];
+    headers.forEach(function (h, i) {
+      var vals = sample.map(function (r) { return r ? r[i] : null; }).filter(function (v) {
+        return v != null && String(v).trim() !== '';
+      });
+      // Three is enough to be confident, and every sampled value has to qualify,
+      // so a column of mixed text never passes on the strength of a few rows.
+      if (vals.length < 3) return;
+      if (!vals.every(looksLikeSfId)) return;
+      candidates.push({ i: i, header: h });
+    });
+    candidates.forEach(function (c) {
+      var h = c.header.toLowerCase();
+      // "Legacy Contact ID" is an older, different identifier already used as the
+      // employee number, so it must never be taken for the record id.
+      if (/legacy/.test(h)) return;
+      if (out.assignmentIdCol === -1 && /assignment/.test(h)) out.assignmentIdCol = c.i;
+      else if (out.contactIdCol === -1 && /(person|contact|associate|candidate|placed)/.test(h)) out.contactIdCol = c.i;
+    });
+    // A single unlabelled id column is far more likely the assignment, since that
+    // is the row this export is about.
+    if (out.assignmentIdCol === -1 && out.contactIdCol === -1 && candidates.length === 1) {
+      out.assignmentIdCol = candidates[0].i;
+    }
+    return out;
+  }
+
   function indexSide(st) {
     var map = new Map(), dups = new Set();
     st.aoa.slice(st.headerRow + 1).forEach(function (row) {
@@ -386,7 +442,9 @@
       if (map.has(badge)) { map.get(badge).count++; dups.add(badge); }
       else map.set(badge, {
         name: name, region: region, start: start, count: 1,
-        city: acct ? acct.city : '', cityKey: acct ? acct.cityKey : '', emp: emp
+        city: acct ? acct.city : '', cityKey: acct ? acct.cityKey : '', emp: emp,
+        contactId: st.contactIdCol !== -1 && row[st.contactIdCol] != null ? String(row[st.contactIdCol]).trim() : '',
+        assignmentId: st.assignmentIdCol !== -1 && row[st.assignmentIdCol] != null ? String(row[st.assignmentIdCol]).trim() : ''
       });
     });
     return { map: map, dups: dups };
@@ -532,6 +590,9 @@
       records.push({
         badge: badge,
         empNumber: crmRec ? (crmRec.emp || '') : '',
+        // RC record ids, for deep links. Only ever present for a badge RC knows.
+        contactId: crmRec ? (crmRec.contactId || '') : '',
+        assignmentId: crmRec ? (crmRec.assignmentId || '') : '',
         crmName: inCrm ? ci.map.get(badge).name : '',
         crmStart: inCrm ? ci.map.get(badge).start : null,
         beeName: inBee ? bi.map.get(badge).name : '',
@@ -664,6 +725,8 @@
     normBadge: normBadge,
     isActive: isActive,
     regionOf: regionOf,
+    looksLikeSfId: looksLikeSfId,
+    detectRecordIdCols: detectRecordIdCols,
     buildingOf: buildingOf,
     BUILDING_MARKETS: BUILDING_MARKETS,
     parseDateVal: parseDateVal,

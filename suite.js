@@ -65,7 +65,7 @@
     payroll: { periods: [], week: '', period: null, tab: 'discrepancies', loading: false },
     plx: { sync: null, busy: false, note: '' },   // the live workbook from SharePoint
     auth: { signedIn: false, email: '', account: null, loading: false, error: '' },
-    admin: { users: [], locations: [], shiftTypes: [], loaded: false, tab: 'account' },
+    admin: { users: [], locations: [], shiftTypes: [], appConfig: [], loaded: false, tab: 'account' },
     shiftKey: null,          // parsed "Geodis Key" vocabulary, when a workbook is loaded
     shiftImport: null,       // last import result, for the report shown after
     storesLoaded: false,
@@ -420,6 +420,29 @@
     });
   }
 
+  /* ---------- links into RC ----------
+     RC is Salesforce, so a record id becomes a link only once we know the org's
+     domain. That is a setting rather than a constant: it differs per org, and
+     hard-coding it would mean a code change to fix a URL. With no base URL set,
+     nothing renders a broken link -- the id is simply not shown as one. */
+  function rcBase() {
+    var row = (state.stores.appConfig || []).filter(function (c) { return c.key === 'rcBaseUrl'; })[0];
+    return row && row.value ? String(row.value).replace(/\/+$/, '') : '';
+  }
+  function rcLink(id, object, label, cls) {
+    var base = rcBase();
+    if (!base || !id) return '';
+    return '<a class="rc-link ' + (cls || '') + '" target="_blank" rel="noopener" href="' +
+      esc(base + '/lightning/r/' + object + '/' + id + '/view') + '">' + esc(label) + ' ↗</a>';
+  }
+  function rcContactLink(p, label) { return rcLink(p.contactId, 'Contact', label || 'RC profile'); }
+  function rcAssignmentLink(p, label) {
+    // The object name for an assignment is org-specific, so it is configurable
+    // alongside the base URL rather than assumed.
+    var row = (state.stores.appConfig || []).filter(function (c) { return c.key === 'rcAssignmentObject'; })[0];
+    return rcLink(p.assignmentId, (row && row.value) || 'Assignment__c', label || 'RC assignment');
+  }
+
   function statusChip(p) {
     return '<span class="status ' + (p.status === 'Ended' ? 'closed' : '') + '">' + esc(p.status) + '</span>';
   }
@@ -603,7 +626,8 @@
       ' · ' + esc(p.market) + '</p>' +
       (p.altName ? '<p class="sub">Also on file as “' + esc(p.altName) + '”</p>' : '') + '</div>' +
       '<div class="profile-chips">' + statusChip(p) + reconChip(p) +
-      (p.transitionAssociate ? '<span class="status info">Transition associate</span>' : '') + '</div>' +
+      (p.transitionAssociate ? '<span class="status info">Transition associate</span>' : '') +
+      rcContactLink(p) + rcAssignmentLink(p) + '</div>' +
       '<button class="suite-btn" data-nav="associates">← Roster</button></div>' +
 
       '<div class="metric-strip">' +
@@ -646,6 +670,8 @@
       detail('End date', p.endDate) + detail('End reason', p.endReason) +
       detail('Market', p.market + (p.marketVerified ? '' : ' (inferred)')) +
       detail('Recommended action', p.actionLabel) +
+      (p.contactId ? '<dt>RC record</dt><dd>' + rcContactLink(p, 'Associate') +
+        ' ' + rcAssignmentLink(p, 'Assignment') + '</dd>' : '') +
       detail('Reason', p.actionReason) +
       (p.newBadge ? detail('Replacement badge', p.newBadge) : '') +
       (p.note ? detail('Shared note', p.note) : '') +
@@ -1671,7 +1697,8 @@
   function settingsView() {
     var a = state.auth;
     var admin = a.account && AuthCore.isAdmin(a.account);
-    var tabs = [['account', 'Account'], ['users', 'Users'], ['locations', 'Locations'], ['shifts', 'Shifts']];
+    var tabs = [['account', 'Account'], ['users', 'Users'], ['locations', 'Locations'],
+      ['shifts', 'Shifts'], ['links', 'RC links']];
     if (!state.admin.loaded && state.admin.tab !== 'account') loadAdminData();
     return hero('Settings', 'Accounts, roles, locations and shifts.', '', '') +
       (a.signedIn && !admin
@@ -1687,6 +1714,7 @@
         : !state.admin.loaded ? loadingPanel('settings')
         : state.admin.tab === 'users' ? usersPanel(admin)
         : state.admin.tab === 'locations' ? listPanel('locations', admin)
+        : state.admin.tab === 'links' ? appConfigPanel(admin)
         : listPanel('shiftTypes', admin));
   }
 
@@ -1776,6 +1804,38 @@
       blank: function () { return { key: '', label: '', location: '', hours: '', active: true }; }
     }
   };
+  /* The RC base URL and assignment object live in Settings rather than in code:
+     they differ per Salesforce org, and a wrong URL should be a field to fix,
+     not a deploy. */
+  var APP_SETTINGS = [
+    { key: 'rcBaseUrl', label: 'RC (Salesforce) base URL',
+      hint: 'e.g. https://yourorg.lightning.force.com — blank shows no links' },
+    { key: 'rcAssignmentObject', label: 'RC assignment object API name',
+      hint: 'e.g. Assignment__c. Only needed for assignment links.' }
+  ];
+  function appConfigPanel(admin) {
+    var rows = state.admin.appConfig || [];
+    var valueOf = function (k) {
+      var r = rows.filter(function (x) { return x.key === k; })[0];
+      return r ? r.value || '' : '';
+    };
+    return '<section class="suite-panel"><div class="suite-panel-head"><h2>RC links</h2></div>' +
+      '<p class="perf-note">The daily RC assignment export carries an 18-character record id for the ' +
+      'associate and the assignment. With a base URL set, those become links straight into RC.</p>' +
+      APP_SETTINGS.map(function (f) {
+        return '<label class="suite-field"><span>' + esc(f.label) + '</span>' +
+          (admin
+            ? '<input class="suite-input" data-app-config="' + f.key + '" value="' + esc(valueOf(f.key)) +
+              '" placeholder="' + esc(f.hint) + '">'
+            : '<span class="sub">' + esc(valueOf(f.key) || 'not set') + '</span>') +
+          '<span class="sub">' + esc(f.hint) + '</span></label>';
+      }).join('') +
+      (valueOf('rcBaseUrl')
+        ? '<p class="perf-note">Links are live, and show only where RC actually has a record id.</p>'
+        : '<p class="perf-note">No base URL set, so no links appear anywhere — the ids are stored either way.</p>') +
+      '</section>';
+  }
+
   function listPanel(which, admin) {
     var spec = LISTS[which];
     var rows = (state.admin[which] || []).slice();
@@ -1814,6 +1874,9 @@
       state.admin.users = d.users;
       state.admin.locations = d.locations;
       state.admin.shiftTypes = d.shiftTypes;
+      state.admin.appConfig = d.appConfig;
+      // The link helpers read from stores, so keep the two in step after an edit.
+      state.stores.appConfig = d.appConfig;
       state.admin.loaded = true;
       state.admin.loading = false;
       render();
@@ -2039,7 +2102,8 @@
     });
   }
   var LOCAL_KEY = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions',
-    discrepancies: 'discrepancies', users: 'users', locations: 'locations', shiftTypes: 'shiftTypes' };
+    discrepancies: 'discrepancies', users: 'users', locations: 'locations', shiftTypes: 'shiftTypes',
+    appConfig: 'appConfig' };
 
   /* Settings rows live in state.admin, not state.stores, so they get their own
      writer. It reloads the collection after each write rather than patching in
@@ -2229,6 +2293,13 @@
   root.addEventListener('change', function (e) {
     if (e.target.dataset && e.target.dataset.userRole) {
       persistAdmin('users', { id: e.target.dataset.userRole, email: e.target.dataset.userRole, role: e.target.value });
+      return;
+    }
+    var ac = e.target.dataset && e.target.dataset.appConfig;
+    if (ac) {
+      var meta = APP_SETTINGS.filter(function (f) { return f.key === ac; })[0];
+      persistAdmin('appConfig', { id: 'CFG-' + ac, key: ac, value: e.target.value.trim(),
+        label: meta ? meta.label : ac });
       return;
     }
     var lf = e.target.dataset && e.target.dataset.listField;

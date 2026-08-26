@@ -13,6 +13,7 @@ let admin = {
     { id: 'temp@employbridge.com', email: 'temp@employbridge.com', name: 'Agency', role: 'viewer', enabled: false, markets: [] }
   ],
   locations: [{ id: 'LOC1', code: '1519', name: 'Lego Main', market: 'Chicago', active: true }],
+  appConfig: [],
   shiftTypes: [{ id: 'SHI1', key: 'A', label: 'A shift', location: '1519', hours: '6am-4:30pm', active: true }]
 };
 const posts = [];
@@ -60,7 +61,8 @@ const signInAs = acct => w.__setAuth({ signedIn: true, email: acct.email, accoun
   console.log('— the page exists —');
   t('Settings is in the sidebar', !!$('[data-nav="settings"]'));
   click($('[data-nav="settings"]'));
-  t('four sections', $$('[data-settings-tab]').length === 4);
+  t('five sections', $$('[data-settings-tab]').length === 5);
+  t('including RC links', !!$('[data-settings-tab="links"]'));
   t('opens on Account', $('[data-settings-tab="account"]').className.indexOf('primary') !== -1);
 
   console.log('— signed out —');
@@ -143,6 +145,21 @@ const signInAs = acct => w.__setAuth({ signedIn: true, email: acct.email, accoun
   await settle(60);
   t('the stored shift is listed', $$('[data-list-field]').map(i => i.value).indexOf('A shift') !== -1);
   t('it says these supplement the workbook', d.body.textContent.indexOf('supplement') !== -1);
+
+  console.log('— RC links —');
+  click($('[data-settings-tab="links"]'));
+  await settle(60);
+  t('a base URL field is offered', !!$('[data-app-config="rcBaseUrl"]'));
+  t('and the assignment object', !!$('[data-app-config="rcAssignmentObject"]'));
+  t('it says no links show until a URL is set', d.body.textContent.indexOf('No base URL set') !== -1);
+  const urlField = $('[data-app-config="rcBaseUrl"]');
+  urlField.value = 'https://acme.lightning.force.com/';
+  urlField.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(60);
+  post = posts.filter(p => p.url && p.url.indexOf('appConfig=1') !== -1).pop();
+  t('the URL is saved', post.body.value === 'https://acme.lightning.force.com/');
+  t('under a stable id', post.body.id === 'CFG-rcBaseUrl');
+  t('with the key', post.body.key === 'rcBaseUrl');
 
   console.log('— a non-admin cannot change anything —');
   signInAs({ email: 'mgr@geodis.com', name: 'A Manager', role: 'manager', enabled: true, markets: [] });

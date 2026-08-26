@@ -498,7 +498,9 @@
     });
 
     var t = trend();
-    return '<div class="metric-strip">' +
+    var stale = staleNote(state.updatedAt, 'The RC / Beeline roster') +
+      staleNote(state.plx.sync && state.plx.sync.syncedAt, 'The PLX workbook');
+    return stale + '<div class="metric-strip">' +
       metric('Active associates', active.length, all.length + ' on the assignment roster') +
       metric('Attendance rate', t.latest == null ? '—' : t.latest + '%', t.latest == null ? 'No attendance data yet' : t.latestNote, 'green') +
       metric('PTO / VTO pending', pending, 'Requests needing review') +
@@ -1984,13 +1986,43 @@
      The existing tool is not reimplemented here. Its DOM (#recon-main, with all
      of its listeners) is MOVED into the suite content area, and moved back out
      before any re-render wipes the shell. */
-  function reconciliation() { return plxBar() + '<div id="recon-mount"></div>'; }
+  function reconciliation() {
+    return staleNote(state.plx.sync && state.plx.sync.syncedAt, 'The PLX workbook') +
+      staleNote(state.updatedAt, 'The RC / Beeline roster') +
+      plxBar() + '<div id="recon-mount"></div>';
+  }
 
   /* The live PLX workbook lives in SharePoint, which the browser cannot read --
      different origin, and it needs Microsoft 365 auth this tool does not have.
      Power Automate pushes it here instead, so this button asks for a fresh pull
      and then reloads. When no on-demand flow is configured it still reloads
      whatever was last pushed, and says which of the two just happened. */
+  /* A feed that stops arriving looks exactly like a feed with nothing new, and
+     the difference only showed up in Power Automate's raw output. Anything the
+     tool depends on being refreshed says how old it is, and says so loudly once
+     it is older than a run cycle. */
+  var STALE_AFTER_HOURS = 20;      // 8am and 4pm runs; 20h means two were missed
+  function hoursSince(iso) {
+    var t = Date.parse(iso || '');
+    if (isNaN(t)) return null;
+    return (Date.now() - t) / 3600000;
+  }
+  function ageLabel(iso) {
+    var h = hoursSince(iso);
+    if (h == null) return '';
+    if (h < 1) return Math.max(1, Math.round(h * 60)) + ' minutes ago';
+    if (h < 48) return Math.round(h) + ' hours ago';
+    return Math.round(h / 24) + ' days ago';
+  }
+  function staleNote(iso, what) {
+    var h = hoursSince(iso);
+    if (h == null || h < STALE_AFTER_HOURS) return '';
+    return '<div class="warn-banner"><strong>' + esc(what) + ' is ' + esc(ageLabel(iso)) + '</strong>' +
+      '<p>It should refresh twice a day. This usually means the Power Automate flow is failing — ' +
+      'a SharePoint connection whose token has expired is the common cause, and it shows as a 401 ' +
+      'in the flow run history.</p></div>';
+  }
+
   function plxBar() {
     var p = state.plx, sync = p.sync;
     var when = sync && sync.syncedAt ? shortWhen(sync.syncedAt) : '';
@@ -1998,8 +2030,10 @@
       '<strong>Roster, shifts and open orders</strong>' +
       (sync && sync.syncedAt
         ? '<span>From the PLX workbook · ' + esc(sync.shiftTags || 0) + ' shift tags across ' +
-          esc(sync.sites || 0) + ' sites · ' + esc(sync.openOrders || 0) + ' open orders · synced ' + esc(when) + '</span>'
-        : '<span>The PLX workbook has not been pushed from SharePoint yet.</span>') +
+          esc(sync.sites || 0) + ' sites · ' + esc(sync.openOrders || 0) + ' open orders · synced ' +
+          esc(when) + ' (' + esc(ageLabel(sync.syncedAt)) + ')</span>'
+        : '<span class="warn-text">The PLX workbook has never arrived from SharePoint. ' +
+          'Check the flow run history — a 401 there means its SharePoint connection needs reauthorising.</span>') +
       (p.note ? '<span class="plx-note">' + esc(p.note) + '</span>' : '') +
       '</div>' +
       '<button class="suite-btn primary" data-plx-refresh ' + (p.busy ? 'disabled' : '') + '>' +

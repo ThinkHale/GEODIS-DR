@@ -37,6 +37,7 @@ const SUITES = [
   { file: 'payroll-ui.test.js', name: 'Payroll tab (DOM)', dom: true },
   { file: 'location-sort.test.js', name: 'site / account column + sorting (DOM)', dom: true },
   { file: 'settings-ui.test.js', name: 'Settings page (DOM)', dom: true },
+  { file: 'staleness.test.js', name: 'stale feed warnings (DOM)', dom: true },
   { file: 'market-filter.test.js', name: 'market filter across every view (DOM)', dom: true },
   { file: 'coverage-ui.test.js', name: 'coverage persistence + spreadsheet paste (DOM)', dom: true },
   { file: 'suite-ui.test.js', name: 'suite modules + reconciliation mount', dom: true },

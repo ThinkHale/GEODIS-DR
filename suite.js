@@ -60,7 +60,8 @@
     notes: {},              // shared badge -> note, published with the roster
     updatedAt: null,
     profiles: new Map(),
-    stores: { attendance: [], timeOff: [], requisitions: [], performance: [], shifts: [], discrepancies: [], associatePto: [] },
+    stores: { attendance: [], timeOff: [], requisitions: [], performance: [], shifts: [], discrepancies: [],
+      associatePto: [], locations: [], appConfig: [], timeclockLinks: [] },
     connectFor: '', connectQuery: '', connectKind: 'timeoff',
     payroll: { periods: [], week: '', period: null, tab: 'discrepancies', loading: false },
     plx: { sync: null, busy: false, note: '' },   // the live workbook from SharePoint
@@ -908,7 +909,8 @@
     });
     // Reach from each row to its roster profile so a supervisor can go straight to
     // attendance and time off from an exception.
-    ScheduleCore.linkRoster(res.rows, state.profiles, SuiteData.normBadge);
+    ScheduleCore.linkRoster(res.rows, state.profiles, SuiteData.normBadge,
+      ScheduleCore.linkIndex(state.stores.timeclockLinks));
     return res;
   }
 
@@ -1003,6 +1005,14 @@
     if (c.schedule && c.schedule.periodStart && (day < c.schedule.periodStart || day > c.schedule.periodEnd)) {
       notes.push('The loaded schedule covers ' + c.schedule.periodStart + ' to ' + c.schedule.periodEnd +
         ', which does not include ' + day + '. Load the current week before acting on this.');
+    }
+    /* An on-premise row that reaches no profile is invisible everywhere else --
+       no attendance, no points, no profile view -- so it is called out first and
+       loudest rather than left to be noticed. */
+    var unlinked = ScheduleCore.unlinkedRows(res.rows);
+    if (unlinked.length) {
+      notes.unshift(unlinked.length + ' associate(s) on the on-premise report are not connected to a ' +
+        'profile, so nothing they do reaches attendance or their record. Use Connect on those rows.');
     }
     if (res.summary.noSchedule) {
       notes.push(res.summary.noSchedule + ' associate(s) on the on-premise report have no row in the weekly schedule.');
@@ -1271,6 +1281,24 @@
       '</section>';
   }
 
+  function unlinkedBanner(res) {
+    var unlinked = ScheduleCore.unlinkedRows(res.rows);
+    if (!unlinked.length) return '';
+    return '<div class="warn-banner cov-unlinked"><strong>' + unlinked.length +
+      ' not connected to a profile</strong>' +
+      '<p>These people are on the clock but reach no associate record, so their attendance, points ' +
+      'and time off go nowhere. Connecting one fixes it for every future upload.</p>' +
+      '<div class="unlinked-list">' + unlinked.slice(0, 12).map(function (r) {
+        return '<button class="unlinked-row" data-link-eid="' + esc(r.wfmId || '') +
+          '" data-link-name="' + esc(r.name) + '">' +
+          '<span class="name">' + esc(r.name) + '</span>' +
+          '<span class="sub">' + esc(r.wfmId || 'no timeclock id') + '</span>' +
+          '<span>Connect ›</span></button>';
+      }).join('') +
+      (unlinked.length > 12 ? '<div class="sub">…and ' + (unlinked.length - 12) + ' more in the table below.</div>' : '') +
+      '</div></div>';
+  }
+
   function covTable(rows, total) {
     return '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
       '<th>Associate</th><th>Status</th><th>On premise</th><th>Scheduled shift</th>' +
@@ -1280,8 +1308,11 @@
         var open = r.badge ? ' data-profile="' + esc(r.badge) + '"' : '';
         var nameCls = r.badge ? 'name link' : 'name';
         var sub = r.badge
-          ? 'Badge ' + esc(r.badge) + (r.rosterMatch === 'name' ? ' · matched by name' : '')
-          : esc(r.wfmId || 'No employee id');
+          ? 'Badge ' + esc(r.badge) +
+            (r.rosterMatch === 'name' ? ' · matched by name' : r.rosterMatch === 'linked' ? ' · connected by hand' : '')
+          : '<b class="warn-text">Not connected</b> · ' + esc(r.wfmId || 'no timeclock id') +
+            ' <button class="suite-btn tiny" data-link-eid="' + esc(r.wfmId || '') +
+            '" data-link-name="' + esc(r.name) + '">Connect…</button>';
         return '<tr class="cov-row ' + r.severity + '">' +
           '<td><div class="' + nameCls + '"' + open + '>' + esc(r.name) + '</div><div class="sub">' + sub +
           (r.inSchedule ? '' : ' · no schedule row') + (r.ambiguous ? ' · duplicate name' : '') + '</div></td>' +
@@ -1315,7 +1346,8 @@
     // Nothing below the sources means anything if the reports do not pair up.
     if (res.mismatch) return head + covReviewPicker() + covMismatch(res);
     var rows = covFilter(res.rows);
-    return head + covReviewPicker() + covControls(res) + covMetrics(res.summary) + covWarnings(res) + covExport(res) +
+    return head + covReviewPicker() + covControls(res) + covMetrics(res.summary) +
+      unlinkedBanner(res) + covWarnings(res) + covExport(res) +
       '<section class="suite-panel">' + covFilters(res) +
       (rows.length ? covTable(rows, res.rows.length)
         : empty('Nothing matches those filters', 'Widen the status or location filter to see more.')) +
@@ -1499,6 +1531,35 @@
      A request arrives with a name and no badge when the name was typed
      differently from the roster. Rather than guess, this searches the roster so
      a person picks. */
+  /* Connecting a timeclock id to a profile. Separate from connectModal(), which
+     patches a single record: this writes a mapping that every future on-premise
+     upload consults, so the same person never has to be connected twice. */
+  function linkModal(eid, name) {
+    if (!eid) {
+      alert('That row has no timeclock id, so there is nothing to connect. ' +
+        'It has to be fixed in the on-premise report.');
+      return;
+    }
+    state.connectFor = eid;
+    state.connectKind = 'timeclock';
+    state.connectQuery = name || '';
+    document.body.insertAdjacentHTML('beforeend',
+      '<div class="suite-modal-backdrop" id="suite-modal"><div class="suite-modal">' +
+      '<div class="suite-modal-head"><h3>Connect “' + esc(name || eid) + '”</h3>' +
+      '<button class="suite-btn" data-close>×</button></div>' +
+      '<div class="connect-body">' +
+      '<p class="perf-note">Timeclock id <b>' + esc(eid) + '</b> does not match any associate by name. ' +
+      'Search the roster for the right person — the connection is remembered, so every future ' +
+      'on-premise upload will find them.</p>' +
+      '<input class="suite-input" id="connect-search" value="' + esc(state.connectQuery) +
+      '" placeholder="Search by name or badge…" autofocus>' +
+      '<div id="connect-results">' + connectResults() + '</div></div>' +
+      '<div class="suite-modal-actions"><button type="button" class="suite-btn" data-close>Cancel</button></div>' +
+      '</div></div>');
+    var box = document.getElementById('connect-search');
+    if (box) { box.focus(); box.select(); }
+  }
+
   function connectModal(id, kind) {
     kind = kind || 'timeoff';
     var t = (state.stores[LOCAL_OF[kind]] || []).filter(function (x) { return x.id === id; })[0];
@@ -2198,6 +2259,8 @@
       }
       return;
     }
+    var lk = e.target.closest('[data-link-eid]');
+    if (lk) { linkModal(lk.dataset.linkEid, lk.dataset.linkName); return; }
     var conn = e.target.closest('[data-connect]');
     if (conn) { connectModal(conn.dataset.connect, conn.dataset.connectKind || 'timeoff'); return; }
     if (e.target.closest('[data-plx-refresh]')) { refreshPlx(); return; }
@@ -2416,6 +2479,28 @@
     var hit = e.target.closest('[data-connect-to]');
     if (hit) {
       var kind = state.connectKind || 'timeoff';
+      if (kind === 'timeclock') {
+        var actor = currentActor(true);
+        if (!actor) return;
+        var target = profile(hit.dataset.connectTo);
+        var modalEl = document.getElementById('suite-modal');
+        if (modalEl) modalEl.remove();
+        var eid = state.connectFor;
+        SuiteData.saveRecord('timeclockLinks', {
+          id: 'TCL-' + eid.replace(/[^A-Za-z0-9_-]/g, ''),
+          eid: eid, badge: hit.dataset.connectTo,
+          name: state.connectQuery, rosterName: target ? target.name : '',
+          linkedBy: actor.name, linkedAt: new Date().toISOString()
+        }).then(function () {
+          return SuiteData.loadCollection('timeclockLinks');
+        }).then(function (rows) {
+          state.stores.timeclockLinks = rows;
+          render();
+        }).catch(function (err) {
+          alert('That connection could not be saved.\n\n' + err.message);
+        });
+        return;
+      }
       var local = LOCAL_OF[kind], pipe = PIPELINES[kind];
       var rec = (state.stores[local] || []).filter(function (x) { return x.id === state.connectFor; })[0];
       if (!rec || !pipe) return;

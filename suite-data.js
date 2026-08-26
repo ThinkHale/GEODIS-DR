@@ -30,7 +30,8 @@
     users: 'users',
     locations: 'locations',
     shiftTypes: 'shiftTypes',
-    appConfig: 'appConfig'
+    appConfig: 'appConfig',
+    timeclockLinks: 'timeclockLinks'
   };
 
   /* Attendance occurrence thresholds. GEODIS policy varies by site, so these are
@@ -353,7 +354,7 @@
   // empty list rather than taking the whole suite down.
   function loadAll() {
     return Promise.all(['attendance', 'timeoff', 'requisitions', 'performance', 'shifts',
-      'discrepancies', 'associatePto', 'locations', 'appConfig']
+      'discrepancies', 'associatePto', 'locations', 'appConfig', 'timeclockLinks']
       .map(function (n) { return loadCollection(n); }))
       .then(function (r) {
         return {
@@ -361,7 +362,7 @@
           performance: r[3], shifts: r[4], discrepancies: r[5], associatePto: r[6],
           // Loaded for everyone, not just admins: it supplies the default account
           // name for sites the Key does not spell out.
-          locations: r[7], appConfig: r[8]
+          locations: r[7], appConfig: r[8], timeclockLinks: r[9]
         };
       });
   }

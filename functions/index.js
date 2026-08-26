@@ -95,6 +95,11 @@ const COLLECTIONS = {
   /* App-level settings an admin owns. Keyed by a stable id so they upsert like
      any other collection -- currently the RC (Salesforce) base URL, which turns
      a stored record id into a link somebody can click. */
+  /* A timeclock id joined to a badge by hand, for people the reports spell
+     differently. Keyed by the WFM id, so re-linking replaces rather than stacks. */
+  timeclockLinks:{ path: 'admin/timeclock-links.json',   responseKey: 'timeclockLinks',
+                  fields: { eid: 'str', badge: 'str', name: 'str', rosterName: 'str',
+                            linkedBy: 'str', linkedAt: 'str' } },
   appConfig:    { path: 'admin/config.json',             responseKey: 'appConfig',
                   fields: { key: 'str', value: 'str', label: 'str' } },
   locations:    { path: 'admin/locations.json',          responseKey: 'locations',

@@ -589,11 +589,30 @@
     if (byN) return { profile: byN, how: 'name' };
     return { profile: null, how: '' };
   }
-  function linkRoster(rows, profiles, normBadge) {
+  /* `links` maps a timeclock id to a badge, from somebody having connected the
+     two by hand. It is tried FIRST and beats every automatic rule: a person
+     looked at both records and decided, which is worth more than a name that
+     happens to line up. It is also the only way to fix a name the reports spell
+     differently, since no amount of matching will join those.
+
+     Rows that reach no profile keep an empty badge and are counted by
+     unlinkedRows() -- silently dropping them is what let a handful of people
+     disappear from coverage without anyone noticing. */
+  function linkRoster(rows, profiles, normBadge, links) {
     if (!profiles || !profiles.size) return rows;
     var norm = normBadge || function (v) { return String(v == null ? '' : v).trim(); };
     var byName = rosterNameIndex(profiles);
+    var manual = links || new Map();
     rows.forEach(function (row) {
+      var byLink = row.wfmId ? manual.get(String(row.wfmId).trim().toUpperCase()) : null;
+      if (byLink && profiles.get(norm(byLink))) {
+        var p = profiles.get(norm(byLink));
+        row.badge = p.badge;
+        row.market = p.market || '';
+        row.rosterName = p.name || '';
+        row.rosterMatch = 'linked';
+        return;
+      }
       var hit = resolveProfile(profiles, norm, byName, row.wfmId, row.wfmIdSuffix, row.name);
       if (!hit.profile) return;
       row.badge = hit.profile.badge;
@@ -602,6 +621,21 @@
       row.rosterMatch = hit.how;
     });
     return rows;
+  }
+
+  // Everyone on the on-premise report who reached no profile. These are the rows
+  // a person has to connect by hand; until they do, that associate is invisible
+  // to attendance, points and every profile view.
+  function unlinkedRows(rows) {
+    return (rows || []).filter(function (r) { return !r.badge && r.inPresence; });
+  }
+  // A timeclock id -> badge map from the stored links collection.
+  function linkIndex(records) {
+    var m = new Map();
+    (records || []).forEach(function (r) {
+      if (r && r.eid && r.badge) m.set(String(r.eid).trim().toUpperCase(), String(r.badge));
+    });
+    return m;
   }
 
   /* ---------- persistence shapes ----------
@@ -950,6 +984,8 @@
     overlapOf: overlapOf,
     siteList: siteList,
     linkRoster: linkRoster,
+    unlinkedRows: unlinkedRows,
+    linkIndex: linkIndex,
     personKey: personKey,
     profileKeys: profileKeys,
     isoDateTime: isoDateTime,

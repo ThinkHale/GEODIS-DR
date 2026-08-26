@@ -499,6 +499,14 @@ first and records the split on the request as `transitionHours` and
 `accrualHours`. Editing, cancelling, or deleting the request releases and
 recomputes that allocation, so a request is not deducted twice.
 
+Attendance workbook imports retain dated infractions and approved exceptions as
+individual profile events. Point values follow the policy embedded in the
+source tables (absence 2, late/early-out 1, NCNS 4, approved exceptions 0).
+The headcount tab's `Current Points` value is authoritative: an explicitly
+labeled balance-adjustment event reconciles imported history to that value.
+Rows marked `Y` or `Transition` in a headcount transition column also update the
+associate's transition identifier without overwriting an existing PTO balance.
+
 ### Collection API
 
 `syncReport` serves each collection at `?<name>=1`:

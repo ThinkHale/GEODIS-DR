@@ -24,6 +24,7 @@ const SUITES = [
   { file: 'payroll-endpoint.test.js', name: 'payroll endpoints (functions/index.js)', dom: false },
   { file: 'transition-pto.test.js', name: 'transition PTO allocation', dom: false },
   { file: 'transition-import.test.js', name: 'transition workbook import', dom: false },
+  { file: 'attendance-import.test.js', name: 'attendance workbook import', dom: false },
   { file: 'plx-sync.test.js', name: 'live PLX workbook sync + open orders', dom: false },
   { file: 'report-pairing.test.js', name: 'pairing the two WFM reports', dom: false },
   { file: 'shift-import.test.js', name: 'PLX workbook import + per-associate shift (DOM)', dom: true },

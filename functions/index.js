@@ -35,6 +35,7 @@ const TimeOff = require('./timeoff-core.js');
 const Payroll = require('./payroll-core.js');
 const TransitionImport = require('./transition-import.js');
 const TransitionPto = require('./transition-pto.js');
+const AttendanceImport = require('./attendance-import.js');
 const ShiftKey = require('./shift-key.js');
 
 // Shared secret proving a request came from our Power Automate flow.
@@ -57,7 +58,8 @@ const OVERRIDES_PATH = 'overrides/overrides.json';   // badge -> manual status o
 // requests, and a requisition is not tied to a badge at all.
 const COLLECTIONS = {
   attendance:   { path: 'attendance/events.json',        responseKey: 'attendance',
-                  fields: { badge: 'str', date: 'str', type: 'str', minutes: 'num', points: 'num', notes: 'str' } },
+                  fields: { badge: 'str', name: 'str', date: 'str', type: 'str', minutes: 'num', points: 'num', notes: 'str',
+                            source: 'str', importRef: 'str', location: 'str', shift: 'str' } },
   timeoff:      { path: 'timeoff/requests.json',         responseKey: 'timeOff',
                   fields: { badge: 'str', name: 'str', type: 'str', start: 'str', end: 'str', hours: 'num',
                             status: 'str', notes: 'str', shift: 'str', location: 'str', source: 'str',
@@ -532,6 +534,33 @@ async function handleTransitionImport(req, res) {
   } });
 }
 
+async function handleAttendanceImport(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
+  if (!SYNC_KEY.value() || req.get('x-sync-key') !== SYNC_KEY.value()) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
+  const body = req.body || {}; if (!body.plxBase64 || !body.redbullBase64) { res.status(400).json({ ok: false, error: 'Both workbook files are required' }); return; }
+  const profiles = await rosterProfiles(); if (!profiles.length) { res.status(503).json({ ok: false, error: 'No roster snapshot is available' }); return; }
+  const byName = Intake.buildNameIndex(profiles, Sched.rosterKey), now = new Date().toISOString(); let built;
+  try {
+    built = AttendanceImport.build(Buffer.from(body.plxBase64, 'base64'), Buffer.from(body.redbullBase64, 'base64'), {
+      byName, rosterKey: Sched.rosterKey, asOf: now.slice(0, 10), plxSource: String(body.plxName || 'PLX - Geodis Spreadsheet.xlsx').slice(0, 200),
+      redbullSource: String(body.redbullName || 'Redbull Attendance Tracker_2026.xlsx').slice(0, 200)
+    });
+  } catch (err) { res.status(400).json({ ok: false, error: 'The workbooks could not be read: ' + err.message }); return; }
+  const existing = await readJsonArray(COLLECTIONS.attendance.path), byId = new Map(existing.map(x => [x.id, x]));
+  built.events.forEach(x => byId.set(x.id, Object.assign({}, byId.get(x.id) || {}, sanitizeRecord(x, COLLECTIONS.attendance.fields), { id: x.id, updatedAt: now })));
+  await bucket.file(COLLECTIONS.attendance.path).save(JSON.stringify(Array.from(byId.values())), { contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' } });
+  const pto = await readJsonArray(COLLECTIONS.associatePto.path), ptoByBadge = new Map(pto.filter(x => x.badge).map(x => [String(x.badge), x]));
+  built.transitions.forEach(x => {
+    if (!x.badge) return; const old = ptoByBadge.get(String(x.badge));
+    if (old) { old.transitionAssociate = 'true'; old.updatedAt = now; }
+    else { const rec = { id: 'TP-HC-' + x.badge, badge: x.badge, name: x.name, transitionAssociate: 'true', transitionPtoInitial: 0,
+      transitionPtoBalance: 0, source: body.plxName || 'PLX headcount', importedAt: now, notes: 'Transition flag imported from ' + x.source, updatedAt: now };
+      pto.push(rec); ptoByBadge.set(String(x.badge), rec); }
+  });
+  await bucket.file(COLLECTIONS.associatePto.path).save(JSON.stringify(pto), { contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' } });
+  res.status(200).json({ ok: true, imported: built.summary, attendanceCount: byId.size, associatePtoCount: pto.length });
+}
+
 async function handlePtoIntake(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
   const expected = SYNC_KEY.value();
@@ -976,6 +1005,7 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
     }
     if (req.query.ptoIntake !== undefined) { await handlePtoIntake(req, res); return; }
     if (req.query.transitionImport !== undefined) { await handleTransitionImport(req, res); return; }
+    if (req.query.attendanceImport !== undefined) { await handleAttendanceImport(req, res); return; }
     if (req.query.discrepancyIntake !== undefined) { await handleDiscrepancyIntake(req, res); return; }
     if (req.query.payroll !== undefined) { await handlePayroll(req, res); return; }
     if (req.query.plx !== undefined) { await handlePlx(req, res); return; }

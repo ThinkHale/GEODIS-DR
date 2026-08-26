@@ -66,15 +66,15 @@ const bucket = { file: p2 => ({ save: async b => { files[p2] = b; } }) };
 async function readJsonFile(p2) { try { return JSON.parse(files[p2]); } catch (e) { return {}; } }
 function setKvCors() {}
 const SYNC_KEY = { value: () => KEY };
-let PLX_FLOW_URL = { value: () => '' };
+let flowUrl = '';
 let fetched = null;
 const fetchStub = async (u, o) => { fetched = { u, o }; return { ok: true, status: 202 }; };
 
 const built = new Function(
-  'bucket', 'readJsonFile', 'setKvCors', 'SYNC_KEY', 'PLX_FLOW_URL',
+  'bucket', 'readJsonFile', 'setKvCors', 'SYNC_KEY',
   'NOTES_ORIGIN', 'XLSX', 'ShiftKey', 'Sched', 'fetch', 'console',
   consts + helpers + handler + '\nreturn {handlePlx, handlePlxRefresh, COLLECTIONS};'
-)(bucket, readJsonFile, setKvCors, SYNC_KEY, { value: () => PLX_FLOW_URL.value() },
+)(bucket, readJsonFile, setKvCors, SYNC_KEY,
   NOTES_ORIGIN, XLSX, SK, Sched, fetchStub, console);
 const { handlePlx, handlePlxRefresh, COLLECTIONS } = built;
 
@@ -151,10 +151,13 @@ const shifts = () => { try { return JSON.parse(files[COLLECTIONS.shifts.path]); 
   r = await call(handlePlxRefresh, { method: 'POST', query: {}, get: () => NOTES_ORIGIN });
   t('with no flow configured it still succeeds', r.code === 200);
   t('but says it did not trigger', r.body.triggered === false);
-  t('and explains why', r.body.message.indexOf('PLX_FLOW_URL') !== -1);
+  t('and explains how to enable it', r.body.message.indexOf('flowUrl') !== -1);
   t('no call was made', fetched === null);
 
-  PLX_FLOW_URL = { value: () => 'https://flow.example/run' };
+  t('a non-https flow URL is refused',
+    (await push({ flowUrl: 'http://insecure.example' })).code === 400);
+  t('setting it needs the sync key', (await push({ flowUrl: 'https://flow.example/run' }, '')).code === 401);
+  t('set from the automation side', (await push({ flowUrl: 'https://flow.example/run' })).body.configured === true);
   r = await call(handlePlxRefresh, { method: 'POST', query: {}, get: () => NOTES_ORIGIN });
   t('with a flow configured it triggers', r.body.triggered === true);
   t('calling the flow URL', fetched.u === 'https://flow.example/run');

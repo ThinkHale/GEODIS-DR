@@ -38,13 +38,6 @@ const ShiftKey = require('./shift-key.js');
 // Shared secret proving a request came from our Power Automate flow.
 // Set with: firebase functions:secrets:set SYNC_KEY
 const SYNC_KEY = defineSecret('SYNC_KEY');
-/* Optional. A Power Automate "When an HTTP request is received" flow that reads
-   the PLX workbook from SharePoint and posts it back here. Held server-side so
-   the browser never sees the URL -- anyone holding it could trigger the flow.
-   Set with: firebase functions:secrets:set PLX_FLOW_URL
-   Without it the refresh button still works; it just reloads what was last
-   pushed rather than asking for a fresh pull. */
-const PLX_FLOW_URL = defineSecret('PLX_FLOW_URL');
 
 admin.initializeApp();
 const bucket = admin.storage().bucket();
@@ -100,6 +93,12 @@ const MAX_LOG_ENTRIES = 40;
 // Hours submitted to Beeline, one document per pay period. Each pull is compared
 // with the one before it; what moved after the period closed is the point.
 const PLX_META_PATH = 'plx/sync.json';     // when the workbook last landed, and what came out of it
+/* The on-demand refresh flow's URL. Deliberately NOT a Firebase secret: a
+   declared secret must exist before the function can deploy at all, which would
+   make an optional feature block every deploy. It lives in the bucket instead,
+   writable only with the sync key and never sent to the browser -- anyone
+   holding that URL could trigger the flow. */
+const PLX_CONFIG_PATH = 'plx/config.json';
 const PAYROLL_DIR = 'payroll/periods';    // {weekEnding}.json
 const MAX_HOURS_ROWS = 20000;
 const MAX_SNAPSHOTS = 40;
@@ -698,13 +697,31 @@ async function handlePlx(req, res) {
 
   if (req.method === 'GET') {
     res.set('Cache-Control', 'no-cache, max-age=0');
-    res.status(200).json({ ok: true, sync: await readJsonFile(PLX_META_PATH) });
+    const meta = await readJsonFile(PLX_META_PATH);
+    const conf = await readJsonFile(PLX_CONFIG_PATH);
+    meta.onDemand = !!(conf && conf.flowUrl);
+    res.status(200).json({ ok: true, sync: meta });
     return;
   }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
   if (req.get('x-sync-key') !== SYNC_KEY.value()) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
 
   const body = req.body || {};
+
+  // Setting the on-demand refresh flow's URL, rather than pushing a workbook.
+  if (body.flowUrl !== undefined) {
+    const flowUrl = String(body.flowUrl || '').trim().slice(0, 2000);
+    if (flowUrl && !/^https:\/\//i.test(flowUrl)) {
+      res.status(400).json({ ok: false, error: 'flowUrl must be an https URL, or empty to clear it' });
+      return;
+    }
+    await bucket.file(PLX_CONFIG_PATH).save(JSON.stringify({ flowUrl: flowUrl, updatedAt: new Date().toISOString() }), {
+      contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+    });
+    res.status(200).json({ ok: true, configured: !!flowUrl });
+    return;
+  }
+
   const b64 = String(body.fileBase64 || body.file || '');
   if (!b64) { res.status(400).json({ ok: false, error: 'Missing fileBase64' }); return; }
   let wb;
@@ -814,15 +831,15 @@ async function handlePlxRefresh(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
   if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
 
-  let url = '';
-  try { url = PLX_FLOW_URL.value(); } catch (err) { url = ''; }
+  const cfg = await readJsonFile(PLX_CONFIG_PATH);
+  const url = String((cfg && cfg.flowUrl) || '');
   if (!url) {
     // Not configured is not an error: the scheduled push still works, so say
     // what is and is not happening rather than failing opaquely.
     res.status(200).json({
       ok: true, triggered: false,
       message: 'No on-demand flow is configured, so this shows the last workbook that was pushed. ' +
-        'Set the PLX_FLOW_URL secret to let this button ask for a fresh pull.'
+        'POST {"flowUrl":"…"} to ?plx=1 with the sync key to let this button ask for a fresh pull.'
     });
     return;
   }
@@ -845,7 +862,7 @@ function parseToState(buffer, side) {
   return Core.buildState(aoa, side);
 }
 
-exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY, PLX_FLOW_URL] }, async (req, res) => {
+exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, async (req, res) => {
   try {
     // Shared browser stores (notes + status overrides). Separate from the sync path.
     if (req.query.notes !== undefined) {

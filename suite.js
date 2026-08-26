@@ -54,7 +54,7 @@
     notes: {},              // shared badge -> note, published with the roster
     updatedAt: null,
     profiles: new Map(),
-    stores: { attendance: [], timeOff: [], requisitions: [], performance: [], shifts: [] },
+    stores: { attendance: [], timeOff: [], requisitions: [], performance: [], shifts: [], discrepancies: [], associatePto: [] },
     connectFor: '', connectQuery: '', connectKind: 'timeoff',
     payroll: { periods: [], week: '', period: null, tab: 'discrepancies', loading: false },
     plx: { sync: null, busy: false, note: '' },   // the live workbook from SharePoint
@@ -139,6 +139,7 @@
       timeOff: state.stores.timeOff,
       performance: state.stores.performance,
       shifts: state.stores.shifts,
+      associatePto: state.stores.associatePto,
       shiftKeyOf: ScheduleCore.rosterKey,
       notes: state.notes
     });
@@ -523,7 +524,8 @@
       '<p>Badge ' + esc(p.badge) + (p.empNumber ? ' · Employee #' + esc(p.empNumber) : '') +
       ' · ' + esc(p.market) + '</p>' +
       (p.altName ? '<p class="sub">Also on file as “' + esc(p.altName) + '”</p>' : '') + '</div>' +
-      '<div class="profile-chips">' + statusChip(p) + reconChip(p) + '</div>' +
+      '<div class="profile-chips">' + statusChip(p) + reconChip(p) +
+      (p.transitionAssociate ? '<span class="status info">Transition associate</span>' : '') + '</div>' +
       '<button class="suite-btn" data-nav="associates">← Roster</button></div>' +
 
       '<div class="metric-strip">' +
@@ -531,6 +533,8 @@
       metric('Performance score', p.score == null ? '—' : p.score, m ? 'Period ' + (m.period || 'current') : 'No performance record') +
       metric('Time-off requests', p.timeOff.length,
         p.timeOff.filter(function (t) { return TimeOffCore.needsAction(t.status); }).length + ' awaiting action') +
+      (p.transitionAssociate ? metric('Transition PTO', p.transitionPtoBalance.toFixed(2) + ' hrs',
+        'Original imported balance ' + p.transitionPtoInitial.toFixed(2) + ' hrs', p.transitionPtoBalance ? 'green' : 'orange') : '') +
       metric('Assignment', p.status, p.status === 'Ended' && p.endDate ? 'Ended ' + esc(p.endDate) : 'Per RC / Beeline snapshot') +
       '</div>' +
 
@@ -1322,7 +1326,8 @@
             (t.source ? '<div class="sub">' + esc(t.source) + '</div>' : '') + '</td>' +
             '<td><span class="row-type ' + (t.type === 'VTO' ? 'vto' : t.type === 'Sick' ? 'sick' : '') + '">' + esc(t.type) + '</span></td>' +
             '<td>' + esc(t.start) + (t.end && t.end !== t.start ? ' → ' + esc(t.end) : '') + '</td>' +
-            '<td>' + esc(t.hours || 0) + '</td>' +
+            '<td>' + esc(t.hours || 0) + (Number(t.transitionHours) > 0 ? '<div class="sub">' +
+              esc(t.transitionHours) + ' transition · ' + esc(t.accrualHours || 0) + ' accrual</div>' : '') + '</td>' +
             '<td>' + statusSelect(t) + '</td>' +
             '<td>' + tieIn(t) + '</td>' +
             '<td>' + (p ? '' : '<button class="suite-btn" data-connect="' + esc(t.id) + '">Connect…</button> ') +
@@ -1763,7 +1768,9 @@
      Every write goes to the shared collection first; the local list and the
      re-render follow. A failed write is surfaced, never silently swallowed. */
   function persist(name, record, localKey) {
-    return SuiteData.saveRecord(name, record).then(function () {
+    return SuiteData.saveRecord(name, record).then(function (saved) {
+      if (saved && saved.record) record = saved.record;
+      if (saved && saved.associatePto) state.stores.associatePto = saved.associatePto;
       var list = state.stores[localKey], i = list.findIndex(function (x) { return x.id === record.id; });
       if (i === -1) list.push(record); else list[i] = Object.assign({}, list[i], record);
       rebuild(); render();

@@ -488,7 +488,16 @@ timeoff/requests.json              [] PTO / VTO / sick requests (manual + form i
 requisitions/requisitions.json     [] open positions (not badge-keyed)
 performance/metrics.json           [] scorecard metrics per badge per period
 shifts/assignments.json            [] shift tag per associate (EID- or name-keyed)
+associates/pto.json                 [] transition-associate flag and remaining transition PTO
+payroll/discrepancies.json          [] payroll discrepancy workflow records
 ```
+
+Transition PTO is stored separately from the daily roster because the roster is
+rebuilt from RC / Beeline. When an approved PTO request belongs to a transition
+associate, the time-off write allocates hours against `transitionPtoBalance`
+first and records the split on the request as `transitionHours` and
+`accrualHours`. Editing, cancelling, or deleting the request releases and
+recomputes that allocation, so a request is not deducted twice.
 
 ### Collection API
 

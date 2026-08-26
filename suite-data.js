@@ -25,7 +25,8 @@
     requisitions: 'requisitions',
     performance: 'performance',
     shifts: 'shifts',
-    discrepancies: 'discrepancies'
+    discrepancies: 'discrepancies',
+    associatePto: 'associatePto'
   };
 
   /* Attendance occurrence thresholds. GEODIS policy varies by site, so these are
@@ -111,6 +112,7 @@
         // Joined below.
         attendance: [], points: 0, standing: '', standingCls: '',
         timeOff: [], performance: null, score: null, note: '',
+        transitionAssociate: false, transitionPtoInitial: 0, transitionPtoBalance: 0,
         shift: '', shiftBuilding: '', shiftHours: '', shiftSource: ''
       });
     });
@@ -130,6 +132,13 @@
 
     attach(byBadge, stores.attendance, 'attendance');
     attach(byBadge, stores.timeOff, 'timeOff');
+    (stores.associatePto || []).forEach(function (r) {
+      var p = byBadge.get(normBadge(r.badge));
+      if (!p) return;
+      p.transitionAssociate = r.transitionAssociate === true || r.transitionAssociate === 'true';
+      p.transitionPtoInitial = num(r.transitionPtoInitial);
+      p.transitionPtoBalance = num(r.transitionPtoBalance);
+    });
 
     // Performance: keep the most recent period per badge.
     (stores.performance || []).forEach(function (m) {
@@ -311,12 +320,12 @@
   // Load every shared collection at once. Individual failures degrade to an
   // empty list rather than taking the whole suite down.
   function loadAll() {
-    return Promise.all(['attendance', 'timeoff', 'requisitions', 'performance', 'shifts', 'discrepancies']
+    return Promise.all(['attendance', 'timeoff', 'requisitions', 'performance', 'shifts', 'discrepancies', 'associatePto']
       .map(function (n) { return loadCollection(n); }))
       .then(function (r) {
         return {
           attendance: r[0], timeOff: r[1], requisitions: r[2],
-          performance: r[3], shifts: r[4], discrepancies: r[5]
+          performance: r[3], shifts: r[4], discrepancies: r[5], associatePto: r[6]
         };
       });
   }

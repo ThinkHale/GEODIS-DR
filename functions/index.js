@@ -33,6 +33,8 @@ const Sched = require('./schedule-core.js');
 const Intake = require('./form-intake.js');
 const TimeOff = require('./timeoff-core.js');
 const Payroll = require('./payroll-core.js');
+const TransitionImport = require('./transition-import.js');
+const TransitionPto = require('./transition-pto.js');
 const ShiftKey = require('./shift-key.js');
 
 // Shared secret proving a request came from our Power Automate flow.
@@ -60,7 +62,13 @@ const COLLECTIONS = {
                   fields: { badge: 'str', name: 'str', type: 'str', start: 'str', end: 'str', hours: 'num',
                             status: 'str', notes: 'str', shift: 'str', location: 'str', source: 'str',
                             submittedAt: 'str', statusUpdatedAt: 'str', statusUpdatedBy: 'str',
-                            connectedBy: 'str', connectedAt: 'str', statusHistory: 'log' } },
+                            connectedBy: 'str', connectedAt: 'str', statusHistory: 'log',
+                            transitionHours: 'num', accrualHours: 'num', transitionAppliedAt: 'str',
+                            legacyBalanceApplied: 'str', importRef: 'str' } },
+  associatePto: { path: 'associates/pto.json',            responseKey: 'associatePto',
+                  fields: { badge: 'str', name: 'str', transitionAssociate: 'str',
+                            transitionPtoInitial: 'num', transitionPtoBalance: 'num',
+                            source: 'str', sourceAccount: 'str', importedAt: 'str', notes: 'str' } },
   requisitions: { path: 'requisitions/requisitions.json', responseKey: 'requisitions',
                   fields: { title: 'str', department: 'str', shift: 'str', market: 'str', openings: 'num',
                             filled: 'num', priority: 'str', status: 'str', due: 'str', notes: 'str',
@@ -223,6 +231,7 @@ async function handleCollection(req, res, opts) {
   const body = req.body || {};
   const now = new Date().toISOString();
   let list;
+  let associatePto;
 
   if (Array.isArray(body.records)) {
     // Bulk replace, used by report imports.
@@ -242,6 +251,10 @@ async function handleCollection(req, res, opts) {
     const idx = list.findIndex(x => x && x.id === id);
     if (body._delete) {
       if (idx === -1) { res.status(200).json({ ok: true, deleted: false }); return; }
+      if (opts.responseKey === 'timeOff') {
+        associatePto = await readJsonArray(COLLECTIONS.associatePto.path);
+        TransitionPto.release(list[idx], associatePto, now);
+      }
       list.splice(idx, 1);
     } else {
       if (idx === -1 && list.length >= MAX_COLLECTION_RECORDS) {
@@ -250,8 +263,13 @@ async function handleCollection(req, res, opts) {
       const rec = sanitizeRecord(body, opts.fields);
       rec.id = id;
       rec.updatedAt = now;
-      if (idx === -1) list.push(rec);
-      else list[idx] = Object.assign({}, list[idx], rec);
+      const merged = idx === -1 ? rec : Object.assign({}, list[idx], rec);
+      if (opts.responseKey === 'timeOff') {
+        associatePto = await readJsonArray(COLLECTIONS.associatePto.path);
+        TransitionPto.apply(idx === -1 ? null : list[idx], merged, associatePto, now);
+      }
+      if (idx === -1) list.push(merged);
+      else list[idx] = merged;
     }
   }
 
@@ -259,8 +277,16 @@ async function handleCollection(req, res, opts) {
     contentType: 'application/json',
     metadata: { cacheControl: 'no-cache, max-age=0' }
   });
-  res.status(200).json({ ok: true, count: list.length });
+  if (associatePto) {
+    await bucket.file(COLLECTIONS.associatePto.path).save(JSON.stringify(associatePto), {
+      contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+    });
+  }
+  res.status(200).json({ ok: true, count: list.length,
+    record: body.id ? list.find(x => x && x.id === String(body.id).trim()) || null : null,
+    associatePto: associatePto || undefined });
 }
+
 
 /* ---------- date-partitioned documents (schedule + coverage) ----------
    A schedule document is the plan for one week; a coverage document is every
@@ -450,6 +476,60 @@ async function rosterProfiles() {
   } catch (err) {
     return [];
   }
+}
+
+/* ---------- one-time transition PTO / payroll workbook import ----------
+   Authenticated like the report feeds. Records are merged by deterministic id,
+   so re-running the same workbook is safe and does not erase newer work. */
+async function handleTransitionImport(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
+  if (!SYNC_KEY.value() || req.get('x-sync-key') !== SYNC_KEY.value()) {
+    res.status(401).json({ ok: false, error: 'Unauthorized' }); return;
+  }
+  const b64 = req.body && req.body.fileBase64;
+  if (!b64) { res.status(400).json({ ok: false, error: 'Missing fileBase64' }); return; }
+  const profiles = await rosterProfiles();
+  if (!profiles.length) { res.status(503).json({ ok: false, error: 'No roster snapshot is available' }); return; }
+  const byName = Intake.buildNameIndex(profiles, Sched.rosterKey);
+  let built;
+  try {
+    built = TransitionImport.build(Buffer.from(b64, 'base64'), {
+      byName, rosterKey: Sched.rosterKey, source: String((req.body && req.body.fileName) || 'Transition PTO workbook').slice(0, 200),
+      now: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: 'The workbook could not be read: ' + err.message }); return;
+  }
+  const required = ['Transition Employees PTO Balanc', 'PTO Request Off', 'Payroll Discrepencies'];
+  const missing = required.filter(n => built.sheets.indexOf(n) === -1);
+  if (missing.length) { res.status(400).json({ ok: false, error: 'Missing sheet(s): ' + missing.join(', ') }); return; }
+
+  async function merge(path, incoming, preserveWorkflow) {
+    const existing = await readJsonArray(path), byId = new Map(existing.map(x => [x.id, x]));
+    incoming.forEach(x => {
+      const old = byId.get(x.id);
+      if (old && preserveWorkflow) {
+        ['status', 'statusUpdatedAt', 'statusUpdatedBy', 'statusHistory', 'connectedBy', 'connectedAt']
+          .forEach(k => { if (old[k] !== undefined) x[k] = old[k]; });
+        if (old.badge) x.badge = old.badge;
+      }
+      byId.set(x.id, Object.assign({}, old || {}, x, { updatedAt: new Date().toISOString() }));
+    });
+    const out = Array.from(byId.values());
+    await bucket.file(path).save(JSON.stringify(out), { contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' } });
+    return out.length;
+  }
+  const counts = {
+    associatePto: await merge(COLLECTIONS.associatePto.path, built.associatePto, false),
+    timeOff: await merge(COLLECTIONS.timeoff.path, built.timeOff, true),
+    discrepancies: await merge(COLLECTIONS.discrepancies.path, built.discrepancies, true)
+  };
+  res.status(200).json({ ok: true, counts, imported: {
+    transitionAssociates: built.associatePto.length, timeOff: built.timeOff.length, discrepancies: built.discrepancies.length,
+    unmatchedTransition: built.associatePto.filter(x => !x.badge).length,
+    unmatchedTimeOff: built.timeOff.filter(x => !x.badge).length,
+    unmatchedDiscrepancies: built.discrepancies.filter(x => !x.badge).length
+  } });
 }
 
 async function handlePtoIntake(req, res) {
@@ -895,6 +975,7 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
       return;
     }
     if (req.query.ptoIntake !== undefined) { await handlePtoIntake(req, res); return; }
+    if (req.query.transitionImport !== undefined) { await handleTransitionImport(req, res); return; }
     if (req.query.discrepancyIntake !== undefined) { await handleDiscrepancyIntake(req, res); return; }
     if (req.query.payroll !== undefined) { await handlePayroll(req, res); return; }
     if (req.query.plx !== undefined) { await handlePlx(req, res); return; }

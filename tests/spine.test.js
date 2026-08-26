@@ -26,6 +26,7 @@ const stores={
     {id:'p3',badge:'1003',period:'2026-08',quality:70}                  // partial metrics
   ],
   notes:{'1003':{note:'Waiting on I-9'}}
+  ,associatePto:[{id:'TP-1001',badge:'1001',transitionAssociate:'true',transitionPtoInitial:10,transitionPtoBalance:6}]
 };
 
 const P = SuiteData.buildProfiles(records, stores);
@@ -71,6 +72,7 @@ t('attendance NOT blended into score', P.get('1002').points===2 && P.get('1002')
 
 console.log('— time off join —');
 t('1001 has the PTO request', P.get('1001').timeOff.length===1);
+t('transition identifier and balance join to profile', P.get('1001').transitionAssociate===true && P.get('1001').transitionPtoBalance===6);
 t('no time off elsewhere', P.get('1004').timeOff.length===0);
 
 console.log('— misc —');

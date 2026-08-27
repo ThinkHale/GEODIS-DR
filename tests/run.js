@@ -31,6 +31,7 @@ const SUITES = [
   { file: 'timeclock-link.test.js', name: 'connecting a timeclock id to a profile', dom: false },
   { file: 'rc-links.test.js', name: 'RC record ids for deep links', dom: false },
   { file: 'derived-schedule.test.js', name: 'schedule derived from the workbook', dom: false },
+  { file: 'schedule-source.test.js', name: 'which schedule the floor is measured against (DOM)', dom: true },
   { file: 'report-pairing.test.js', name: 'pairing the two WFM reports', dom: false },
   { file: 'shift-import.test.js', name: 'PLX workbook import + per-associate shift (DOM)', dom: true },
   { file: 'coverage-review.test.js', name: 'reviewing a stored check (DOM)', dom: true },

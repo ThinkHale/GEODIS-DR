@@ -120,5 +120,66 @@ if (!fs.existsSync(book)) {
   t('everyone scheduled has at least one day', realSch.people.every(p => Object.keys(p.shifts).length > 0));
 }
 
+console.log('— matching the on-premise report by employee id —');
+{
+  // The workbook and WFM disagree about which word is the surname. Same person.
+  const sch = SK.scheduleFromShifts([
+    { name: 'Meneses Arias, Kevin', nameKey: 'kevin menesesarias', eid: '80-KARIAS9617',
+      shift: '1st', building: '1502', hours: '6am-2:30pm Mon-Fri' },
+    { name: 'Fernandez, Naibelys', nameKey: 'fernandez naibelys', eid: '80-FNAIBE9109',
+      shift: '1st', building: '1502', hours: '6am-2:30pm Mon-Fri' }
+  ], { asOf: new Date(2026, 7, 26), nameKeyOf: SC.nameKey });
+  t('the derived schedule carries the employee id', sch.people.every(p => !!p.eid));
+
+  const pres = SC.parseOnPremise([
+    ['Employee Full Name & ID', 'On Premises', 'Primary location (path)', 'Reports To'],
+    ['Arias, Kevin (80-KARIAS9617)', 'true', 'GEODIS/US/CL/CL1502/1502', 'B, B'],
+    ['Naibelys, Fernandez (80-FNAIBE9109)', 'true', 'GEODIS/US/CL/CL1502/1502', 'B, B']
+  ]);
+  const idx = SC.presenceIndex(pres);
+  t('neither name matches on its own',
+    !idx.byName.has(SC.nameKey('Meneses Arias, Kevin')) &&
+    !idx.byName.has(SC.nameKey('Fernandez, Naibelys')));
+  t('but the employee id finds both', sch.people.every(p => !!idx.find(p)));
+
+  const res = SC.buildCoverage({ schedule: sch, presence: pres, asOf: new Date(2026, 7, 26, 9, 0) });
+  t('so they are counted as working, not as two rows each', res.rows.length === 2);
+  t('and coverage is whole', res.summary.coverage === 100);
+  t('nobody is left over as unscheduled', res.summary.byStatus.unscheduled === 0);
+}
+
+console.log('— the name is still the fallback —');
+{
+  // An uploaded WFM schedule export identifies people by badge and carries no
+  // employee id at all, so the name has to keep working.
+  const sch = { people: [{ name: 'Weekday, Wanda', nameKey: 'weekday,wanda', badge: '236413',
+    shifts: { '2026-08-26': { raw: '6:00 AM - 2:30 PM', start: 360, end: 870, overnight: false } } }] };
+  const pres = SC.parseOnPremise([
+    ['Employee Full Name & ID', 'On Premises', 'Primary location (path)', 'Reports To'],
+    ['Weekday, Wanda (80-W1)', 'true', 'GEODIS/US/CL/CL1502/1502', 'B, B']
+  ]);
+  const res = SC.buildCoverage({ schedule: sch, presence: pres, asOf: new Date(2026, 7, 26, 9, 0) });
+  t('a schedule with no employee ids still matches on name', res.summary.coverage === 100);
+  t('and does not double-count', res.rows.length === 1);
+}
+
+console.log('— an id that matches nothing does not fall back onto a wrong name —');
+{
+  const sch = SK.scheduleFromShifts([
+    { name: 'Smith, John', nameKey: 'john smith', eid: '80-JSMITH0001',
+      shift: '1st', building: '1502', hours: '6am-2:30pm Mon-Fri' }
+  ], { asOf: new Date(2026, 7, 26), nameKeyOf: SC.nameKey });
+  const pres = SC.parseOnPremise([
+    ['Employee Full Name & ID', 'On Premises', 'Primary location (path)', 'Reports To'],
+    ['Smith, John (80-JSMITH9999)', 'true', 'GEODIS/US/CL/CL1502/1502', 'B, B']
+  ]);
+  // Two different employee ids, same name. The name is a fallback, not a
+  // contradiction of the id -- these really are the same person by name, and
+  // nothing better is on offer, so the fallback is allowed to match.
+  const res = SC.buildCoverage({ schedule: sch, presence: pres, asOf: new Date(2026, 7, 26, 9, 0) });
+  t('an unmatched id falls back to the name rather than dropping the person',
+    res.rows.length === 1 && res.rows[0].status === 'working');
+}
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

@@ -858,11 +858,15 @@
         state.coverage.storedWeek = r[0];
         state.coverage.storedDay = r[1];
         state.coverage.dates = r[2] || [];
-        // A stored week also means the coverage view works on a fresh browser
-        // with only the on-premise export dropped in.
-        if (!state.coverage.schedule && r[0] && r[0].people && r[0].people.length) {
-          state.coverage.schedule = storedWeekToParsed(r[0]);
-          state.coverage.scheduleFile = r[0].fileName || 'Stored schedule';
+        /* A stored week also means the coverage view works on a fresh browser
+           with only the on-premise export dropped in -- but it is held aside
+           rather than adopted here. This runs before the shift tags have
+           necessarily loaded, and a WFM export from earlier in the week would
+           otherwise win over a workbook uploaded this morning without anybody
+           choosing it. activeSchedule() decides once both are known. */
+        if (r[0] && r[0].people && r[0].people.length) {
+          state.coverage.storedSchedule = storedWeekToParsed(r[0]);
+          state.coverage.storedScheduleFile = r[0].fileName || 'Stored schedule';
         }
         render();
       });
@@ -908,13 +912,27 @@
      a standing schedule cannot. */
   function activeSchedule() {
     var c = state.coverage;
+    // A schedule dropped in by hand wins, because that is a deliberate act and
+    // it is the only source that knows a specific day's PTO and holidays.
     if (c.schedule) return c.schedule;
     var tags = state.stores.shifts || [];
-    if (!tags.length) return null;
-    return ShiftKey.scheduleFromShifts(tags, {
-      asOf: coverageAsOf(),
-      nameKeyOf: ScheduleCore.nameKey     // the form buildCoverage joins on
-    });
+    if (tags.length) {
+      return ShiftKey.scheduleFromShifts(tags, {
+        asOf: coverageAsOf(),
+        nameKeyOf: ScheduleCore.nameKey     // the form buildCoverage joins on
+      });
+    }
+    // No workbook yet: fall back to whatever week the server still holds.
+    return c.storedSchedule || null;
+  }
+  /* The schedule whose date range a warning should be measured against. The
+     derived one always covers today by construction, so it needs no warning and
+     returns nothing here. */
+  function effectiveScheduleMeta() {
+    var c = state.coverage;
+    if (c.schedule) return c.schedule;
+    if ((state.stores.shifts || []).length) return null;
+    return c.storedSchedule || null;
   }
   function buildCoverageResult() {
     var c = state.coverage;
@@ -1033,17 +1051,21 @@
   function scheduleSourceNote(res) {
     if (res.scheduleSource !== 'workbook') return '';
     var gaps = res.scheduleGaps || [];
+    var stored = state.coverage.storedSchedule;
     return '<div class="sched-source">Scheduled from the <b>PLX workbook</b>' +
       (gaps.length ? ' · <span class="warn-text">' + gaps.length + ' associate(s) have a shift the Key ' +
         'gives no single set of hours for, so they cannot be scheduled</span>' : '') +
+      (stored ? ' · a stored WFM schedule for the week of ' + esc(stored.periodStart || '?') +
+        ' is not being used; upload one above to override the workbook for a specific day' : '') +
       '</div>';
   }
 
   function covWarnings(res) {
     var c = state.coverage, notes = [];
     var day = ScheduleCore.isoDate(coverageAsOf());
-    if (c.schedule && c.schedule.periodStart && (day < c.schedule.periodStart || day > c.schedule.periodEnd)) {
-      notes.push('The loaded schedule covers ' + c.schedule.periodStart + ' to ' + c.schedule.periodEnd +
+    var meta = effectiveScheduleMeta();
+    if (meta && meta.periodStart && (day < meta.periodStart || day > meta.periodEnd)) {
+      notes.push('The loaded schedule covers ' + meta.periodStart + ' to ' + meta.periodEnd +
         ', which does not include ' + day + '. Load the current week before acting on this.');
     }
     /* An on-premise row that reaches no profile is invisible everywhere else --
@@ -2414,7 +2436,8 @@
     if (e.target.closest('[data-cov-clear]')) {
       if (!confirm('Clear the loaded schedule and on-premise files?')) return;
       state.coverage.schedule = state.coverage.presence = null;
-      state.coverage.scheduleFile = state.coverage.presenceFile = '';
+      state.coverage.storedSchedule = null;
+      state.coverage.scheduleFile = state.coverage.presenceFile = state.coverage.storedScheduleFile = '';
       state.coverage.asOf = null;
       try { sessionStorage.removeItem(SCHED_CACHE); } catch (err) { /* nothing cached */ }
       render();

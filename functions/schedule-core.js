@@ -405,9 +405,42 @@
     });
     return Object.keys(seen).sort();
   }
-  function overlapOf(schedule, presence, byName) {
+  /* How a scheduled person is found in the on-premise report.
+
+     Both reports come out of WFM and both carry the WFM employee id, so where
+     each side has one, matching on it is exact. Matching on the name is not:
+     the workbook and WFM disagree about compound surnames and name order often
+     enough to lose 52 of 289 people at Chicago alone -- "Meneses Arias, Kevin"
+     against WFM's "Arias, Kevin", "Fernandez, Naibelys" against "Naibelys,
+     Fernandez". Those are not typos to be normalised away; they are two systems
+     that genuinely disagree about which word is the surname.
+
+     The name is still the fallback, because an uploaded WFM schedule export
+     identifies people by badge and carries no employee id at all. */
+  function presenceIndex(presence) {
+    var byEid = new Map(), byName = new Map();
+    (presence.people || []).forEach(function (p) {
+      if (p.wfmId) byEid.set(String(p.wfmId).toUpperCase(), p);
+      if (p.nameKey && !byName.has(p.nameKey)) byName.set(p.nameKey, p);
+    });
+    return {
+      byEid: byEid,
+      byName: byName,
+      find: function (person) {
+        if (!person) return null;
+        var eid = person.eid || person.wfmId;
+        if (eid) {
+          var hit = byEid.get(String(eid).toUpperCase());
+          if (hit) return hit;
+        }
+        return person.nameKey ? byName.get(person.nameKey) || null : null;
+      }
+    };
+  }
+
+  function overlapOf(schedule, presence, index) {
     var matched = 0;
-    schedule.people.forEach(function (p) { if (byName.has(p.nameKey)) matched++; });
+    schedule.people.forEach(function (p) { if (index.find(p)) matched++; });
     return {
       scheduled: schedule.people.length,
       onPremise: presence.people.length,
@@ -431,21 +464,23 @@
     var prevKey = isoDate(shiftDays(asOf, -1));
     var nowMin = asOf.getHours() * 60 + asOf.getMinutes();
 
-    var byName = new Map();
-    presence.people.forEach(function (p) { byName.set(p.nameKey, p); });
+    var index = presenceIndex(presence);
 
     var rows = [];
+    // Held by identity rather than by key: a person matched on their employee id
+    // may carry a different name than the on-premise report has for them, so a
+    // name would not reliably strike them off.
     var usedPresence = new Set();
 
     schedule.people.forEach(function (person) {
-      var seenPresence = byName.get(person.nameKey);
-      if (seenPresence) usedPresence.add(person.nameKey);
+      var seenPresence = index.find(person);
+      if (seenPresence) usedPresence.add(seenPresence);
       rows.push(evaluate(person, seenPresence, todayKey, prevKey, nowMin, grace));
     });
 
     // On premise (or expected on premise) but with no row in the weekly schedule.
     presence.people.forEach(function (p) {
-      if (usedPresence.has(p.nameKey)) return;
+      if (usedPresence.has(p)) return;
       rows.push(evaluate(null, p, todayKey, prevKey, nowMin, grace));
     });
 
@@ -454,7 +489,7 @@
       return d !== 0 ? d : a.name.localeCompare(b.name);
     });
 
-    var overlap = overlapOf(schedule, presence, byName);
+    var overlap = overlapOf(schedule, presence, index);
     var bothLoaded = overlap.scheduled > 0 && overlap.onPremise > 0;
     var mismatch = bothLoaded && overlap.matched === 0;
     var warnings = (schedule.warnings || []).concat(presence.warnings || []);
@@ -980,6 +1015,7 @@
     parseOnPremise: parseOnPremise,
     shiftsCovering: shiftsCovering,
     buildCoverage: buildCoverage,
+    presenceIndex: presenceIndex,
     LOW_OVERLAP_RATIO: LOW_OVERLAP_RATIO,
     overlapOf: overlapOf,
     siteList: siteList,

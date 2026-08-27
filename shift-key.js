@@ -448,6 +448,11 @@
         name: r.name,
         nameKey: keyOf(r.name),
         rosterKey: r.nameKey,
+        /* The WFM employee id, which the on-premise report also carries. It is
+           the only exact way to match these two -- the workbook and WFM
+           disagree about compound surnames often enough that the name alone
+           loses about one person in six. */
+        eid: r.eid || '',
         location: r.building || '',
         job: r.shift || '', shifts: shifts, ambiguous: false
       });

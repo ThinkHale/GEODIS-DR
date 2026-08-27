@@ -178,9 +178,21 @@
     var w = key.windows ? key.windows[building + '|' + shift] : null;
     return w && w.length === 1 ? w[0] : null;
   }
+  /* Dept codes on the HC tabs that do not exist in the Key, mapped to the account
+     they were meant to be. These are typos at source -- 18070 for Replay's 18270
+     is a transposition -- so the right fix is in the workbook. Correcting them
+     here means the people on them are scheduled in the meantime rather than
+     dropping out of coverage, and each use is reported so the list cannot rot
+     unnoticed after the workbook is fixed. */
+  var ACCOUNT_ALIASES = {
+    '1517|18070': '18270'      // Replay
+  };
   function accountNumOf(dept) {
     var n = String(dept || '').split('-')[1];
     return n ? n.trim() : '';
+  }
+  function resolveAccount(building, accountNum) {
+    return ACCOUNT_ALIASES[building + '|' + accountNum] || accountNum;
   }
 
   /* ---------- the HC tabs ----------
@@ -390,12 +402,32 @@
       dates.push({ iso: isoOf(d), dow: d.getDay() });
     }
 
+    /* Which shifts each building demonstrably runs: the ones somebody there was
+       actually given hours for. Taken from the records rather than the Key so
+       this still holds on a later page load, when only the stored shift tags are
+       to hand and the workbook is long gone. */
+    var runs = {};
+    (records || []).forEach(function (r) {
+      if (!r || !r.hours || !r.building || !r.shift) return;
+      if (!runs[r.building]) runs[r.building] = {};
+      runs[r.building][r.shift] = true;
+    });
+
     var people = [], withoutHours = [];
     (records || []).forEach(function (r) {
       if (!r || !r.nameKey) return;
       var win = r.hours ? parseKeySchedule(r.hours) : null;
       if (!win || win.start == null) {
-        withoutHours.push({ name: r.name, building: r.building, shift: r.shift });
+        /* Two different things land here. Somebody on a shift their building
+           really runs is a genuine gap -- their Key row is missing, or their dept
+           code is not one the Key lists -- and needs saying. Somebody on a shift
+           that does not exist at their building at all (a "5" typed into a
+           building that runs 1st and 2nd) is a data-entry slip, already reported
+           by validateAgainstKey; repeating it here nags twice about one problem
+           and buries the gaps that can actually be acted on. */
+        if (runs[r.building] && runs[r.building][r.shift]) {
+          withoutHours.push({ name: r.name, building: r.building, shift: r.shift });
+        }
         return;
       }
       var dows = parseDayRange(win.days);
@@ -452,7 +484,8 @@
 
   function toShiftRecords(headcount, key) {
     return headcount.people.map(function (p) {
-      var w = windowFor(key, p.building, p.shift, accountNumOf(p.dept));
+      var acct = resolveAccount(p.building, accountNumOf(p.dept));
+      var w = windowFor(key, p.building, p.shift, acct);
       return {
         id: p.eid ? 'eid:' + p.eid : 'name:' + p.nameKey,
         eid: p.eid,
@@ -462,7 +495,7 @@
         building: p.building,
         dept: p.dept,
         // Denormalised so a profile can show the site and hours without the Key.
-        account: accountOf(key, p.building, p.dept),
+        account: accountOf(key, p.building, p.building + '-' + acct),
         hours: w ? w.raw : '',
         source: 'PLX workbook'
       };
@@ -472,8 +505,22 @@
   /* A shift the building does not run is a typo in the sheet, not a new shift.
      Reported rather than stored silently -- a mistyped tag puts someone in the
      wrong headcount block, where nobody is looking for them. */
+  function aliasWarnings(headcount) {
+    var used = {};
+    (headcount.people || []).forEach(function (p) {
+      var k = p.building + '|' + accountNumOf(p.dept);
+      if (ACCOUNT_ALIASES[k]) used[k] = (used[k] || 0) + 1;
+    });
+    return Object.keys(used).map(function (k) {
+      var parts = k.split('|');
+      return used[k] + ' associate(s) have dept ' + parts[0] + '-' + parts[1] +
+        ', which is not in the Key. Read as ' + parts[0] + '-' + ACCOUNT_ALIASES[k] +
+        '. Correct it in the workbook and this stops being needed.';
+    });
+  }
+
   function validateAgainstKey(headcount, key) {
-    var warnings = [];
+    var warnings = aliasWarnings(headcount);
     if (!key || !key.byBuilding) return warnings;
     var bad = {};
     headcount.people.forEach(function (p) {
@@ -535,6 +582,9 @@
     windowFor: windowFor,
     accountNumOf: accountNumOf,
     toShiftRecords: toShiftRecords,
+    ACCOUNT_ALIASES: ACCOUNT_ALIASES,
+    resolveAccount: resolveAccount,
+    aliasWarnings: aliasWarnings,
     parseDayRange: parseDayRange,
     scheduleFromShifts: scheduleFromShifts,
     accountOf: accountOf,

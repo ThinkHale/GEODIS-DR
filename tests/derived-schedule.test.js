@@ -27,15 +27,23 @@ const recs = [
   { name: 'Weekday, Wanda', nameKey: 'wanda weekday', shift: '1st', building: '1502', hours: '6am-2:30pm Mon-Fri' },
   { name: 'Weekend, Wes', nameKey: 'wes weekend', shift: 'A', building: '1519', hours: '6am-4:30pm Wed-Sat' },
   { name: 'Nights, Nadia', nameKey: 'nadia nights', shift: '3rd', building: '1502', hours: '6pm-2:30am Mon-Fri' },
-  // The Key gives no single set of hours for this one.
-  { name: 'Unknown, Ursula', nameKey: 'ursula unknown', shift: '1st', building: '1517', hours: '' }
+  // 1517 does run a 1st shift -- this one proves it...
+  { name: 'Early, Ed', nameKey: 'ed early', shift: '1st', building: '1517', hours: '6am-2:30pm Mon-Fri' },
+  // ...so the Key giving no hours for this one is a real gap worth reporting.
+  { name: 'Unknown, Ursula', nameKey: 'ursula unknown', shift: '1st', building: '1517', hours: '' },
+  // Whereas 1517 runs no shift "5" at all: a typo, which validateAgainstKey
+  // already reports. Counting it as a scheduling gap too would nag twice.
+  { name: 'Typo, Tom', nameKey: 'tom typo', shift: '5', building: '1517', hours: '' }
 ];
 // A Wednesday.
 const sch = SK.scheduleFromShifts(recs, { asOf: new Date(2026, 7, 26), nameKeyOf: SC.nameKey });
-t('only people with hours are scheduled', sch.people.length === 3);
-t('the rest are reported, not dropped', sch.withoutHours.length === 1);
+t('only people with hours are scheduled', sch.people.length === 4);
+t('a missing Key row for a shift the building runs is reported', sch.withoutHours.length === 1);
 t('by name', sch.withoutHours[0].name === 'Unknown, Ursula');
 t('and warned about', sch.warnings.length === 1 && sch.warnings[0].indexOf('1517 1st') !== -1);
+t('a shift the building does not run is not reported twice',
+  !sch.withoutHours.some(x => x.name === 'Typo, Tom') &&
+  !sch.warnings.some(w => w.indexOf('"5"') !== -1 || w.indexOf('1517 5') !== -1));
 t('flagged as derived, not uploaded', sch.derived === true);
 
 const byKey = k => sch.people.filter(p => p.rosterKey === k)[0];
@@ -78,8 +86,11 @@ t('and is not called an exception', byName('Nights, Nadia').severity !== 'bad');
 // Wes is Wed-Sat and this is a Wednesday, so he is on shift and not on the
 // clock -- exactly the exception a derived schedule is supposed to catch.
 t('a scheduled absence is caught from the workbook alone', byName('Weekend, Wes').status === 'missing');
-t('coverage counts him against it', res.summary.coverage === 50);
-t('onShift counts both day workers', res.summary.onShift === 2);
+// Wanda, Wes and Ed are all on shift on a Wednesday morning; only Wanda is on
+// the clock. Ed is absent from the on-premise file entirely, which counts the
+// same way -- not being in the report is not evidence of being at work.
+t('onShift counts every day worker', res.summary.onShift === 3);
+t('coverage counts both absences against it', res.summary.coverage === 33);
 
 console.log('— against the real workbook, when present —');
 const book = path.join(__dirname, '..', 'PLX - Geodis Spreadsheet.xlsx');
@@ -93,10 +104,18 @@ if (!fs.existsSync(book)) {
   const key = SK.parseShiftKey(sheets.filter(x => SK.KEY_SHEET.test(x.name))[0].aoa);
   const real = SK.toShiftRecords(SK.parseHeadcount(sheets, SC.rosterKey), key);
   const realSch = SK.scheduleFromShifts(real, { asOf: new Date(2026, 7, 26), nameKeyOf: SC.nameKey });
-  // The account number narrows the hours, so only dept codes the Key has no row
-  // for are left unscheduled -- 8, not the 37 that building+shift alone left.
-  t('306 of the 314 tagged associates can be scheduled', realSch.people.length === 306);
-  t('the other 8 are reported', realSch.withoutHours.length === 8);
+  /* The account number narrows the hours, so only dept codes the Key has no row
+     for are left unscheduled -- 6, not the 37 that building+shift alone left.
+     Two of those 6 are 1517-18070, a transposition of Replay's 18270, corrected
+     by ACCOUNT_ALIASES; the remaining 5 are 1517-18873, which the Key really
+     does not list. */
+  t('308 of the 314 tagged associates can be scheduled', realSch.people.length === 308);
+  t('the other 5 are reported', realSch.withoutHours.length === 5);
+  t('the alias is what schedules the 18070 pair',
+    SK.scheduleFromShifts(
+      real.map(r => Object.assign({}, r, { hours: r.account === 'REPLAY' ? '' : r.hours })),
+      { asOf: new Date(2026, 7, 26), nameKeyOf: SC.nameKey }
+    ).people.length < realSch.people.length);
   t('naming the site and shift to fix', realSch.warnings[0].indexOf('1517 1st') !== -1);
   t('everyone scheduled has at least one day', realSch.people.every(p => Object.keys(p.shifts).length > 0));
 }

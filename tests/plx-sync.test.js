@@ -57,7 +57,9 @@ const XLSX = require('xlsx');
 const src = fs.readFileSync(path.join(__dirname, '..', 'functions', 'index.js'), 'utf8');
 const consts = src.slice(src.indexOf('const COLLECTIONS = {'), src.indexOf('const NOTES_ORIGIN'));
 const helpers = src.slice(src.indexOf('async function readJsonArray'), src.indexOf('async function handleCollection'));
-const handler = src.slice(src.indexOf('async function handlePlx('), src.indexOf('function parseToState'));
+// Start at the shared worker: handlePlx and the browser upload both call it, so
+// slicing from handlePlx alone leaves applyPlxWorkbook undefined.
+const handler = src.slice(src.indexOf('async function applyPlxWorkbook('), src.indexOf('function parseToState'));
 
 const NOTES_ORIGIN = 'https://geodis.ebtools.pro';
 const KEY = 'k';
@@ -70,13 +72,20 @@ let flowUrl = '';
 let fetched = null;
 const fetchStub = async (u, o) => { fetched = { u, o }; return { ok: true, status: 202 }; };
 
+// The browser upload also runs the attendance import, which has its own suite;
+// here it only has to exist so the module evaluates.
+const Intake = require('../form-intake.js');
+const AttendanceImport = require('../functions/attendance-import.js');
+const rosterProfiles = async () => [];
+
 const built = new Function(
   'bucket', 'readJsonFile', 'setKvCors', 'SYNC_KEY',
-  'NOTES_ORIGIN', 'XLSX', 'ShiftKey', 'Sched', 'fetch', 'console',
-  consts + helpers + handler + '\nreturn {handlePlx, handlePlxRefresh, COLLECTIONS};'
+  'NOTES_ORIGIN', 'XLSX', 'ShiftKey', 'Sched', 'Intake', 'AttendanceImport',
+  'rosterProfiles', 'fetch', 'console',
+  consts + helpers + handler + '\nreturn {handlePlx, handlePlxUpload, handlePlxRefresh, COLLECTIONS};'
 )(bucket, readJsonFile, setKvCors, SYNC_KEY,
-  NOTES_ORIGIN, XLSX, SK, Sched, fetchStub, console);
-const { handlePlx, handlePlxRefresh, COLLECTIONS } = built;
+  NOTES_ORIGIN, XLSX, SK, Sched, Intake, AttendanceImport, rosterProfiles, fetchStub, console);
+const { handlePlx, handlePlxUpload, handlePlxRefresh, COLLECTIONS } = built;
 
 const mkRes = () => { const r = { code: null, body: null, set() { return r }, status(c) { r.code = c; return r }, json(b) { r.body = b; return r }, send() { return r } }; return r; };
 const call = async (h, req) => { const res = mkRes(); await h(req, res); return res; };
@@ -173,6 +182,25 @@ const shifts = () => { try { return JSON.parse(files[COLLECTIONS.shifts.path]); 
     (await push({ fileBase64: XLSX.write(shrunk, { type: 'base64', bookType: 'xlsx' }) }))
       .body.sync.warnings.some(x => x.indexOf('HC') !== -1));
   t('and the workbook tag was not wiped', shifts().some(x => x.eid === '80-LGRACH3897'));
+
+  console.log('— the same workbook, uploaded from the browser —');
+  files = {};
+  const upload = (body, origin) => call(handlePlxUpload, {
+    method: 'POST', query: {}, body,
+    get: h => (h === 'origin' ? (origin === undefined ? NOTES_ORIGIN : origin) : '')
+  });
+  t('a foreign origin is refused', (await upload({ fileBase64: makeBook() }, 'https://evil.example')).code === 403);
+  t('and nothing is written', Object.keys(files).length === 0);
+  t('no sync key needed -- this IS the browser',
+    (await upload({ fileBase64: makeBook(), fileName: 'PLX.xlsx' })).code === 200);
+  t('shift tags land the same as a push', shifts().length === 1);
+  t('so do open orders', reqs().length === 2);
+  t('the uploader is recorded',
+    (await upload({ fileBase64: makeBook(), fileName: 'PLX.xlsx', uploadedBy: 'Cody Hale' })).body.sync.uploadedBy === 'Cody Hale');
+  t('the wrong file is refused here too', (await upload({ fileBase64: 'bm90IGEgd29ya2Jvb2s=' })).code === 400);
+  t('a missing file is refused', (await upload({})).code === 400);
+  t('without a roster, attendance is skipped rather than failed',
+    (await upload({ fileBase64: makeBook() })).body.attendance.skipped !== undefined);
 
   console.log('— asking for a fresh pull —');
   r = await call(handlePlxRefresh, { method: 'POST', query: {}, get: () => 'https://evil.example' });

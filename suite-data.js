@@ -317,6 +317,9 @@
       .catch(function (err) { console.warn('Could not read the PLX sync state.', err); return {}; });
   }
   function requestPlxRefresh() { return post('plxRefresh=1', {}); }
+  // Uploading the workbook from the browser. Everything it carries -- shift tags,
+  // open orders, attendance history and point balances -- refreshes in one pass.
+  function uploadPlx(payload) { return post('plxUpload=1', payload); }
 
   /* ---------- payroll periods ---------- */
   function loadPayrollPeriods() {
@@ -390,6 +393,7 @@
     loadAdmin: loadAdmin,
     loadPlxSync: loadPlxSync,
     requestPlxRefresh: requestPlxRefresh,
+    uploadPlx: uploadPlx,
     loadPayrollPeriods: loadPayrollPeriods,
     loadPayrollPeriod: loadPayrollPeriod,
     savePayrollClose: savePayrollClose,

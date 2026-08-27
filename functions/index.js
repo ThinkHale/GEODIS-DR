@@ -825,6 +825,125 @@ async function handlePayroll(req, res) {
    Two things come out of it: the shift tag for every associate, and the open
    orders on the Beeline Reqs tab. Both are merged over what is already stored --
    a refresh must never wipe something a person filled in by hand. */
+/* ---------- applying the workbook ----------
+   Shared by the automated push and the browser upload, so the two cannot drift
+   into producing different results from the same file. Returns a result rather
+   than writing a response, because its two callers answer differently. */
+async function applyPlxWorkbook(buffer, opts) {
+  opts = opts || {};
+  let wb;
+  try {
+    wb = XLSX.read(buffer, { type: 'buffer' });
+  } catch (err) {
+    return { ok: false, status: 400, error: 'Could not read the workbook: ' + err.message };
+  }
+
+  const sheets = wb.SheetNames.map(n => ({
+    name: n,
+    aoa: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: '' })
+  }));
+  /* XLSX does not throw on a file that is not a workbook -- it happily reads
+     rubbish as a single CSV-ish sheet. Without this, the wrong file would record
+     a perfectly successful-looking sync that produced nothing. */
+  const recognised = sheets.filter(x =>
+    ShiftKey.KEY_SHEET.test(x.name) || ShiftKey.HC_SHEET.test(x.name) || ShiftKey.REQ_SHEET.test(x.name));
+  if (!recognised.length) {
+    return { ok: false, status: 400,
+      error: 'That file has none of the expected tabs (Geodis Key, "<site> - HC", Beeline Reqs). ' +
+        'Tabs found: ' + wb.SheetNames.slice(0, 10).join(', ') };
+  }
+
+  const warnings = [];
+  const keySheet = sheets.filter(x => ShiftKey.KEY_SHEET.test(x.name))[0];
+  const key = keySheet ? ShiftKey.parseShiftKey(keySheet.aoa) : null;
+  if (!key) warnings.push('No "Geodis Key" tab was found, so shift hours are unknown.');
+  else warnings.push(...key.warnings);
+  const hc = ShiftKey.parseHeadcount(sheets, Sched.rosterKey);
+  warnings.push(...hc.warnings, ...ShiftKey.validateAgainstKey(hc, key));
+  const shiftRecords = ShiftKey.toShiftRecords(hc, key);
+
+  if (shiftRecords.length) {
+    /* A shift set by hand in the suite is not in the workbook, so replacing the
+       collection wholesale would erase it. Hand-set tags are kept, except where
+       the workbook now covers the same person: two records for one name would
+       poison each other and leave that associate with no shift at all. */
+    const fromBook = shiftRecords.map(r => Object.assign(
+      sanitizeRecord(r, COLLECTIONS.shifts.fields),
+      { id: String(r.id).slice(0, 64), updatedAt: new Date().toISOString() }
+    ));
+    const bookNames = new Set(fromBook.map(r => r.nameKey).filter(Boolean));
+    const existingShifts = await readJsonArray(COLLECTIONS.shifts.path);
+    const superseded = [];
+    const kept = existingShifts.filter(r => {
+      if (!r || r.source === 'PLX workbook') return false;
+      if (r.nameKey && bookNames.has(r.nameKey)) { superseded.push(r.name || r.nameKey); return false; }
+      return true;
+    });
+    if (superseded.length) {
+      warnings.push(superseded.length + ' shift tag(s) set by hand are now in the workbook and were ' +
+        'replaced by it: ' + superseded.slice(0, 8).join(', ') +
+        (superseded.length > 8 ? ' and ' + (superseded.length - 8) + ' more' : '') + '.');
+    }
+    await bucket.file(COLLECTIONS.shifts.path).save(JSON.stringify(fromBook.concat(kept)), {
+      contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+    });
+  } else {
+    warnings.push('No "<site> - HC" tabs were found, so shift tags were left as they were.');
+  }
+
+  const reqSheet = sheets.filter(x => ShiftKey.REQ_SHEET.test(x.name))[0];
+  let reqCount = 0;
+  if (!reqSheet) {
+    warnings.push('No "Beeline Reqs" tab was found, so open orders were left as they were.');
+  } else {
+    const parsed = ShiftKey.parseRequisitions(reqSheet.aoa);
+    warnings.push(...parsed.warnings);
+    const incoming = ShiftKey.toRequisitionRecords(parsed);
+    const existing = await readJsonArray(COLLECTIONS.requisitions.path);
+    const byId = new Map(existing.map(r => [r.id, r]));
+    incoming.forEach(rec => {
+      const clean = sanitizeRecord(rec, COLLECTIONS.requisitions.fields);
+      clean.id = String(rec.id).slice(0, 64);
+      clean.updatedAt = new Date().toISOString();
+      const prior = byId.get(clean.id);
+      // The sheet tracks neither how many are filled nor where a req stands, so
+      // both stay as whatever somebody last set here.
+      clean.filled = prior && Number.isFinite(Number(prior.filled)) ? Number(prior.filled) : 0;
+      const openings = Number(clean.openings) || 0;
+      clean.status = prior && prior.status ? prior.status
+        : (openings > 0 && clean.filled >= openings ? 'Filled' : 'Open');
+      byId.set(clean.id, Object.assign({}, prior || {}, clean));
+    });
+    // A req that has left the sheet was closed out there. Mark it rather than
+    // deleting it, so its history and anything filled against it survive.
+    const live = new Set(incoming.map(r => r.id));
+    byId.forEach((rec, id) => {
+      if (rec.source === 'PLX workbook' && !live.has(id) && rec.status !== 'Closed') {
+        byId.set(id, Object.assign({}, rec, { status: 'Closed', updatedAt: new Date().toISOString() }));
+      }
+    });
+    reqCount = incoming.length;
+    await bucket.file(COLLECTIONS.requisitions.path).save(JSON.stringify(Array.from(byId.values())), {
+      contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+    });
+  }
+
+  const meta = {
+    syncedAt: new Date().toISOString(),
+    fileName: String(opts.fileName || '').slice(0, 300),
+    modifiedAt: String(opts.modifiedAt || '').slice(0, 40),
+    uploadedBy: String(opts.uploadedBy || '').slice(0, 80),
+    shiftTags: shiftRecords.length,
+    sites: hc.sheets.length,
+    openOrders: reqCount,
+    warnings: warnings.slice(0, 20)
+  };
+  await bucket.file(PLX_META_PATH).save(JSON.stringify(meta), {
+    contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+  });
+  return { ok: true, meta: meta };
+}
+
 async function handlePlx(req, res) {
   setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
@@ -858,124 +977,65 @@ async function handlePlx(req, res) {
 
   const b64 = String(body.fileBase64 || body.file || '');
   if (!b64) { res.status(400).json({ ok: false, error: 'Missing fileBase64' }); return; }
-  let wb;
-  try {
-    wb = XLSX.read(Buffer.from(b64, 'base64'), { type: 'buffer' });
-  } catch (err) {
-    res.status(400).json({ ok: false, error: 'Could not read the workbook: ' + err.message });
-    return;
-  }
-
-  const sheets = wb.SheetNames.map(n => ({
-    name: n,
-    aoa: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: '' })
-  }));
-  /* XLSX does not throw on a file that is not a workbook -- it happily reads
-     rubbish as a single CSV-ish sheet. Without this, the wrong file would record
-     a perfectly successful-looking sync that produced nothing. */
-  const recognised = sheets.filter(x =>
-    ShiftKey.KEY_SHEET.test(x.name) || ShiftKey.HC_SHEET.test(x.name) || ShiftKey.REQ_SHEET.test(x.name));
-  if (!recognised.length) {
-    res.status(400).json({
-      ok: false,
-      error: 'That file has none of the expected tabs (Geodis Key, "<site> - HC", Beeline Reqs). ' +
-        'Tabs found: ' + wb.SheetNames.slice(0, 10).join(', ')
-    });
-    return;
-  }
-  const warnings = [];
-
-  // --- shift tags, from the Key + HC tabs ---
-  const keySheet = sheets.filter(x => ShiftKey.KEY_SHEET.test(x.name))[0];
-  const key = keySheet ? ShiftKey.parseShiftKey(keySheet.aoa) : null;
-  if (!key) warnings.push('No "Geodis Key" tab was found, so shift hours are unknown.');
-  else warnings.push(...key.warnings);
-  const hc = ShiftKey.parseHeadcount(sheets, Sched.rosterKey);
-  warnings.push(...hc.warnings, ...ShiftKey.validateAgainstKey(hc, key));
-  const shiftRecords = ShiftKey.toShiftRecords(hc, key);
-  if (shiftRecords.length) {
-    /* A shift set by hand in the suite is not in the workbook, so replacing the
-       collection wholesale would erase it on every push -- and this runs on a
-       schedule. Hand-set tags are kept, EXCEPT where the workbook now covers the
-       same person: two records for one name would poison each other in
-       buildProfiles and leave them with no shift at all. The workbook is the
-       system of record, so it wins, and the ones it supersedes are named. */
-    const fromBook = shiftRecords.map(r => Object.assign(
-      sanitizeRecord(r, COLLECTIONS.shifts.fields),
-      { id: String(r.id).slice(0, 64), updatedAt: new Date().toISOString() }
-    ));
-    const bookNames = new Set(fromBook.map(r => r.nameKey).filter(Boolean));
-    const existingShifts = await readJsonArray(COLLECTIONS.shifts.path);
-    const superseded = [];
-    const kept = existingShifts.filter(r => {
-      if (!r || r.source === 'PLX workbook') return false;   // replaced by this push
-      if (r.nameKey && bookNames.has(r.nameKey)) { superseded.push(r.name || r.nameKey); return false; }
-      return true;
-    });
-    if (superseded.length) {
-      warnings.push(superseded.length + ' shift tag(s) set by hand are now in the workbook and were ' +
-        'replaced by it: ' + superseded.slice(0, 8).join(', ') +
-        (superseded.length > 8 ? ' and ' + (superseded.length - 8) + ' more' : '') + '.');
-    }
-    await bucket.file(COLLECTIONS.shifts.path).save(JSON.stringify(fromBook.concat(kept)), {
-      contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
-    });
-  } else {
-    warnings.push('No "<site> - HC" tabs were found, so shift tags were left as they were.');
-  }
-
-  // --- open orders, from the Beeline Reqs tab ---
-  const reqSheet = sheets.filter(x => ShiftKey.REQ_SHEET.test(x.name))[0];
-  let reqCount = 0;
-  if (!reqSheet) {
-    warnings.push('No "Beeline Reqs" tab was found, so open orders were left as they were.');
-  } else {
-    const parsed = ShiftKey.parseRequisitions(reqSheet.aoa);
-    warnings.push(...parsed.warnings);
-    const incoming = ShiftKey.toRequisitionRecords(parsed);
-    const existing = await readJsonArray(COLLECTIONS.requisitions.path);
-    const byId = new Map(existing.map(r => [r.id, r]));
-    incoming.forEach(rec => {
-      const clean = sanitizeRecord(rec, COLLECTIONS.requisitions.fields);
-      clean.id = String(rec.id).slice(0, 64);
-      clean.updatedAt = new Date().toISOString();
-      const prior = byId.get(clean.id);
-      // The sheet does not track how many are filled or where a req stands, so
-      // those are whatever somebody last set here.
-      clean.filled = prior && Number.isFinite(Number(prior.filled)) ? Number(prior.filled) : 0;
-      const openings = Number(clean.openings) || 0;
-      clean.status = prior && prior.status ? prior.status
-        : (openings > 0 && clean.filled >= openings ? 'Filled' : 'Open');
-      byId.set(clean.id, Object.assign({}, prior || {}, clean));
-    });
-    // A req that has left the sheet has been closed out there. Mark it rather
-    // than deleting it, so its history and anything filled against it survive.
-    const live = new Set(incoming.map(r => r.id));
-    byId.forEach((rec, id) => {
-      if (rec.source === 'PLX workbook' && !live.has(id) && rec.status !== 'Closed') {
-        byId.set(id, Object.assign({}, rec, { status: 'Closed', updatedAt: new Date().toISOString() }));
-      }
-    });
-    const merged = Array.from(byId.values());
-    reqCount = incoming.length;
-    await bucket.file(COLLECTIONS.requisitions.path).save(JSON.stringify(merged), {
-      contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
-    });
-  }
-
-  const meta = {
-    syncedAt: new Date().toISOString(),
-    fileName: String(body.fileName || '').slice(0, 300),
-    modifiedAt: String(body.modifiedAt || '').slice(0, 40),
-    shiftTags: shiftRecords.length,
-    sites: hc.sheets.length,
-    openOrders: reqCount,
-    warnings: warnings.slice(0, 20)
-  };
-  await bucket.file(PLX_META_PATH).save(JSON.stringify(meta), {
-    contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+  const applied = await applyPlxWorkbook(Buffer.from(b64, 'base64'), {
+    fileName: body.fileName, modifiedAt: body.modifiedAt
   });
-  res.status(200).json({ ok: true, sync: meta });
+  if (!applied.ok) { res.status(applied.status || 400).json({ ok: false, error: applied.error }); return; }
+  res.status(200).json({ ok: true, sync: applied.meta });
+}
+
+/* ---------- the workbook, uploaded from the browser ----------
+   The workbook lives in another Microsoft tenant, so no automation here can
+   reach it. Somebody uploads it instead, whenever they run attendance, and this
+   refreshes everything it carries in one pass: shift tags, open orders, and
+   attendance history with its point balances.
+
+   Gated by origin rather than the sync key, because this IS the browser. That is
+   the same protection every other browser write uses. */
+async function handlePlxUpload(req, res) {
+  setKvCors(res);
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
+  if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
+
+  const body = req.body || {};
+  if (!body.fileBase64) { res.status(400).json({ ok: false, error: 'Missing fileBase64' }); return; }
+  const plxBuffer = Buffer.from(body.fileBase64, 'base64');
+  const redbullBuffer = body.redbullBase64 ? Buffer.from(body.redbullBase64, 'base64') : null;
+
+  // Shift tags and open orders, sharing the pipeline the automated push uses.
+  const shared = await applyPlxWorkbook(plxBuffer, {
+    fileName: body.fileName, modifiedAt: body.modifiedAt, uploadedBy: String(body.uploadedBy || '').slice(0, 80)
+  });
+  if (!shared.ok) { res.status(shared.status || 400).json({ ok: false, error: shared.error }); return; }
+
+  // Attendance needs the roster to attach anything to a badge.
+  let attendance = { skipped: 'no roster snapshot yet' };
+  const profiles = await rosterProfiles();
+  if (profiles.length) {
+    try {
+      const byName = Intake.buildNameIndex(profiles, Sched.rosterKey);
+      const now = new Date().toISOString();
+      const built = AttendanceImport.build(plxBuffer, redbullBuffer, {
+        byName, rosterKey: Sched.rosterKey, asOf: now.slice(0, 10),
+        plxSource: String(body.fileName || 'PLX - Geodis Spreadsheet.xlsx').slice(0, 200),
+        redbullSource: String(body.redbullName || 'Redbull Attendance Tracker').slice(0, 200)
+      });
+      const existing = await readJsonArray(COLLECTIONS.attendance.path);
+      const byId = new Map(existing.map(x => [x.id, x]));
+      built.events.forEach(x => byId.set(x.id, Object.assign({}, byId.get(x.id) || {},
+        sanitizeRecord(x, COLLECTIONS.attendance.fields), { id: x.id, updatedAt: now })));
+      await bucket.file(COLLECTIONS.attendance.path).save(JSON.stringify(Array.from(byId.values())), {
+        contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+      });
+      attendance = built.summary;
+    } catch (err) {
+      // A bad attendance tab must not lose the shift tags already written.
+      attendance = { error: String(err && err.message || err) };
+    }
+  }
+
+  res.status(200).json({ ok: true, sync: shared.meta, attendance: attendance });
 }
 
 /* Asking for a fresh pull. The browser calls this; this calls the Power Automate
@@ -1107,6 +1167,7 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
     if (req.query.discrepancyIntake !== undefined) { await handleDiscrepancyIntake(req, res); return; }
     if (req.query.payroll !== undefined) { await handlePayroll(req, res); return; }
     if (req.query.signIn !== undefined) { await handleSignIn(req, res); return; }
+    if (req.query.plxUpload !== undefined) { await handlePlxUpload(req, res); return; }
     if (req.query.plx !== undefined) { await handlePlx(req, res); return; }
     if (req.query.plxRefresh !== undefined) { await handlePlxRefresh(req, res); return; }
     if (req.query.schedule !== undefined) { await handleSchedule(req, res); return; }

@@ -931,6 +931,13 @@
     if (c.savedAt) return '<div class="cov-saved">Saved to Firebase at ' + esc(c.savedAt) + '</div>';
     return '';
   }
+  function plxMeta() {
+    var sync = state.plx.sync;
+    if (!sync || !sync.syncedAt) return '';
+    return '<b>' + esc(sync.shiftTags || 0) + '</b> shift tags · <b>' + esc(sync.openOrders || 0) +
+      '</b> open orders · ' + esc(ageLabel(sync.syncedAt));
+  }
+
   function covSources() {
     var c = state.coverage;
     var schedMeta = '', presMeta = '';
@@ -946,6 +953,10 @@
       covDrop('schedule', 1, 'Weekly schedule',
         'The "Employee Schedule - Weekly" export (.xlsx). Load it once a week — it is kept for this browser session.',
         c.scheduleFile, schedMeta) +
+      covDrop('workbook', 3, 'PLX workbook',
+        'The GEODIS spreadsheet. Refreshes the roster, shift tags, open orders and attendance ' +
+        'points in one pass. Upload it whenever you run attendance.',
+        state.plx.sync && state.plx.sync.fileName, plxMeta()) +
       covDrop('presence', 2, 'On premise now',
         'The "On Premise - Simple" export (.csv). Drop a fresh one any time to re-check the floor.',
         c.presenceFile, presMeta) +
@@ -1354,6 +1365,61 @@
       (rows.length ? covTable(rows, res.rows.length)
         : empty('Nothing matches those filters', 'Widen the status or location filter to see more.')) +
       '</section>';
+  }
+
+  /* The workbook cannot be fetched: it lives in another Microsoft tenant, which
+     no automation here can reach. So it is uploaded, and this sends it whole to
+     be parsed server-side -- the same code path the automated push would have
+     used, so an upload and a push cannot produce different results. */
+  function readPlxUpload(file) {
+    state.plx.busy = true;
+    state.plx.note = 'Reading ' + file.name + '…';
+    render();
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      var bytes = new Uint8Array(e.target.result), chunk = 0x8000, parts = [];
+      // Chunked, because a 500KB workbook overflows the argument list if the
+      // whole array is spread into fromCharCode at once.
+      for (var i = 0; i < bytes.length; i += chunk) {
+        parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + chunk)));
+      }
+      var actor = currentActor(false);
+      state.plx.note = 'Uploading ' + file.name + '…';
+      render();
+      SuiteData.uploadPlx({
+        fileBase64: btoa(parts.join('')),
+        fileName: file.name,
+        modifiedAt: new Date(file.lastModified).toISOString(),
+        uploadedBy: actor ? actor.name : ''
+      }).then(function (r) {
+        state.plx.sync = r.sync || null;
+        state.plx.note = plxSummary(r);
+        return SuiteData.loadAll();
+      }).then(function (stores) {
+        state.stores = stores;
+        rebuild();
+      }).catch(function (err) {
+        state.plx.note = 'Upload failed: ' + err.message;
+      }).then(function () {
+        state.plx.busy = false;
+        render();
+      });
+    };
+    reader.onerror = function () {
+      state.plx.busy = false;
+      state.plx.note = 'Could not read ' + file.name + '.';
+      render();
+    };
+    reader.readAsArrayBuffer(file);
+  }
+  function plxSummary(r) {
+    var s = r.sync || {}, a = r.attendance || {};
+    var bits = [(s.shiftTags || 0) + ' shift tags across ' + (s.sites || 0) + ' sites',
+      (s.openOrders || 0) + ' open orders'];
+    if (a.error) bits.push('attendance failed: ' + a.error);
+    else if (a.skipped) bits.push('attendance skipped (' + a.skipped + ')');
+    else if (a.total != null) bits.push(a.total + ' attendance rows, ' + (a.matched || 0) + ' matched');
+    return 'Refreshed · ' + bits.join(' · ');
   }
 
   function readCoverageFile(file, kind) {
@@ -2480,7 +2546,11 @@
     if (e.target.id === 'status-filter') { state.statusFilter = e.target.value; render(); }
 
     var cov = e.target.closest('[data-cov]');
-    if (cov && cov.files && cov.files[0]) { readCoverageFile(cov.files[0], cov.dataset.cov); return; }
+    if (cov && cov.files && cov.files[0]) {
+      if (cov.dataset.cov === 'workbook') { readPlxUpload(cov.files[0]); return; }
+      readCoverageFile(cov.files[0], cov.dataset.cov);
+      return;
+    }
     var book = e.target.closest('[data-shift-book]');
     if (book && book.files && book.files[0]) { readShiftWorkbook(book.files[0]); return; }
     if (e.target.id === 'cov-status') { state.coverage.statusFilter = e.target.value; render(); }

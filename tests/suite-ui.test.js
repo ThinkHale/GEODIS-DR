@@ -109,7 +109,8 @@ w.GEODISSuite.reload().then(()=>{
   console.log('— coverage: before any report is loaded —');
   click($('[data-nav="coverage"]'));
   t('on-premise tab renders', d.body.textContent.includes('On-Premise'));
-  t('both file pickers are offered', $$('[data-cov]').length===2);
+  t('three file pickers are offered', $$('[data-cov]').length===3);
+  t('including the workbook', !!d.querySelector('[data-cov="workbook"]'));
   t('it asks for both reports before showing numbers',
     d.body.textContent.includes('Load both reports'));
   t('no coverage figure is invented from nothing', !$('.cov-status'));

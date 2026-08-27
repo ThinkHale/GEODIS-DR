@@ -78,7 +78,12 @@ function parsePlx(buffer, opts) {
   });
   return { events, balances, transitions };
 }
+/* The Redbull tracker is a separate workbook and is not always to hand. Without
+   it the PLX workbook alone still carries roster, shifts, points and the
+   Attendance Tracker rows, so an upload of just that is worth doing rather than
+   refusing. */
 function parseRedbull(buffer, opts) {
+  if (!buffer) return [];
   const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true }), events = [];
   wb.SheetNames.forEach(sheetName => {
     if (/punch|sheet1/i.test(sheetName)) return;

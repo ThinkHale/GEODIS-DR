@@ -111,8 +111,8 @@ w.GEODISSuite.reload().then(()=>{
   t('on-premise tab renders', d.body.textContent.includes('On-Premise'));
   t('three file pickers are offered', $$('[data-cov]').length===3);
   t('including the workbook', !!d.querySelector('[data-cov="workbook"]'));
-  t('it asks for both reports before showing numbers',
-    d.body.textContent.includes('Load both reports'));
+  t('it asks for what it needs before showing numbers',
+    d.body.textContent.includes('the PLX workbook and the on-premise export'));
   t('no coverage figure is invented from nothing', !$('.cov-status'));
 
   console.log('— coverage: both reports loaded —');

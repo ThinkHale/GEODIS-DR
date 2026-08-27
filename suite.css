@@ -196,3 +196,4 @@ body.suite-active>header,body.suite-active>main,body.suite-active>.foot{display:
 .unlinked-row .sub{font:600 11px 'IBM Plex Mono';color:var(--suite-muted)}
 .unlinked-row>span:last-child{font:600 11px Inter;color:var(--suite-amber)}
 .suite-btn.tiny{font-size:10.5px;padding:2px 7px}
+.sched-source{font-size:11.5px;color:var(--suite-muted);margin:-4px 0 12px}

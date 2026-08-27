@@ -902,13 +902,30 @@
   }
   function coverageAsOf() { return state.coverage.asOf || new Date(); }
 
+  /* The workbook already says who works which shift and what hours that shift
+     runs, so a schedule is derived from it rather than uploaded. An uploaded WFM
+     export still wins when there is one -- it knows a specific day's PTO, which
+     a standing schedule cannot. */
+  function activeSchedule() {
+    var c = state.coverage;
+    if (c.schedule) return c.schedule;
+    var tags = state.stores.shifts || [];
+    if (!tags.length) return null;
+    return ShiftKey.scheduleFromShifts(tags, {
+      asOf: coverageAsOf(),
+      nameKeyOf: ScheduleCore.nameKey     // the form buildCoverage joins on
+    });
+  }
   function buildCoverageResult() {
     var c = state.coverage;
-    if (!c.schedule || !c.presence) return null;
+    var schedule = activeSchedule();
+    if (!schedule || !c.presence) return null;
     var res = ScheduleCore.buildCoverage({
-      schedule: c.schedule, presence: c.presence,
+      schedule: schedule, presence: c.presence,
       asOf: coverageAsOf(), graceMinutes: c.grace
     });
+    res.scheduleSource = schedule.derived ? 'workbook' : 'upload';
+    res.scheduleGaps = schedule.withoutHours || [];
     // Reach from each row to its roster profile so a supervisor can go straight to
     // attendance and time off from an exception.
     ScheduleCore.linkRoster(res.rows, state.profiles, SuiteData.normBadge,
@@ -950,8 +967,9 @@
       presMeta = c.presence.people.length + ' associates · ' + on + ' on premise';
     }
     return '<div class="cov-sources">' +
-      covDrop('schedule', 1, 'Weekly schedule',
-        'The "Employee Schedule - Weekly" export (.xlsx). Load it once a week — it is kept for this browser session.',
+      covDrop('schedule', 1, 'Weekly schedule (optional)',
+        'Not needed — the workbook already says who works which shift. Upload this only when you ' +
+        'need a specific day right: it marks PTO and holidays per date, which a standing shift cannot.',
         c.scheduleFile, schedMeta) +
       covDrop('workbook', 3, 'PLX workbook',
         'The GEODIS spreadsheet. Refreshes the roster, shift tags, open orders and attendance ' +
@@ -1012,6 +1030,15 @@
       '</div>';
   }
 
+  function scheduleSourceNote(res) {
+    if (res.scheduleSource !== 'workbook') return '';
+    var gaps = res.scheduleGaps || [];
+    return '<div class="sched-source">Scheduled from the <b>PLX workbook</b>' +
+      (gaps.length ? ' · <span class="warn-text">' + gaps.length + ' associate(s) have a shift the Key ' +
+        'gives no single set of hours for, so they cannot be scheduled</span>' : '') +
+      '</div>';
+  }
+
   function covWarnings(res) {
     var c = state.coverage, notes = [];
     var day = ScheduleCore.isoDate(coverageAsOf());
@@ -1022,6 +1049,16 @@
     /* An on-premise row that reaches no profile is invisible everywhere else --
        no attendance, no points, no profile view -- so it is called out first and
        loudest rather than left to be noticed. */
+    (res.scheduleGaps || []).slice(0, 1).forEach(function () {
+      var byPlace = {};
+      (res.scheduleGaps || []).forEach(function (g) {
+        var k = g.building + ' ' + g.shift;
+        byPlace[k] = (byPlace[k] || 0) + 1;
+      });
+      notes.push((res.scheduleGaps || []).length + ' associate(s) cannot be scheduled from the workbook: ' +
+        Object.keys(byPlace).map(function (k) { return k + ' (' + byPlace[k] + ')'; }).join(', ') +
+        '. The Geodis Key lists more than one set of hours for those, so fix it there.');
+    });
     var unlinked = ScheduleCore.unlinkedRows(res.rows);
     if (unlinked.length) {
       notes.unshift(unlinked.length + ' associate(s) on the on-premise report are not connected to a ' +
@@ -1347,9 +1384,10 @@
        uploaded, so it must not require having loaded the reports yourself. */
     var reviewing = reviewedCheck();
     if (reviewing) return head + covReviewPicker() + covReview(reviewing);
-    if (!c.schedule || !c.presence) {
-      var need = !c.schedule && !c.presence ? 'both reports'
-        : !c.schedule ? 'the weekly schedule export' : 'the on-premise export';
+    var sched = activeSchedule();
+    if (!sched || !c.presence) {
+      var need = !sched && !c.presence ? 'the PLX workbook and the on-premise export'
+        : !sched ? 'the PLX workbook, which carries the schedule' : 'the on-premise export';
       return head + covReviewPicker() + '<section class="suite-panel"><div class="workflow-empty">' +
         'Load ' + esc(need) + ' above to see who is scheduled right now and who is actually on premise' +
         (state.coverage.dates.length ? ', or open a stored check above.' : '.') +
@@ -1360,7 +1398,7 @@
     if (res.mismatch) return head + covReviewPicker() + covMismatch(res);
     var rows = covFilter(res.rows);
     return head + covReviewPicker() + covControls(res) + covMetrics(res.summary) +
-      unlinkedBanner(res) + covWarnings(res) + covExport(res) +
+      scheduleSourceNote(res) + unlinkedBanner(res) + covWarnings(res) + covExport(res) +
       '<section class="suite-panel">' + covFilters(res) +
       (rows.length ? covTable(rows, res.rows.length)
         : empty('Nothing matches those filters', 'Widen the status or location filter to see more.')) +

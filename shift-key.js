@@ -302,6 +302,118 @@
     });
   }
 
+  /* ---------- the schedule the workbook already implies ----------
+     The Key says what hours each shift runs and on which days; the HC tabs say
+     which shift each associate is on. Between them the workbook already states
+     who is expected when, so coverage does not need a separate weekly export.
+
+     What this CANNOT know is a specific day off: the WFM weekly export marks PTO
+     and holidays per date, and a standing schedule has no such thing. Approved
+     time off in this suite is what covers that instead. */
+  var WEEKDAYS = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, thur: 4, thurs: 4, fri: 5, sat: 6 };
+  function dayNumber(word) {
+    var w = String(word || '').toLowerCase().replace(/[^a-z]/g, '').slice(0, 5);
+    for (var k in WEEKDAYS) {
+      if (w.indexOf(k) === 0) return WEEKDAYS[k];
+    }
+    return -1;
+  }
+  // "Mon-Fri" -> [1,2,3,4,5]; "Wed" -> [3]; a range that wraps the weekend works.
+  function parseDayRange(days) {
+    var s = String(days || '').trim();
+    if (!s) return [];
+    var parts = s.split(/\s*(?:-|through|to)\s*/i);
+    var a = dayNumber(parts[0]);
+    if (a === -1) return [];
+    if (parts.length < 2) return [a];
+    var b = dayNumber(parts[1]);
+    if (b === -1) return [a];
+    var out = [], d = a;
+    for (var guard = 0; guard < 7; guard++) {
+      out.push(d);
+      if (d === b) break;
+      d = (d + 1) % 7;
+    }
+    return out;
+  }
+
+  function pad2(n) { return String(n).padStart(2, '0'); }
+  function isoOf(d) { return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
+
+  /* A schedule in the shape buildCoverage() expects, derived from the shift tags
+     rather than uploaded. Covers the week containing `asOf`, which is all any
+     single coverage check looks at.
+
+     Anyone whose hours the Key does not pin down gets NO shifts rather than
+     guessed ones -- they are counted in `withoutHours` so the gap is visible
+     instead of quietly reading as "not scheduled". */
+  function scheduleFromShifts(records, opts) {
+    opts = opts || {};
+    // ScheduleCore.nameKey when the caller supplies it; the same rules inline
+    // otherwise, so this module stays usable on its own.
+    var keyOf = opts.nameKeyOf || function (v) {
+      var t = String(v == null ? '' : v).toLowerCase();
+      var parts = t.split(',');
+      var clean = function (x) { return x.replace(/[^a-z]/g, ''); };
+      return parts.length >= 2 ? clean(parts[0]) + ',' + clean(parts.slice(1).join(' ')) : clean(t);
+    };
+    var asOf = (opts.asOf && typeof opts.asOf.getTime === 'function') ? opts.asOf : new Date();
+    var start = new Date(asOf.getTime());
+    start.setDate(start.getDate() - start.getDay() - 1);     // the day before Sunday
+    var dates = [];
+    for (var i = 0; i < 9; i++) {                            // a week, plus a day either side
+      var d = new Date(start.getTime());
+      d.setDate(d.getDate() + i);
+      dates.push({ iso: isoOf(d), dow: d.getDay() });
+    }
+
+    var people = [], withoutHours = [];
+    (records || []).forEach(function (r) {
+      if (!r || !r.nameKey) return;
+      var win = r.hours ? parseKeySchedule(r.hours) : null;
+      if (!win || win.start == null) {
+        withoutHours.push({ name: r.name, building: r.building, shift: r.shift });
+        return;
+      }
+      var dows = parseDayRange(win.days);
+      var shifts = {};
+      dates.forEach(function (d) {
+        if (dows.length && dows.indexOf(d.dow) === -1) return;
+        shifts[d.iso] = {
+          raw: win.raw, start: win.start, end: win.end,
+          overnight: !!win.overnight, hours: win.hours, suspect: false
+        };
+      });
+      /* buildCoverage joins the schedule to the on-premise report on nameKey()
+         -- the "last,first" WFM form -- while a shift record stores rosterKey(),
+         the sorted cross-source form used to reach a roster badge. Passing the
+         wrong one through here matches nothing at all, so the key is recomputed
+         from the name rather than reused. */
+      people.push({
+        name: r.name,
+        nameKey: keyOf(r.name),
+        rosterKey: r.nameKey,
+        location: r.building || '',
+        job: r.shift || '', shifts: shifts, ambiguous: false
+      });
+    });
+
+    return {
+      periodStart: dates[0].iso,
+      periodEnd: dates[dates.length - 1].iso,
+      executedAt: '',
+      derived: true,                 // so the UI can say where this came from
+      dates: dates.map(function (d) { return d.iso; }),
+      people: people,
+      withoutHours: withoutHours,
+      warnings: withoutHours.length
+        ? [withoutHours.length + ' associate(s) have a shift the Key does not give one set of hours for, ' +
+           'so they cannot be scheduled from the workbook: ' +
+           [...new Set(withoutHours.map(function (x) { return x.building + ' ' + x.shift; }))].join(', ') + '.']
+        : []
+    };
+  }
+
   /* ---------- storage shape ----------
      One record per associate. The id is the EID when there is one, because that
      is stable and matches the on-premise report directly; otherwise it falls
@@ -399,6 +511,8 @@
     parseHeadcount: parseHeadcount,
     windowFor: windowFor,
     toShiftRecords: toShiftRecords,
+    parseDayRange: parseDayRange,
+    scheduleFromShifts: scheduleFromShifts,
     accountOf: accountOf,
     validateAgainstKey: validateAgainstKey,
     indexShifts: indexShifts

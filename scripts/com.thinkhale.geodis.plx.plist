@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.thinkhale.geodis.plx</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>REPLACE_WITH_FULL_PATH/scripts/push-plx.sh</string>
+  </array>
+
+  <!-- 8am and 4pm local. launchd uses the machine's timezone, so this follows
+       daylight saving without the UTC drift a cloud scheduler would have. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+
+  <!-- If the Mac was asleep at 8am, run once on wake rather than skipping the
+       day entirely. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/geodis-plx-push.out</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/geodis-plx-push.err</string>
+</dict>
+</plist>

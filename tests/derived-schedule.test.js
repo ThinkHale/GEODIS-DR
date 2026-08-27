@@ -93,8 +93,10 @@ if (!fs.existsSync(book)) {
   const key = SK.parseShiftKey(sheets.filter(x => SK.KEY_SHEET.test(x.name))[0].aoa);
   const real = SK.toShiftRecords(SK.parseHeadcount(sheets, SC.rosterKey), key);
   const realSch = SK.scheduleFromShifts(real, { asOf: new Date(2026, 7, 26), nameKeyOf: SC.nameKey });
-  t('277 of the 314 tagged associates can be scheduled', realSch.people.length === 277);
-  t('the other 37 are reported', realSch.withoutHours.length === 37);
+  // The account number narrows the hours, so only dept codes the Key has no row
+  // for are left unscheduled -- 8, not the 37 that building+shift alone left.
+  t('306 of the 314 tagged associates can be scheduled', realSch.people.length === 306);
+  t('the other 8 are reported', realSch.withoutHours.length === 8);
   t('naming the site and shift to fix', realSch.warnings[0].indexOf('1517 1st') !== -1);
   t('everyone scheduled has at least one day', realSch.people.every(p => Object.keys(p.shifts).length > 0));
 }

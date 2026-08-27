@@ -99,7 +99,7 @@
   function parseShiftKey(aoa) {
     // accounts: "building|accountNum" -> the client's name, so an associate's
     // dept code ("1502-18845") can be shown as a place rather than a number.
-    var out = { entries: [], byBuilding: {}, windows: {}, accounts: {}, warnings: [] };
+    var out = { entries: [], byBuilding: {}, windows: {}, byAccount: {}, accounts: {}, warnings: [] };
     var rows = aoa || [];
     var headerRow = -1, cols = null;
     for (var i = 0; i < Math.min(rows.length, 15); i++) {
@@ -139,15 +139,24 @@
       var w = out.windows[key] || (out.windows[key] = []);
       var raw = entry.schedule ? entry.schedule.raw : '';
       if (raw && w.map(function (x) { return x.raw; }).indexOf(raw) === -1) w.push(entry.schedule);
+      /* Also index by account. A building running one shift on two different
+         sets of hours is not really ambiguous -- the hours belong to the CLIENT,
+         and an associate's dept code says which client they are on. */
+      if (raw && entry.accountNum) {
+        var ak = building + '|' + entry.accountNum + '|' + shift;
+        var aw = out.byAccount[ak] || (out.byAccount[ak] = []);
+        if (aw.map(function (x) { return x.raw; }).indexOf(raw) === -1) aw.push(entry.schedule);
+      }
     });
 
     Object.keys(out.byBuilding).forEach(function (b) { out.byBuilding[b].sort(); });
     Object.keys(out.windows).forEach(function (k) {
       if (out.windows[k].length > 1) {
-        out.warnings.push('Building ' + k.split('|')[0] + ' shift "' + k.split('|')[1] + '" has ' +
+        out.warnings.push('Building ' + k.split('|')[0] + ' shift "' + k.split('|')[1] + '" runs ' +
           out.windows[k].length + ' different sets of hours (' +
           out.windows[k].map(function (x) { return x.raw; }).join('; ') +
-          '). Its hours depend on the account, so no single window is assumed.');
+          '). Which one applies is decided by the account, taken from each ' +
+          'associate\'s dept code.');
       }
     });
     return out;
@@ -155,9 +164,23 @@
 
   // The unambiguous window for a building's shift, or null when there is none or
   // more than one.
-  function windowFor(key, building, shift) {
-    var w = key && key.windows ? key.windows[building + '|' + shift] : null;
+  /* The hours for a shift, narrowed by account where the dept code gives one.
+     Building + shift alone is ambiguous at sites running several clients on the
+     same shift; building + account + shift almost never is. Falls back to the
+     building-wide answer, and still returns null rather than choosing when even
+     that has more than one. */
+  function windowFor(key, building, shift, accountNum) {
+    if (!key) return null;
+    if (accountNum && key.byAccount) {
+      var a = key.byAccount[building + '|' + accountNum + '|' + shift];
+      if (a && a.length === 1) return a[0];
+    }
+    var w = key.windows ? key.windows[building + '|' + shift] : null;
     return w && w.length === 1 ? w[0] : null;
+  }
+  function accountNumOf(dept) {
+    var n = String(dept || '').split('-')[1];
+    return n ? n.trim() : '';
   }
 
   /* ---------- the HC tabs ----------
@@ -429,7 +452,7 @@
 
   function toShiftRecords(headcount, key) {
     return headcount.people.map(function (p) {
-      var w = windowFor(key, p.building, p.shift);
+      var w = windowFor(key, p.building, p.shift, accountNumOf(p.dept));
       return {
         id: p.eid ? 'eid:' + p.eid : 'name:' + p.nameKey,
         eid: p.eid,
@@ -510,6 +533,7 @@
     parseShiftKey: parseShiftKey,
     parseHeadcount: parseHeadcount,
     windowFor: windowFor,
+    accountNumOf: accountNumOf,
     toShiftRecords: toShiftRecords,
     parseDayRange: parseDayRange,
     scheduleFromShifts: scheduleFromShifts,

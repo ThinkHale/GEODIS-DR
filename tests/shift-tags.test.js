@@ -46,8 +46,21 @@ t('right-hand table found by header, not position', key.entries.length === 5);
 t('shift vocabulary per building', JSON.stringify(key.byBuilding['1502']) === '["1st","2nd"]');
 t('non-numeric shift labels kept', JSON.stringify(key.byBuilding['1519']) === '["A"]');
 t('unambiguous window resolves', SK.windowFor(key, '1502', '1st').start === 360);
-t('ambiguous window refuses to pick', SK.windowFor(key, '1517', '1st') === null);
-t('and says why', key.warnings.some(x => x.indexOf('1517') !== -1 && x.indexOf('depend on the account') !== -1));
+t('ambiguous window refuses to pick without an account', SK.windowFor(key, '1517', '1st') === null);
+
+/* A building running one shift on two sets of hours is not really ambiguous:
+   the hours belong to the CLIENT, and an associate's dept code names it. */
+t('the account settles it', SK.windowFor(key, '1517', '1st', '18611').start === 360);
+t('a different account at the same site and shift differs',
+  SK.windowFor(key, '1517', '1st', '18301').start === 420);
+t('an account with no Key row falls back to the building answer',
+  SK.windowFor(key, '1517', '1st', '99999') === null);
+t('an account that does not disagree still resolves',
+  SK.windowFor(key, '1502', '1st', '67510').start === 360);
+t('the dept code yields the account number', SK.accountNumOf('1517-18611') === '18611');
+t('a dept with no account number is empty', SK.accountNumOf('1517') === '');
+t('and so is nothing at all', SK.accountNumOf('') === '' && SK.accountNumOf(null) === '');
+t('and says why', key.warnings.some(x => x.indexOf('1517') !== -1 && x.indexOf('decided by the account') !== -1));
 t('wrong tab is reported', SK.parseShiftKey([['a', 'b']]).warnings[0].indexOf('Geodis Key') !== -1);
 
 console.log('— the HC tabs —');
@@ -166,7 +179,10 @@ if (!fs.existsSync(book)) {
   t('314 associates tagged', realHc.people.length === 314);
   const realRecs = SK.toShiftRecords(realHc, realKey);
   t('303 carry an EID', realRecs.filter(r => r.eid).length === 303);
-  t('most resolve to known hours', realRecs.filter(r => r.hours).length === 277);
+  // 306 of 314 once the account narrows the hours; it was 277 on building+shift.
+  t('the account resolves all but a handful', realRecs.filter(r => r.hours).length === 306);
+  t('the rest are dept codes the Key has no row for',
+    realRecs.filter(r => !r.hours).length === 8);
   t('the sheet’s one bad shift value is caught',
     SK.validateAgainstKey(realHc, realKey).some(x => x.indexOf('"5"') !== -1));
   t('no duplicate ids', new Set(realRecs.map(r => r.id)).size === realRecs.length);

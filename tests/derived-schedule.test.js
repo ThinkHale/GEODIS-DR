@@ -73,10 +73,14 @@ t('a full week plus a day either side', sch.dates.length === 9);
 t('so yesterday is available for an overnight shift', sch.dates.indexOf('2026-08-25') !== -1);
 
 console.log('— it feeds buildCoverage unchanged —');
+/* Wes IS in the timeclock and did not punch -- a real absence. Ed is not in the
+   report at all, which is a different thing entirely and must not read the
+   same way. */
 const presence = SC.parseOnPremise([
   ['Employee Full Name & ID', 'On Premises', 'Primary location (path)', 'Reports To'],
   ['Weekday, Wanda (80-W1)', 'true', 'GEODIS/US/CL/CL1502/1502', 'B, B'],
-  ['Nights, Nadia (80-N1)', 'false', 'GEODIS/US/CL/CL1502/1502', 'B, B']
+  ['Nights, Nadia (80-N1)', 'false', 'GEODIS/US/CL/CL1502/1502', 'B, B'],
+  ['Weekend, Wes (80-S1)', 'false', 'GEODIS/US/CL/CL1519/1519', 'B, B']
 ]);
 const res = SC.buildCoverage({ schedule: sch, presence: presence, asOf: new Date(2026, 7, 26, 9, 0) });
 const byName = n => res.rows.filter(r => r.name === n)[0];
@@ -86,11 +90,18 @@ t('and is not called an exception', byName('Nights, Nadia').severity !== 'bad');
 // Wes is Wed-Sat and this is a Wednesday, so he is on shift and not on the
 // clock -- exactly the exception a derived schedule is supposed to catch.
 t('a scheduled absence is caught from the workbook alone', byName('Weekend, Wes').status === 'missing');
-// Wanda, Wes and Ed are all on shift on a Wednesday morning; only Wanda is on
-// the clock. Ed is absent from the on-premise file entirely, which counts the
-// same way -- not being in the report is not evidence of being at work.
-t('onShift counts every day worker', res.summary.onShift === 3);
-t('coverage counts both absences against it', res.summary.coverage === 33);
+/* Wanda and Wes are on shift and in the timeclock; only Wanda punched. Ed is on
+   shift too but has no timeclock record at all, so he is neither counted on
+   shift nor held against coverage -- whether he is working simply cannot be
+   known from this report. */
+t('onShift counts only people the timeclock knows about', res.summary.onShift === 2);
+t('coverage counts the real absence against it', res.summary.coverage === 50);
+t('somebody with no timeclock record is not called absent',
+  byName('Early, Ed').status === 'notInReport');
+t('and is not an exception, because it is not an attendance fault',
+  byName('Early, Ed').severity === 'warn');
+t('the report never mentioned them', byName('Early, Ed').inPresence === false);
+t('while a real absence still is an exception', byName('Weekend, Wes').severity === 'bad');
 
 console.log('— against the real workbook, when present —');
 const book = path.join(__dirname, '..', 'PLX - Geodis Spreadsheet.xlsx');

@@ -11,7 +11,8 @@ const TODAY = d0.getFullYear() + '-' + p2(d0.getMonth() + 1) + '-' + p2(d0.getDa
 
 const records = [
   { badge: 'b1', person: 'Ada Away', action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago', crmStart: '1/2/2026' },
-  { badge: 'b2', person: 'Gus Gone', action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago', crmStart: '1/3/2026' }
+  { badge: 'b2', person: 'Gus Gone', action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago', crmStart: '1/3/2026' },
+  { badge: 'b3', empNumber: '21407056', person: 'Nate New', action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago', crmStart: '8/25/2026' }
 ];
 // Ada has approved PTO today. Gus filed a request that nobody has approved.
 const timeOff = [
@@ -25,7 +26,9 @@ const attendance = [
 ];
 const shiftTags = [
   { id: 's1', name: 'Away, Ada', nameKey: 'ada away', shift: '1st', building: '1523', hours: '12am-11:59pm Sun-Sat', source: 'PLX workbook' },
-  { id: 's2', name: 'Gone, Gus', nameKey: 'gone gus', shift: '1st', building: '1523', hours: '12am-11:59pm Sun-Sat', source: 'PLX workbook' }
+  { id: 's2', name: 'Gone, Gus', nameKey: 'gone gus', shift: '1st', building: '1523', hours: '12am-11:59pm Sun-Sat', source: 'PLX workbook' },
+  // On the roster and scheduled, but with no timeclock record at all.
+  { id: 's3', name: 'New, Nate', nameKey: 'nate new', shift: '1st', building: '1523', hours: '12am-11:59pm Sun-Sat', source: 'PLX workbook' }
 ];
 const onPremAoa = [
   ['Employee Full Name & ID', 'On Premises', 'Primary location (path)', 'Reports To'],
@@ -98,6 +101,31 @@ const rowFor = name => $$('.cov-row').filter(r => r.textContent.indexOf(name) !=
     ada.textContent.indexOf('(773)') === -1);
   t('somebody with no number on an exception row is offered the chance to add one',
     !!gus.querySelector('[data-phone-copy]') || !!gus.querySelector('[data-phone-edit]'));
+
+  console.log('— on the roster but not in the timeclock —');
+  const nate = rowFor('New, Nate');
+  t('they are shown, not dropped', !!nate);
+  t('and read as not in the timeclock, never as absent',
+    nate.textContent.indexOf('Not in timeclock') !== -1 &&
+    nate.textContent.indexOf('Not clocked in') === -1);
+  t('it is a warning, not an attendance exception', !nate.classList.contains('bad'));
+  t('no disposition list is offered, so no points can follow',
+    !nate.querySelector('.cov-disp'));
+  t('what is offered is getting them added', !!nate.querySelector('[data-add-clock]'));
+  t('the page explains why they are not counted absent',
+    d.body.textContent.indexOf('not been set up there yet') !== -1);
+
+  console.log('— and the fix is one click —');
+  click(nate.querySelector('[data-add-clock]'));
+  await settle(40);
+  const f = $('[data-form="task"]');
+  t('a task form opens', !!f);
+  t('already describing the job', f.querySelector('[name="title"]').value === 'Add Nate New to the timeclock');
+  t('as a system task', f.querySelector('[name="kind"]').value === 'Add to a system');
+  t('naming them by EID, which is what the team works from',
+    f.querySelector('[name="detail"]').value.indexOf('21407056') !== -1);
+  if ($('[data-close]')) click($('[data-close]'));
+  await settle(20);
 
   console.log('— the ledger —');
   click($('[data-nav="associates"]'));

@@ -42,7 +42,7 @@ const SUITES = [
   { file: 'payroll-ui.test.js', name: 'Payroll tab (DOM)', dom: true },
   { file: 'tasks-ui.test.js', name: 'Tasks page + the raise-a-task button (DOM)', dom: true },
   { file: 'eid-identity.test.js', name: 'EID as the identifier people work from (DOM)', dom: true },
-  { file: 'pto-ui.test.js', name: 'approved PTO + phone numbers on the floor (DOM)', dom: true },
+  { file: 'pto-ui.test.js', name: 'PTO, phone numbers and no-timeclock rows on the floor (DOM)', dom: true },
   { file: 'location-sort.test.js', name: 'site / account column + sorting (DOM)', dom: true },
   { file: 'settings-ui.test.js', name: 'Settings page (DOM)', dom: true },
   { file: 'staleness.test.js', name: 'stale feed warnings (DOM)', dom: true },

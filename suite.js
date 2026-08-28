@@ -1121,9 +1121,11 @@
         s.coverage == null ? '' : s.coverage >= 90 ? 'green' : 'orange') +
       metric('Working', s.byStatus.working, 'On shift and on premise', 'green') +
       metric('Not clocked in', s.byStatus.missing, 'On shift, not on premise', s.byStatus.missing ? 'orange' : 'green') +
-      (s.onPto ? metric('On PTO', s.onPto, 'Approved time off, so not counted against coverage')
-               : metric('Unscheduled', s.byStatus.unscheduled, 'On premise with no shift covering now',
-                        s.byStatus.unscheduled ? 'orange' : 'green')) +
+      (s.byStatus.notInReport
+        ? metric('Not in timeclock', s.byStatus.notInReport, 'Scheduled, but absent from the report entirely', 'orange')
+        : s.onPto ? metric('On PTO', s.onPto, 'Approved time off, so not counted against coverage')
+        : metric('Unscheduled', s.byStatus.unscheduled, 'On premise with no shift covering now',
+                 s.byStatus.unscheduled ? 'orange' : 'green')) +
       '</div>';
   }
 
@@ -1182,8 +1184,12 @@
     if (res.summary.noSchedule) {
       notes.push(res.summary.noSchedule + ' associate(s) on the on-premise report have no row in the weekly schedule.');
     }
-    if (res.summary.noPresence) {
-      notes.push(res.summary.noPresence + ' scheduled associate(s) are missing from the on-premise report entirely.');
+    var noClock = res.summary.byStatus.notInReport || 0;
+    if (noClock) {
+      notes.unshift(noClock + ' scheduled associate(s) have no row in the on-premise report at all. ' +
+        'The report lists everyone active in the timeclock, so these have not been set up there yet -- ' +
+        'usually a new starter. They are not counted as absent and cannot be given attendance points; ' +
+        'raise a task to get them added.');
     }
     (res.warnings || []).forEach(function (w) { notes.push(w); });
     if (!notes.length) return '';
@@ -1245,6 +1251,15 @@
   /* Only a person who was not where they should be gets a documentation box --
      there is nothing to explain about someone who is working their shift. */
   function covDocCell(r) {
+    /* Somebody with no timeclock record is not an absence to explain, so the
+       disposition list is withheld rather than offered. Every option on it
+       describes a reason for not being at work, and picking one would put a
+       system gap on somebody's attendance record. What is offered instead is
+       the thing that actually needs doing. */
+    if (r.status === 'notInReport') {
+      return '<button class="suite-btn tiny" data-add-clock="' + esc(r.badge || '') +
+        '" data-add-clock-name="' + esc(r.rosterName || r.name) + '">Raise a task</button>';
+    }
     return covDocFor(ScheduleCore.personKey(r), r.name, r.badge, r.severity);
   }
   function covDocFor(key, name, badge, severity) {
@@ -2682,6 +2697,26 @@
         eid: pr.wfmId || '', nameKey: ScheduleCore.rosterKey(pr.name),
         source: 'Entered by hand'
       }, actor, new Date()), 'contacts');
+      return;
+    }
+
+    /* Getting somebody onto the timeclock is a job that outlives this page, so
+       it becomes a task rather than a note that disappears on the next upload.
+       The form opens filled in -- the point is one click, not a blank form. */
+    var addClock = e.target.closest('[data-add-clock]');
+    if (addClock) {
+      var who = addClock.dataset.addClock ? profile(addClock.dataset.addClock) : null;
+      var nm = who ? who.name : (addClock.dataset.addClockName || 'this associate');
+      modal('task', who ? who.badge : '');
+      var f = document.querySelector('[data-form="task"]');
+      if (f) {
+        f.querySelector('[name="title"]').value = 'Add ' + nm + ' to the timeclock';
+        f.querySelector('[name="kind"]').value = TasksCore.kindMeta('system').label;
+        f.querySelector('[name="detail"]').value =
+          'On the PLX workbook roster and scheduled, but absent from the on-premise report, ' +
+          'so there is no timeclock record yet.' +
+          (who && who.empNumber ? ' EID ' + who.empNumber + '.' : '');
+      }
       return;
     }
 

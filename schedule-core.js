@@ -61,9 +61,21 @@
        denominator would report the floor as under-covered for a reason that is
        nobody's attendance problem. The count is surfaced separately instead, so
        a supervisor can still see the floor is short. */
-    pto:         { label: 'On PTO',         severity: 'ok',   onShift: false, desc: 'Approved time off covering today, so not expected on the floor.' }
+    pto:         { label: 'On PTO',         severity: 'ok',   onShift: false, desc: 'Approved time off covering today, so not expected on the floor.' },
+    /* Scheduled, but with no row in the on-premise report at all -- not even a
+       FALSE one. The report lists everyone active in the timeclock, so somebody
+       missing from it has not been set up there yet, which is the ordinary case
+       for a new starter. That is a system gap, not an attendance one: they may
+       well be on the floor working.
+
+       severity is 'warn', not 'bad'. It needs somebody to act, but the action
+       is to add them to the timeclock, not to chase them for a punch -- and it
+       must never turn into an attendance point, which is what calling it
+       'missing' invited. onShift is false so coverage is not marked down for
+       somebody whose presence simply cannot be known. */
+    notInReport: { label: 'Not in timeclock', severity: 'warn', onShift: false, desc: 'On the workbook roster and scheduled, but absent from the on-premise report entirely -- no timeclock record yet.' }
   };
-  var STATUS_ORDER = ['missing', 'unscheduled', 'lingering', 'working', 'starting', 'early', 'scheduled', 'complete', 'pto', 'off'];
+  var STATUS_ORDER = ['missing', 'unscheduled', 'notInReport', 'lingering', 'working', 'starting', 'early', 'scheduled', 'complete', 'pto', 'off'];
 
   /* ---------- names ----------
      Both reports render a name as "Last, First", but casing is inconsistent
@@ -540,7 +552,12 @@
     var ended = !active && !upcoming && covering.length > 0;
 
     var status;
-    if (active) {
+    /* Nobody said they were absent -- the report does not mention them at all.
+       Distinguished before anything else, because every branch below assumes
+       the timeclock had something to say about this person. */
+    if (person && !seen && covering.length) {
+      status = 'notInReport';
+    } else if (active) {
       if (present) status = 'working';
       else status = nowMin < active.start + grace ? 'starting' : 'missing';
     } else if (upcoming) {

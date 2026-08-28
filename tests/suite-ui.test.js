@@ -94,7 +94,11 @@ console.log('— attendance orphan warning —');
 stores.attendance.push({id:'a9',badge:'7777',date:'2026-08-24',type:'Absent',points:1});
 w.GEODISSuite.reload().then(()=>{
   click($('[data-nav="attendance"]'));
-  t('orphaned import row surfaced, not dropped', d.body.textContent.includes('could not be matched'));
+  t('orphaned import row surfaced, not dropped', d.body.textContent.includes('reach no profile'));
+  /* A current occurrence reaching nobody is a warning; the same row marked as
+     history would not be, because the roster only holds active assignments. */
+  t('and treated as something to fix, not as expected history',
+    !!d.querySelector('.warn-banner'));
 
   console.log('— reconciliation is mounted, not swapped —');
   click($('[data-nav="reconciliation"]'));

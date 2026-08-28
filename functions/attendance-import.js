@@ -34,7 +34,12 @@ function kind(comment) {
 function event(name, date, comment, points, meta, opts) {
   const hit = match(name, opts.byName, opts.rosterKey), k = kind(comment);
   const p = points == null ? k.points : points;
-  return { id: 'AT-XLS-' + hash([opts.rosterKey(name), date, k.type, meta.source].join('|')), badge: hit ? hit.badge : '',
+  /* The id deliberately does NOT include the file name. It used to, and a
+     browser naming successive downloads "... (2).xlsx", "... (3).xlsx" meant
+     the same occurrence got a new id each time -- the whole ledger was re-added
+     rather than replaced, three times over. What identifies an occurrence is
+     the person, the day and what happened, not where the sheet came from. */
+  return { id: 'AT-XLS-' + hash([opts.rosterKey(name), date, k.type].join('|')), badge: hit ? hit.badge : '',
     name: cleanName(name), date, type: k.type, minutes: 0, points: p, notes: text(comment),
     source: meta.source, importRef: meta.ref, location: meta.location || '', shift: meta.shift || '' };
 }

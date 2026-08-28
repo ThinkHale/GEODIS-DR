@@ -1068,6 +1068,43 @@
       '</div>';
   }
 
+  /* Minutes late, or minutes short. Only a hand-logged occurrence carries one:
+     the workbook records what happened and on which day, never for how long, so
+     every imported row is 0. Shown as a dash rather than a zero, so the column
+     does not read as "nobody was ever late by any amount". */
+  function minutesCell(a) {
+    var m = Number(a.minutes) || 0;
+    return m ? esc(m) : '<span class="sub">&mdash;</span>';
+  }
+
+  /* Attendance rows reaching no profile are two different things, and lumping
+     them together made an ordinary state look like a fault.
+
+     Most are history: an occurrence from a past year for somebody no longer on
+     assignment. The roster is the CURRENT active-assignment snapshot, so those
+     can never match and there is nothing to fix.
+
+     Worth chasing are current occurrences for people who ought to be on it.
+     Only those get a warning. */
+  function orphanNote(orphans) {
+    if (!orphans.length) return '';
+    var hist = orphans.filter(function (a) { return a.historical; });
+    var live = orphans.filter(function (a) { return !a.historical; });
+    var out = '';
+    if (live.length) {
+      out += '<div class="warn-banner"><b>' + live.length + '</b> current attendance record' +
+        (live.length === 1 ? '' : 's') + ' reach no profile, so they are counted nowhere. ' +
+        'The workbook carries no badge, so these are matched on the name -- connect the person ' +
+        'or correct the spelling at source.</div>';
+    }
+    if (hist.length) {
+      out += '<div class="cov-saved"><b>' + hist.length + '</b> historical record' +
+        (hist.length === 1 ? '' : 's') + ' belong to people who are not on the current ' +
+        'active-assignment roster. Expected for past years, and they carry no points.</div>';
+    }
+    return out;
+  }
+
   function covMetrics(s) {
     var cov = s.coverage == null ? '—' : s.coverage + '%';
     return '<div class="metric-strip">' +
@@ -1590,8 +1627,7 @@
     var orphans = SuiteData.unmatched(state.profiles, state.stores.attendance);
 
     return hero('Attendance', 'Occurrences and points, joined to the assignment roster by badge.', 'attendance', 'Log occurrence') +
-      (orphans.length ? '<div class="warn-banner"><b>' + orphans.length + '</b> attendance record' +
-        (orphans.length === 1 ? '' : 's') + ' could not be matched to a badge on the roster and are not counted in any profile.</div>' : '') +
+      orphanNote(orphans) +
       '<section class="suite-panel">' +
       '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
       '" placeholder="Search by EID, name, badge, type, or date…"></div>' +
@@ -1600,8 +1636,10 @@
         sortHead('attendance', 'name', 'Associate') +
         sortHead('attendance', 'location', 'Site / account') +
         sortHead('attendance', 'type', 'Type') +
-        '<th>Minutes</th>' + sortHead('attendance', 'points', 'Points') +
-        '<th>Running pts</th><th>Notes</th><th></th></tr></thead><tbody>' +
+        '<th title="Minutes late or short. Only set on an occurrence logged by hand; the workbook records what happened and on which day, never for how long.">Minutes</th>' +
+        sortHead('attendance', 'points', 'Points') +
+        '<th title="This associate\u2019s total across every occurrence -- not a running total down this table.">Balance</th>' +
+        '<th>Notes</th><th></th></tr></thead><tbody>' +
         rows.map(function (a) {
           var p = profile(a.badge);
           return '<tr><td>' + esc(a.date) + '</td>' +
@@ -1610,8 +1648,10 @@
             '<td>' + (p && p.location
               ? esc(p.location) + (p.account ? ' <span class="sub">' + esc(p.account) + '</span>' : '')
               : '<span class="sub">—</span>') + '</td>' +
-            '<td>' + esc(a.type) + '</td><td>' + esc(a.minutes || 0) + '</td><td>' + esc(a.points || 0) + '</td>' +
-            '<td>' + ptoPoints(a) + '</td><td class="detail-cell">' + esc(a.notes || '') + '</td>' +
+            '<td>' + esc(a.type) + '</td><td>' + minutesCell(a) + '</td>' +
+            '<td>' + ptoPoints(a) + '</td>' +
+            '<td>' + (p ? '<b>' + esc(p.points) + '</b>' : '<span class="sub">&mdash;</span>') + '</td>' +
+            '<td class="detail-cell">' + esc(a.notes || '') + '</td>' +
             '<td><button class="suite-btn danger" data-del="attendance|' + esc(a.id) + '">Remove</button></td></tr>';
         }).join('') + '</tbody></table></div>' + rowCap(rows.length, all.length)
         : empty('No attendance records', 'Log an occurrence, or import the daily attendance report.')) +

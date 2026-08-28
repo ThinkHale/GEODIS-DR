@@ -587,7 +587,20 @@ async function handleAttendanceImport(req, res) {
       redbullSource: String(body.redbullName || 'Redbull Attendance Tracker_2026.xlsx').slice(0, 200)
     });
   } catch (err) { res.status(400).json({ ok: false, error: 'The workbooks could not be read: ' + err.message }); return; }
-  const existing = await readJsonArray(COLLECTIONS.attendance.path), byId = new Map(existing.map(x => [x.id, x]));
+  const existing = await readJsonArray(COLLECTIONS.attendance.path);
+  /* Rows written under the OLD id scheme, which hashed the file name, are the
+     same occurrences under different ids -- three copies of the ledger, one per
+     download. Anything matching an occurrence in this import by person, day and
+     type is dropped unless it IS that occurrence, which clears the duplicates
+     on the next upload. Matching on the signature rather than on a prefix means
+     hand-logged rows and imports from other trackers are left alone. */
+  const sigOf = x => [Sched.rosterKey(x.name || ''), x.date || '', x.type || ''].join('|');
+  const incomingIds = new Set(built.events.map(x => x.id));
+  const incomingSigs = new Set(built.events.map(sigOf));
+  const superseded = existing.filter(x => x && !incomingIds.has(x.id) && incomingSigs.has(sigOf(x)));
+  const byId = new Map(existing
+    .filter(x => x && (incomingIds.has(x.id) || !incomingSigs.has(sigOf(x))))
+    .map(x => [x.id, x]));
   built.events.forEach(x => byId.set(x.id, Object.assign({}, byId.get(x.id) || {}, sanitizeRecord(x, COLLECTIONS.attendance.fields), { id: x.id, updatedAt: now })));
   await bucket.file(COLLECTIONS.attendance.path).save(JSON.stringify(Array.from(byId.values())), { contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' } });
   const pto = await readJsonArray(COLLECTIONS.associatePto.path), ptoByBadge = new Map(pto.filter(x => x.badge).map(x => [String(x.badge), x]));
@@ -599,7 +612,8 @@ async function handleAttendanceImport(req, res) {
       pto.push(rec); ptoByBadge.set(String(x.badge), rec); }
   });
   await bucket.file(COLLECTIONS.associatePto.path).save(JSON.stringify(pto), { contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' } });
-  res.status(200).json({ ok: true, imported: built.summary, attendanceCount: byId.size, associatePtoCount: pto.length });
+  res.status(200).json({ ok: true, imported: built.summary, attendanceCount: byId.size,
+    supersededDuplicates: superseded.length, associatePtoCount: pto.length });
 }
 
 async function handlePtoIntake(req, res) {

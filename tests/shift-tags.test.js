@@ -179,11 +179,12 @@ if (!fs.existsSync(book)) {
   t('314 associates tagged', realHc.people.length === 314);
   const realRecs = SK.toShiftRecords(realHc, realKey);
   t('303 carry an EID', realRecs.filter(r => r.eid).length === 303);
-  // 308 of 314 once the account narrows the hours and 1517-18070 is read as
-  // Replay's 18270; it was 277 on building+shift alone.
-  t('the account resolves all but a handful', realRecs.filter(r => r.hours).length === 308);
-  t('the rest are dept codes the Key has no row for',
-    realRecs.filter(r => !r.hours).length === 6);
+  /* 313 of 314 once the account narrows the hours and the two mistyped dept
+     codes are read through ACCOUNT_ALIASES; it was 277 on building+shift alone.
+     The one left is the row with a bad shift value, which has no dept either. */
+  t('the account resolves all but one', realRecs.filter(r => r.hours).length === 313);
+  t('the rest cannot be reached from the Key',
+    realRecs.filter(r => !r.hours).length === 1);
   t('the sheet’s one bad shift value is caught',
     SK.validateAgainstKey(realHc, realKey).some(x => x.indexOf('"5"') !== -1));
   t('no duplicate ids', new Set(realRecs.map(r => r.id)).size === realRecs.length);
@@ -203,7 +204,8 @@ t('and says the workbook is where to fix it', aw[0].indexOf('workbook') !== -1);
 t('a correct code is silent',
   SK.aliasWarnings({ people: [{ name: 'C', building: '1517', dept: '1517-18270' }] }).length === 0);
 t('the alias resolves for scheduling', SK.resolveAccount('1517', '18070') === '18270');
-t('an unaliased code is left alone', SK.resolveAccount('1517', '18873') === '18873');
+t('an unaliased code is left alone', SK.resolveAccount('1517', '99999') === '99999');
+t('the second known transposition resolves too', SK.resolveAccount('1517', '18873') === '18773');
 t('an alias is scoped to its building', SK.resolveAccount('1519', '18070') === '18070');
 t('validateAgainstKey surfaces it too, so both callers get it',
   SK.validateAgainstKey(aliased, key).some(w => w.indexOf('1517-18070') !== -1));

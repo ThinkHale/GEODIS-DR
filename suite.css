@@ -160,7 +160,11 @@ body.suite-active>header,body.suite-active>main,body.suite-active>.foot{display:
 
 /* ---- payroll ---- */
 .payroll-tabs{gap:8px;margin-bottom:14px}
-.detail-cell{max-width:340px;font-size:12px;line-height:1.45}
+/* Free text in a table whose cells are nowrap by default. Without resetting
+   white-space the details run straight on and slide under the status column;
+   max-width alone cannot stop that, because nowrap text has no wrap point to
+   take. overflow-wrap catches a long unbroken run, e.g. a pasted reference. */
+.detail-cell{width:320px;min-width:200px;max-width:320px;font-size:12px;line-height:1.45;white-space:normal;overflow-wrap:anywhere}
 .delta-up{color:var(--suite-green);font-weight:600}
 .delta-down{color:var(--suite-red);font-weight:600}
 

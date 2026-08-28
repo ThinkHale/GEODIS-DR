@@ -185,7 +185,13 @@
      dropping out of coverage, and each use is reported so the list cannot rot
      unnoticed after the workbook is fixed. */
   var ACCOUNT_ALIASES = {
-    '1517|18070': '18270'      // Replay
+    '1517|18070': '18270',     // Replay
+    /* 3 Nails. One digit off 18773, and 18773 itself carries a single person,
+       so the five here read as that row mistyped. It matters: 18773's
+       7am-3:30pm Mon-Fri is what six of 1517's seven accounts run, and only
+       32 Degrees (18611) differs -- so even if the intended code were some
+       other account, these hours would still be the answer. */
+    '1517|18873': '18773'
   };
   function accountNumOf(dept) {
     var n = String(dept || '').split('-')[1];

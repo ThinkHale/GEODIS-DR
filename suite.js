@@ -653,7 +653,7 @@
         '<th>Date</th><th>Type</th><th>Minutes</th><th>Points</th><th>Notes</th><th></th></tr></thead><tbody>' +
         p.attendance.map(function (a) {
           return '<tr><td>' + esc(a.date) + '</td><td>' + esc(a.type) + '</td><td>' + esc(a.minutes || 0) + '</td>' +
-            '<td>' + esc(a.points || 0) + '</td><td>' + esc(a.notes || '') + '</td>' +
+            '<td>' + esc(a.points || 0) + '</td><td class="detail-cell">' + esc(a.notes || '') + '</td>' +
             '<td><button class="suite-btn danger" data-del="attendance|' + esc(a.id) + '">Remove</button></td></tr>';
         }).join('') + '</tbody></table></div>' : empty('No occurrences logged')) + '</section>' +
 
@@ -1473,7 +1473,7 @@
               ? esc(p.location) + (p.account ? ' <span class="sub">' + esc(p.account) + '</span>' : '')
               : '<span class="sub">—</span>') + '</td>' +
             '<td>' + esc(a.type) + '</td><td>' + esc(a.minutes || 0) + '</td><td>' + esc(a.points || 0) + '</td>' +
-            '<td>' + (p ? p.points : '—') + '</td><td>' + esc(a.notes || '') + '</td>' +
+            '<td>' + (p ? p.points : '—') + '</td><td class="detail-cell">' + esc(a.notes || '') + '</td>' +
             '<td><button class="suite-btn danger" data-del="attendance|' + esc(a.id) + '">Remove</button></td></tr>';
         }).join('') + '</tbody></table></div>' + rowCap(rows.length, all.length)
         : empty('No attendance records', 'Log an occurrence, or import the daily attendance report.')) +

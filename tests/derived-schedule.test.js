@@ -104,19 +104,22 @@ if (!fs.existsSync(book)) {
   const key = SK.parseShiftKey(sheets.filter(x => SK.KEY_SHEET.test(x.name))[0].aoa);
   const real = SK.toShiftRecords(SK.parseHeadcount(sheets, SC.rosterKey), key);
   const realSch = SK.scheduleFromShifts(real, { asOf: new Date(2026, 7, 26), nameKeyOf: SC.nameKey });
-  /* The account number narrows the hours, so only dept codes the Key has no row
-     for are left unscheduled -- 6, not the 37 that building+shift alone left.
-     Two of those 6 are 1517-18070, a transposition of Replay's 18270, corrected
-     by ACCOUNT_ALIASES; the remaining 5 are 1517-18873, which the Key really
-     does not list. */
-  t('308 of the 314 tagged associates can be scheduled', realSch.people.length === 308);
-  t('the other 5 are reported', realSch.withoutHours.length === 5);
+  /* The account number narrows the hours, so only rows the Key cannot be reached
+     from are left unscheduled -- 1, not the 37 that building+shift alone left.
+     Two mistyped dept codes are read through ACCOUNT_ALIASES (18070 -> Replay's
+     18270, 18873 -> 3 Nails' 18773); what remains is a row with no dept at all,
+     which nothing can narrow. */
+  t('313 of the 314 tagged associates can be scheduled', realSch.people.length === 313);
+  /* The one left is tagged with a shift 1517 does not run. validateAgainstKey
+     already reports that as a typo, so it is not counted here as well. */
+  t('and the last is a bad shift value, reported as a typo instead',
+    realSch.withoutHours.length === 0);
   t('the alias is what schedules the 18070 pair',
     SK.scheduleFromShifts(
       real.map(r => Object.assign({}, r, { hours: r.account === 'REPLAY' ? '' : r.hours })),
       { asOf: new Date(2026, 7, 26), nameKeyOf: SC.nameKey }
     ).people.length < realSch.people.length);
-  t('naming the site and shift to fix', realSch.warnings[0].indexOf('1517 1st') !== -1);
+  t('with no scheduling gap left to warn about', realSch.warnings.length === 0);
   t('everyone scheduled has at least one day', realSch.people.every(p => Object.keys(p.shifts).length > 0));
 }
 

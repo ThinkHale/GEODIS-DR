@@ -56,11 +56,19 @@ console.log('— associates tab —');
 click($('[data-nav="associates"]'));
 t('roster renders rows', $$('.suite-table tbody tr').length>0);
 t('real names from the snapshot', d.body.textContent.includes('Ava Reed'));
-t('Ended profile filtered out by default', !d.body.textContent.includes('Ben Ortiz'));
+/* Ended associates are listed by default: notes and payroll issues still get
+   logged against people whose assignment has finished, and hiding them made
+   that look impossible. */
+t('an Ended profile is listed too', d.body.textContent.includes('Ben Ortiz'));
+t('and is labelled as ended, not passed off as current',
+  $$('.suite-table tbody tr').filter(r=>r.textContent.includes('Ben Ortiz'))[0]
+    .textContent.includes('Ended'));
 t('reconciliation state shown inline', d.body.textContent.includes('In sync'));
 t('roster cannot be added to by hand', !$('[data-add="associate"]'));
+$('#status-filter').value='Active'; $('#status-filter').dispatchEvent(new w.Event('change',{bubbles:true}));
+t('the filter can still narrow to active only', !d.body.textContent.includes('Ben Ortiz'));
 $('#status-filter').value='all'; $('#status-filter').dispatchEvent(new w.Event('change',{bubbles:true}));
-t('status filter reveals Ended', d.body.textContent.includes('Ben Ortiz'));
+t('and back to everyone', d.body.textContent.includes('Ben Ortiz'));
 t('exception label shown on the row', d.body.textContent.includes('End in RC'));
 
 console.log('— search —');
@@ -91,10 +99,15 @@ t('no NaN% coverage', !d.body.textContent.includes('NaN'));
 t('no Infinity% coverage', !d.body.textContent.includes('Infinity'));
 
 console.log('— attendance orphan warning —');
-stores.attendance.push({id:'a9',badge:'7777',date:'2026-08-24',type:'Absent',points:1});
+/* No badge at all -- the case that genuinely reaches nobody. A row whose badge
+   merely left the roster now keeps a former profile instead, so it is not an
+   orphan and would not warn. */
+stores.attendance.push({id:'a9',badge:'',name:'Nobody, No',date:'2026-08-24',type:'Absent',points:1});
 w.GEODISSuite.reload().then(()=>{
   click($('[data-nav="attendance"]'));
   t('orphaned import row surfaced, not dropped', d.body.textContent.includes('reach no profile'));
+  t('a departed associate keeps a profile instead of becoming one',
+    !!w.GEODISSuite.profile('7777') === false && w.GEODISSuite.state.profiles.size > 0);
   /* A current occurrence reaching nobody is a warning; the same row marked as
      history would not be, because the roster only holds active assignments. */
   t('and treated as something to fix, not as expected history',

@@ -84,6 +84,54 @@
      records: the snapshot rows already rendered by the reconciliation view,
               with any manual status overrides applied.
      stores:  { attendance: [], timeOff: [], performance: [], notes: {} } */
+  /* Every field a profile is expected to have, in one place. Built here rather
+     than spelled out twice, because a view reading a field that only one of the
+     two paths sets is the kind of bug that shows as a blank cell nobody
+     questions. */
+  function blankProfile(badge, name) {
+    return {
+      badge: badge,
+      empNumber: '',
+      // RC (Salesforce) record ids, for deep links. Empty when RC has no record.
+      contactId: '',
+      assignmentId: '',
+      name: name,
+      initials: initialsOf(name),
+      altName: '',
+      status: 'Active',
+      market: 'Other',
+      marketVerified: false,
+      marketRaw: '',
+      // Reconciliation state travels WITH the profile rather than living in a
+      // separate tab, so a manager reading a scorecard can see that this
+      // person's paperwork is out of sync.
+      action: '',
+      actionLabel: '',
+      actionReason: '',
+      overridden: false,
+      reconciled: false,
+      dup: false,
+      newBadge: null,
+      crmStart: null,
+      beeStart: null,
+      endDate: null,
+      endReason: '',
+      // Joined below.
+      attendance: [], points: 0, standing: '', standingCls: '',
+      timeOff: [], performance: null, score: null, note: '',
+      transitionAssociate: false, transitionPtoInitial: 0, transitionPtoBalance: 0,
+      shift: '', shiftBuilding: '', shiftHours: '', shiftSource: '',
+      phone: '', phoneSource: '', phoneUpdatedAt: '',
+      /* The WFM id, "80-JALCAL5986". Note this is NOT empNumber: the PLX
+         workbook heads its column "EID", but that column is the timeclock id,
+         while the EID the team searches by is RC's Legacy Contact ID, which
+         arrives as empNumber. Two different numbers, one overloaded word. */
+      timeclockId: '',
+      // Where they work: the GEODIS site number and the client account on it.
+      location: '', account: '', locationLabel: ''
+      };
+  }
+
   function buildProfiles(records, stores) {
     stores = stores || {};
     var byBadge = new Map();
@@ -92,47 +140,31 @@
       var badge = normBadge(r.badge);
       if (!badge) return;
       var name = r.person || r.crmName || r.beeName || '';
-      byBadge.set(badge, {
-        badge: badge,
-        empNumber: r.empNumber || '',
-        // RC (Salesforce) record ids, for deep links. Empty when RC has no record.
-        contactId: r.contactId || '',
-        assignmentId: r.assignmentId || '',
-        name: name,
-        initials: initialsOf(name),
-        altName: r.altName || '',
-        status: statusOf(r),
-        market: r.market || 'Other',
-        marketVerified: !!r.marketVerified,
-        marketRaw: r.marketRaw || '',
-        // Reconciliation state travels WITH the profile rather than living in a
-        // separate tab, so a manager reading a scorecard can see that this
-        // person's paperwork is out of sync.
-        action: r.action || '',
-        actionLabel: r.actionLabel || '',
-        actionReason: r.reason || '',
-        overridden: !!r.overridden,
-        reconciled: r.action === 'matched',
-        dup: !!r.dup,
-        newBadge: r.newBadge || null,
-        crmStart: r.crmStart || null,
-        beeStart: r.beeStart || null,
-        endDate: r.endDate || null,
-        endReason: r.endReason || '',
-        // Joined below.
-        attendance: [], points: 0, standing: '', standingCls: '',
-        timeOff: [], performance: null, score: null, note: '',
-        transitionAssociate: false, transitionPtoInitial: 0, transitionPtoBalance: 0,
-        shift: '', shiftBuilding: '', shiftHours: '', shiftSource: '',
-        phone: '', phoneSource: '', phoneUpdatedAt: '',
-        /* The WFM id, "80-JALCAL5986". Note this is NOT empNumber: the PLX
-           workbook heads its column "EID", but that column is the timeclock id,
-           while the EID the team searches by is RC's Legacy Contact ID, which
-           arrives as empNumber. Two different numbers, one overloaded word. */
-        timeclockId: '',
-        // Where they work: the GEODIS site number and the client account on it.
-        location: '', account: '', locationLabel: ''
-      });
+      var p = blankProfile(badge, name);
+      p.empNumber = r.empNumber || '';
+      // RC (Salesforce) record ids, for deep links. Empty when RC has no record.
+      p.contactId = r.contactId || '';
+      p.assignmentId = r.assignmentId || '';
+      p.altName = r.altName || '';
+      p.status = statusOf(r);
+      p.market = r.market || 'Other';
+      p.marketVerified = !!r.marketVerified;
+      p.marketRaw = r.marketRaw || '';
+      /* Reconciliation state travels WITH the profile rather than living in a
+         separate tab, so a manager reading a scorecard can see that this
+         person's paperwork is out of sync. */
+      p.action = r.action || '';
+      p.actionLabel = r.actionLabel || '';
+      p.actionReason = r.reason || '';
+      p.overridden = !!r.overridden;
+      p.reconciled = r.action === 'matched';
+      p.dup = !!r.dup;
+      p.newBadge = r.newBadge || null;
+      p.crmStart = r.crmStart || null;
+      p.beeStart = r.beeStart || null;
+      p.endDate = r.endDate || null;
+      p.endReason = r.endReason || '';
+      byBadge.set(badge, p);
     });
 
     /* Shift tags come from the PLX workbook and are keyed by WFM EID or name --
@@ -147,6 +179,48 @@
         shiftIdx[r.nameKey] = (shiftIdx[r.nameKey] && shiftIdx[r.nameKey].shift !== r.shift) ? null : r;
       });
     }
+
+    /* ---------- people who have left the roster but not the record ----------
+       The snapshot is the CURRENT reconciliation: somebody whose assignment has
+       ended in both systems stops appearing in it. Everything already attached
+       to them -- a note, a payroll discrepancy, a time-off request, an
+       occurrence -- would then point at a profile that no longer exists, and
+       become unreachable. Not deleted, just impossible to open.
+
+       That is worse than it sounds. One real example: a note reading "Still
+       Active - needs badge updated to 236758 RC" sitting on a badge with no
+       profile, which is precisely the note somebody needed to act on.
+
+       So any badge a stored record still refers to keeps a profile, marked as
+       former. It carries no assignment detail, because there is none -- what it
+       carries is somewhere for the record to live and be added to. */
+    var formerName = {};
+    [stores.attendance, stores.timeOff, stores.discrepancies, stores.tasks, stores.contacts]
+      .forEach(function (rows) {
+        (rows || []).forEach(function (r) {
+          if (!r || !r.badge || !r.name) return;
+          var b = normBadge(r.badge);
+          if (!formerName[b]) formerName[b] = r.name;
+        });
+      });
+    var seenBadge = {};
+    [stores.attendance, stores.timeOff, stores.discrepancies, stores.tasks, stores.contacts]
+      .forEach(function (rows) {
+        (rows || []).forEach(function (r) { if (r && r.badge) seenBadge[normBadge(r.badge)] = true; });
+      });
+    Object.keys(stores.notes || {}).forEach(function (b) { seenBadge[normBadge(b)] = true; });
+    Object.keys(seenBadge).forEach(function (badge) {
+      if (!badge || byBadge.has(badge)) return;
+      var name = formerName[badge] || '';
+      var p = blankProfile(badge, name);
+      p.status = 'Ended';
+      p.former = true;
+      p.actionLabel = 'No longer on the roster';
+      p.actionReason = 'This badge is not in the current RC / Beeline reconciliation, so their ' +
+        'assignment has ended in both systems. The records already against them are kept, and ' +
+        'more can still be added.';
+      byBadge.set(badge, p);
+    });
 
     attach(byBadge, stores.attendance, 'attendance');
     attach(byBadge, stores.timeOff, 'timeOff');

@@ -32,7 +32,12 @@ const stores={
 const P = SuiteData.buildProfiles(records, stores);
 
 console.log('— roster —');
-t('all 5 records became profiles', P.size===5);
+/* 5 from the snapshot, plus one former profile for badge 9999 -- an attendance
+   row whose person has left the roster. Keeping them reachable is the point;
+   see "former associates" below. */
+t('all 5 records became profiles', P.size===6);
+t('and every snapshot record is one of them',
+  ['1001','1002','1003','1004','1005'].every(b=>P.has(b)));
 t('badge 1005.0 normalized to 1005', P.has('1005') && !P.has('1005.0'));
 
 console.log('— status (active vs ended) —');
@@ -55,8 +60,23 @@ t('1001 points sum to 1.5', P.get('1001').points===1.5);
 t('1001 has 3 events', P.get('1001').attendance.length===3);
 t('events sort newest first', P.get('1001').attendance[0].date==='2026-08-22');
 t('1002 points = 2', P.get('1002').points===2);
-t('roster-less row not attached', !P.has('9999'));
-t('orphan reported by unmatched()', SuiteData.unmatched(P, stores.attendance).length===1);
+/* ---- former associates ----
+   A badge the snapshot no longer carries still keeps a profile, so the records
+   already against it stay reachable and more can be added. The snapshot is the
+   CURRENT reconciliation: somebody ended in both systems drops out of it, and
+   without this their notes and payroll issues would point at nothing. */
+t('a departed badge still has a profile', P.has('9999'));
+t('marked as former rather than pretending to be current', P.get('9999').former === true);
+t('and shown as ended', P.get('9999').status === 'Ended');
+t('their occurrence is attached to it', P.get('9999').attendance.length === 1);
+t('it says why there is no assignment detail',
+  P.get('9999').actionReason.indexOf('not in the current') !== -1);
+t('somebody still on the roster is not marked former', !P.get('1001').former);
+/* A row with no badge at all still reaches nobody, and is still reported --
+   that is the case a silently dropped disciplinary record would hide in. */
+t('a row with no badge is still an orphan',
+  SuiteData.unmatched(P, [{badge:'',date:'2026-08-22',type:'Absent',points:1}]).length===1);
+t('but one whose person merely left is not', SuiteData.unmatched(P, stores.attendance).length===0);
 
 console.log('— standing bands —');
 t('1.5 pts -> Good standing', P.get('1001').standing==='Good standing');

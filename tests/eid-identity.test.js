@@ -22,6 +22,9 @@ const records = [
 ];
 const shifts = [{ id: 's1', nameKey: 'ada away', name: 'Away, Ada', eid: '80-AAWAY1', shift: '1st', building: '1523', hours: '7am-3:30pm Mon-Fri' }];
 let tasks = [];
+/* A note against a badge the snapshot no longer carries. This is the case that
+   used to lose the note: the profile vanished with the assignment. */
+const notes = { '999111': { note: 'Owed four hours from the final week', updatedAt: '2026-08-01T00:00:00Z' } };
 const posts = [];
 
 const dom = new JSDOM(`<!doctype html><html><body class="suite-active">
@@ -43,6 +46,7 @@ w.fetch = (url, opt) => {
   if (u.indexOf('coverage=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ coverage: {}, dates: [] }) });
   if (u.indexOf('shifts=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ shifts }) });
   if (u.indexOf('tasks=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ tasks }) });
+  if (u.indexOf('notes=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ notes }) });
   const k = u.match(/\?(\w+)=1/)[1];
   const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions', performance: 'performance',
     discrepancies: 'discrepancies', associatePto: 'associatePto', locations: 'locations', appConfig: 'appConfig',
@@ -60,7 +64,7 @@ const names = () => $$('tbody tr').map(r => r.textContent);
 
 (async () => {
   await settle(80);
-  d.dispatchEvent(new w.CustomEvent('geodis:records', { detail: { records } }));
+  d.dispatchEvent(new w.CustomEvent('geodis:records', { detail: { records, notes } }));
 
   console.log('— the roster leads with the EID —');
   click($('[data-nav="associates"]'));
@@ -132,6 +136,39 @@ const names = () => $$('tbody tr').map(r => r.textContent);
   await settle(40);
   t('so the queue can be read without opening anything',
     d.body.textContent.indexOf('EID 20750899') !== -1);
+
+  console.log('— an associate the roster has dropped —');
+  click($('[data-nav="associates"]'));
+  await settle(40);
+  const former = w.GEODISSuite.profile('999111');
+  t('still has a profile', !!former);
+  t('marked former', former.former === true);
+  t('and ended', former.status === 'Ended');
+  t('their note survived', former.note === 'Owed four hours from the final week');
+  search('999111');
+  await settle(40);
+  t('and they can be found', names().length === 1);
+  t('shown as Former, not as active', names()[0].indexOf('Former') !== -1);
+  search('');
+  await settle(40);
+
+  console.log('— and can still be worked with —');
+  click($('[data-nav="associates"]'));
+  click($('[data-profile="999111"]'));
+  await settle(40);
+  t('the profile opens', d.body.textContent.indexOf('Owed four hours') !== -1);
+  t('saying why there is no assignment detail',
+    d.body.textContent.indexOf('not in the current') !== -1);
+  click($('.suite-add'));
+  const tf = $('[data-form="task"]');
+  tf.querySelector('[name="title"]').value = 'Chase final-week hours';
+  tf.querySelector('[name="badge"]').value = '999111';
+  tf.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(80);
+  const t2 = posts.filter(p => p.url && p.url.indexOf('tasks=1') !== -1).pop();
+  t('a task can still be raised against them', t2 && t2.body.badge === '999111');
+  t('with no warning prompt, because they are a real person',
+    !posts.some(p => p.alert && p.alert.indexOf('999111') !== -1));
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

@@ -59,7 +59,10 @@
     market: (function () {
       try { return localStorage.getItem('badgeCrosscheck.market') || 'all'; } catch (e) { return 'all'; }
     })(),
-    statusFilter: 'Active',
+    /* Everyone, not just the active. An ended associate still needs notes and
+       payroll issues logged against them, and a listing that hides them makes
+       that look impossible. The filter is still there for narrowing down. */
+    statusFilter: 'all',
     records: null,          // null = snapshot has not arrived yet
     notes: {},              // shared badge -> note, published with the roster
     updatedAt: null,
@@ -375,9 +378,9 @@
     return '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
       '" placeholder="' + esc(placeholder || 'Search by name, badge, or employee #…') + '">' +
       '<select class="suite-select" id="status-filter">' +
-      ['Active', 'Ended', 'all'].map(function (v) {
+      ['all', 'Active', 'Ended'].map(function (v) {
         return '<option value="' + v + '" ' + (state.statusFilter === v ? 'selected' : '') + '>' +
-          (v === 'all' ? 'All statuses' : v) + '</option>';
+          (v === 'all' ? 'Active and ended' : v) + '</option>';
       }).join('') + '</select></div>';
   }
   /* A shift tag is what the person works, not what they were scheduled for this
@@ -524,7 +527,15 @@
     return rcLink(p.assignmentId, (row && row.value) || 'TR1__Closing_Report__c', label || 'RC assignment');
   }
 
+  /* "Former" rather than "Ended" for somebody the reconciliation has dropped
+     entirely: their assignment did not just end, the roster no longer carries
+     them at all, and anything still attached to them is history somebody chose
+     to keep. */
   function statusChip(p) {
+    if (p.former) {
+      return '<span class="status closed" title="No longer in the RC / Beeline reconciliation. ' +
+        'Their records are kept and can still be added to.">Former</span>';
+    }
     return '<span class="status ' + (p.status === 'Ended' ? 'closed' : '') + '">' + esc(p.status) + '</span>';
   }
   // Reconciliation state shown inline on a profile, so paperwork drift is

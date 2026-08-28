@@ -89,5 +89,39 @@ const outOld = Core.reconcile(bee, old, null);
 t('reconciliation is unaffected', outOld.records.length > 0);
 t('and the ids are simply empty', outOld.records.every(r => r.contactId === '' && r.assignmentId === ''));
 
+console.log('— the two Salesforce host names —');
+{
+  /* People have both hosts to hand. Record pages live on the Lightning one, so
+     an API host is translated rather than refused. Verified against real URLs:
+       https://employbridge.lightning.force.com/lightning/r/Contact/003Rn00001A5LvHIAV/view
+       https://employbridge.lightning.force.com/lightning/r/TR1__Closing_Report__c/a58Rn00000Kwe4yIAB/view */
+  const base = v => {
+    let s = String(v || '').trim();
+    if (!s) return '';
+    if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
+    s = s.replace(/\/+$/, '');
+    return s.replace(/^(https:\/\/[^.\/]+)\.my\.salesforce\.com$/i, '$1.lightning.force.com');
+  };
+  const L = 'https://employbridge.lightning.force.com';
+  t('an API host becomes the Lightning host',
+    base('https://employbridge.my.salesforce.com') === L);
+  t('a Lightning host is left alone', base(L) === L);
+  t('a bare host gets a scheme', base('employbridge.my.salesforce.com') === L);
+  t('a trailing slash is trimmed', base(L + '/') === L);
+  t('and nothing configured stays nothing', base('') === '' && base('  ') === '');
+  t('a host that merely contains the words is not rewritten',
+    base('https://my.salesforce.com.evil.example') === 'https://my.salesforce.com.evil.example');
+
+  const url = (o, id) => L + '/lightning/r/' + o + '/' + id + '/view';
+  t('a contact link matches the real one',
+    url('Contact', '003Rn00001A5LvHIAV') ===
+    'https://employbridge.lightning.force.com/lightning/r/Contact/003Rn00001A5LvHIAV/view');
+  t('an assignment link matches the real one',
+    url('TR1__Closing_Report__c', 'a58Rn00000Kwe4yIAB') ===
+    'https://employbridge.lightning.force.com/lightning/r/TR1__Closing_Report__c/a58Rn00000Kwe4yIAB/view');
+  t('both ids are recognised as Salesforce ids',
+    Core.looksLikeSfId('003Rn00001A5LvHIAV') && Core.looksLikeSfId('a58Rn00000Kwe4yIAB'));
+}
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

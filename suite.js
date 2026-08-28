@@ -497,9 +497,18 @@
      domain. That is a setting rather than a constant: it differs per org, and
      hard-coding it would mean a code change to fix a URL. With no base URL set,
      nothing renders a broken link -- the id is simply not shown as one. */
+  /* Salesforce answers to two host names and people have both to hand: the API
+     host (employbridge.my.salesforce.com) and the Lightning host
+     (employbridge.lightning.force.com). Record pages live on the Lightning one,
+     so an API host is translated rather than refused -- whichever somebody
+     pastes, the link opens the record instead of bouncing through a redirect. */
   function rcBase() {
     var row = (state.stores.appConfig || []).filter(function (c) { return c.key === 'rcBaseUrl'; })[0];
-    return row && row.value ? String(row.value).replace(/\/+$/, '') : '';
+    var v = row && row.value ? String(row.value).trim() : '';
+    if (!v) return '';
+    if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+    v = v.replace(/\/+$/, '');
+    return v.replace(/^(https:\/\/[^.\/]+)\.my\.salesforce\.com$/i, '$1.lightning.force.com');
   }
   function rcLink(id, object, label, cls) {
     var base = rcBase();
@@ -512,7 +521,7 @@
     // The object name for an assignment is org-specific, so it is configurable
     // alongside the base URL rather than assumed.
     var row = (state.stores.appConfig || []).filter(function (c) { return c.key === 'rcAssignmentObject'; })[0];
-    return rcLink(p.assignmentId, (row && row.value) || 'Assignment__c', label || 'RC assignment');
+    return rcLink(p.assignmentId, (row && row.value) || 'TR1__Closing_Report__c', label || 'RC assignment');
   }
 
   function statusChip(p) {
@@ -2219,9 +2228,9 @@
      not a deploy. */
   var APP_SETTINGS = [
     { key: 'rcBaseUrl', label: 'RC (Salesforce) base URL',
-      hint: 'e.g. https://yourorg.lightning.force.com — blank shows no links' },
+      hint: 'e.g. https://employbridge.lightning.force.com — a my.salesforce.com host works too. Blank shows no links.' },
     { key: 'rcAssignmentObject', label: 'RC assignment object API name',
-      hint: 'e.g. Assignment__c. Only needed for assignment links.' }
+      hint: 'The object an assignment record lives on. TargetRecruit uses TR1__Closing_Report__c; its ids start "a58".' }
   ];
   function appConfigPanel(admin) {
     var rows = state.admin.appConfig || [];

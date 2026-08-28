@@ -77,8 +77,7 @@
     // Coverage inputs are uploaded reports, not shared collections: the schedule
     // lands weekly, the on-premise snapshot several times a day.
     coverage: {
-      schedule: null, presence: null,
-      scheduleFile: '', presenceFile: '',
+      presence: null, presenceFile: '',
       asOf: null, grace: ScheduleCore.GRACE_MINUTES,
       statusFilter: 'exceptions', location: 'all',
       // Spreadsheet export: which branch block is being rebuilt.
@@ -697,7 +696,8 @@
     var body;
     if (!mine && !att.checks) {
       body = empty('No schedule on file',
-        week ? 'This associate is not on the stored weekly schedule.' : 'Upload a weekly schedule in On-Premise.');
+        week ? 'This associate is not on the stored weekly schedule.'
+             : 'Their shift tag above comes from the PLX workbook; upload one in On-Premise.');
     } else {
       var dates = mine ? Object.keys(mine.shifts).sort() : [];
       body = (mine ? '<div class="sched-week">' + dates.map(function (d) {
@@ -753,57 +753,31 @@
   }
 
   /* ---------- coverage ----------
-     The weekly schedule is the plan; the on-premise export is the fact. Crossing
-     them answers the question a supervisor actually asks at 11am: is the person who
-     is supposed to be on the floor here?
+     The workbook is the plan; the on-premise export is the fact. Crossing them
+     answers the question a supervisor actually asks at 11am: is the person who is
+     supposed to be on the floor here?
 
-     The two files move at different speeds -- the schedule lands once a week, the
-     on-premise report is re-pulled several times a day -- so the parsed schedule is
-     kept for the browser session and only the CSV has to be dropped again on the
-     second and third pass. Session, not localStorage: a stale week's schedule must
-     never quietly outlive its period. The period is checked against the as-of date
-     as well, and reported when it does not cover it.
+     The two move at different speeds -- the workbook lands once a day, the
+     on-premise report is re-pulled several times -- so only the CSV has to be
+     dropped again on the second and third pass. The workbook's shift tags are
+     stored server-side, and the schedule is derived from them for whatever as-of
+     is being looked at, so it can never be a week out of date the way an uploaded
+     export could. How old the workbook itself is, is reported by staleNote().
 
      All of the matching lives in schedule-core.js, the same way the Beeline/RC
      crosscheck lives in reconcile-core.js, so an automated import can reuse it
-     without going through the DOM. */
-  var SCHED_CACHE = 'geodis:schedule';
+     without going through the DOM.
 
-  function cacheSchedule(parsed, fileName) {
-    try { sessionStorage.setItem(SCHED_CACHE, JSON.stringify({ parsed: parsed, fileName: fileName })); }
-    catch (e) { /* private mode or quota: the schedule just will not survive a reload */ }
-  }
-  function restoreSchedule() {
-    try {
-      var raw = sessionStorage.getItem(SCHED_CACHE);
-      if (!raw) return;
-      var v = JSON.parse(raw);
-      if (!v || !v.parsed || !Array.isArray(v.parsed.people) || !v.parsed.people.length) return;
-      state.coverage.schedule = v.parsed;
-      state.coverage.scheduleFile = v.fileName || '';
-    } catch (e) { /* corrupt cache: start clean rather than render garbage */ }
-  }
+     What was here, and why it went: a "Weekly schedule" upload of the WFM
+     "Employee Schedule - Weekly" export. The workbook says who works which
+     shift, so a second upload saying the same thing could only disagree -- and
+     did, silently, whenever the stored week was older than the workbook. The
+     stored weeks are still readable on a profile; nothing new is written.
 
-  /* ---------- coverage persistence ----------
-     sessionStorage only ever made the schedule survive a reload in ONE tab. The
-     record of who was scheduled, who was actually here, and why they were not
-     lives in Firebase: partitioned by week for the plan and by day for the
+     ---------- coverage persistence ----------
+     The record of who was scheduled, who was actually here, and why they were
+     not lives in Firebase: partitioned by week for the plan and by day for the
      checks. See DATA_MODEL.md. */
-  function persistSchedule(parsed, fileName) {
-    var period = parsed.periodStart || SuiteData.weekStart(ScheduleCore.isoDate(new Date()));
-    if (!period) return;
-    var doc = ScheduleCore.scheduleForStorage(parsed, {
-      profiles: state.profiles, presence: state.coverage.presence,
-      normBadge: SuiteData.normBadge, fileName: fileName
-    });
-    state.coverage.saving = 'schedule';
-    render();
-    SuiteData.saveSchedule(period, doc).then(function () {
-      state.coverage.storedWeek = doc;
-      savedOk();
-    }).catch(function (err) { saveFailed('schedule', err); });
-  }
-
   function persistCheck(fileName) {
     var res = buildCoverageResult();
     if (!res) return;   // no schedule loaded yet; the check is saved once there is one
@@ -862,41 +836,8 @@
         state.coverage.storedWeek = r[0];
         state.coverage.storedDay = r[1];
         state.coverage.dates = r[2] || [];
-        /* A stored week also means the coverage view works on a fresh browser
-           with only the on-premise export dropped in -- but it is held aside
-           rather than adopted here. This runs before the shift tags have
-           necessarily loaded, and a WFM export from earlier in the week would
-           otherwise win over a workbook uploaded this morning without anybody
-           choosing it. activeSchedule() decides once both are known. */
-        if (r[0] && r[0].people && r[0].people.length) {
-          state.coverage.storedSchedule = storedWeekToParsed(r[0]);
-          state.coverage.storedScheduleFile = r[0].fileName || 'Stored schedule';
-        }
         render();
       });
-  }
-  // The stored shape drops the fields only the parser needs, so rebuild just
-  // enough for buildCoverage() to run against it.
-  function storedWeekToParsed(week) {
-    return {
-      periodStart: week.periodStart, periodEnd: week.periodEnd,
-      executedAt: week.executedAt, dates: [], warnings: [],
-      people: (week.people || []).map(function (p) {
-        var shifts = {};
-        Object.keys(p.shifts || {}).forEach(function (d) {
-          var sh = p.shifts[d];
-          shifts[d] = {
-            raw: sh.raw, start: sh.start, end: sh.end, overnight: !!sh.overnight,
-            hours: sh.start != null && sh.end != null ? (sh.end - sh.start) / 60 : 0,
-            suspect: false, code: sh.code || ''
-          };
-        });
-        return {
-          name: p.name, nameKey: p.nameKey, location: p.location,
-          job: p.job, shifts: shifts, ambiguous: false
-        };
-      })
-    };
   }
 
   function locLeaf(path) {
@@ -914,29 +855,16 @@
      runs, so a schedule is derived from it rather than uploaded. An uploaded WFM
      export still wins when there is one -- it knows a specific day's PTO, which
      a standing schedule cannot. */
+  /* The workbook is the only schedule. Its shift tags are stored server-side, so
+     this works on a fresh browser with nothing but the on-premise export dropped
+     in -- the workbook does not have to be re-uploaded to see coverage. */
   function activeSchedule() {
-    var c = state.coverage;
-    // A schedule dropped in by hand wins, because that is a deliberate act and
-    // it is the only source that knows a specific day's PTO and holidays.
-    if (c.schedule) return c.schedule;
     var tags = state.stores.shifts || [];
-    if (tags.length) {
-      return ShiftKey.scheduleFromShifts(tags, {
-        asOf: coverageAsOf(),
-        nameKeyOf: ScheduleCore.nameKey     // the form buildCoverage joins on
-      });
-    }
-    // No workbook yet: fall back to whatever week the server still holds.
-    return c.storedSchedule || null;
-  }
-  /* The schedule whose date range a warning should be measured against. The
-     derived one always covers today by construction, so it needs no warning and
-     returns nothing here. */
-  function effectiveScheduleMeta() {
-    var c = state.coverage;
-    if (c.schedule) return c.schedule;
-    if ((state.stores.shifts || []).length) return null;
-    return c.storedSchedule || null;
+    if (!tags.length) return null;
+    return ShiftKey.scheduleFromShifts(tags, {
+      asOf: coverageAsOf(),
+      nameKeyOf: ScheduleCore.nameKey     // the form buildCoverage joins on
+    });
   }
   function buildCoverageResult() {
     var c = state.coverage;
@@ -979,21 +907,13 @@
 
   function covSources() {
     var c = state.coverage;
-    var schedMeta = '', presMeta = '';
-    if (c.schedule) {
-      schedMeta = c.schedule.people.length + ' associates · week of ' +
-        (c.schedule.periodStart || '?') + ' to ' + (c.schedule.periodEnd || '?');
-    }
+    var presMeta = '';
     if (c.presence) {
       var on = c.presence.people.filter(function (p) { return p.present; }).length;
       presMeta = c.presence.people.length + ' associates · ' + on + ' on premise';
     }
     return '<div class="cov-sources">' +
-      covDrop('schedule', 1, 'Weekly schedule (optional)',
-        'Not needed — the workbook already says who works which shift. Upload this only when you ' +
-        'need a specific day right: it marks PTO and holidays per date, which a standing shift cannot.',
-        c.scheduleFile, schedMeta) +
-      covDrop('workbook', 3, 'PLX workbook',
+      covDrop('workbook', 1, 'PLX workbook',
         'The GEODIS spreadsheet. Refreshes the roster, shift tags, open orders and attendance ' +
         'points in one pass. Upload it whenever you run attendance.',
         state.plx.sync && state.plx.sync.fileName, plxMeta()) +
@@ -1055,23 +975,15 @@
   function scheduleSourceNote(res) {
     if (res.scheduleSource !== 'workbook') return '';
     var gaps = res.scheduleGaps || [];
-    var stored = state.coverage.storedSchedule;
     return '<div class="sched-source">Scheduled from the <b>PLX workbook</b>' +
       (gaps.length ? ' · <span class="warn-text">' + gaps.length + ' associate(s) have a shift the Key ' +
         'gives no single set of hours for, so they cannot be scheduled</span>' : '') +
-      (stored ? ' · a stored WFM schedule for the week of ' + esc(stored.periodStart || '?') +
-        ' is not being used; upload one above to override the workbook for a specific day' : '') +
       '</div>';
   }
 
   function covWarnings(res) {
     var c = state.coverage, notes = [];
     var day = ScheduleCore.isoDate(coverageAsOf());
-    var meta = effectiveScheduleMeta();
-    if (meta && meta.periodStart && (day < meta.periodStart || day > meta.periodEnd)) {
-      notes.push('The loaded schedule covers ' + meta.periodStart + ' to ' + meta.periodEnd +
-        ', which does not include ' + day + '. Load the current week before acting on this.');
-    }
     /* An on-premise row that reaches no profile is invisible everywhere else --
        no attendance, no points, no profile view -- so it is called out first and
        loudest rather than left to be noticed. */
@@ -1489,7 +1401,7 @@
     return 'Refreshed · ' + bits.join(' · ');
   }
 
-  function readCoverageFile(file, kind) {
+  function readCoverageFile(file) {
     var reader = new FileReader();
     reader.onload = function (e) {
       try {
@@ -1499,24 +1411,15 @@
         // merged column to its date; cellDates would turn it into a Date and lose
         // the alignment the parser depends on.
         var aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
-        if (kind === 'schedule') {
-          var parsed = ScheduleCore.parseSchedule(aoa);
-          if (!parsed.people.length) throw new Error('No employee rows were found. Is this the "Employee Schedule - Weekly" export?');
-          state.coverage.schedule = parsed;
-          state.coverage.scheduleFile = file.name;
-          cacheSchedule(parsed, file.name);   // fast local restore; Firebase is the record
-          persistSchedule(parsed, file.name);
-        } else {
-          var pres = ScheduleCore.parseOnPremise(aoa);
-          if (!pres.people.length) {
-            throw new Error(pres.warnings[0] || 'No employee rows were found. Is this the "On Premise - Simple" export?');
-          }
-          state.coverage.presence = pres;
-          state.coverage.presenceFile = file.name;
-          // Each upload re-dates the check from the export time in the file name.
-          state.coverage.asOf = ScheduleCore.asOfFromFileName(file.name) || new Date();
-          persistCheck(file.name);
+        var pres = ScheduleCore.parseOnPremise(aoa);
+        if (!pres.people.length) {
+          throw new Error(pres.warnings[0] || 'No employee rows were found. Is this the "On Premise - Simple" export?');
         }
+        state.coverage.presence = pres;
+        state.coverage.presenceFile = file.name;
+        // Each upload re-dates the check from the export time in the file name.
+        state.coverage.asOf = ScheduleCore.asOfFromFileName(file.name) || new Date();
+        persistCheck(file.name);
         render();
       } catch (err) {
         console.error(err);
@@ -2442,9 +2345,8 @@
     if (e.target.closest('[data-cov-now]')) { state.coverage.asOf = new Date(); render(); return; }
     if (e.target.closest('[data-cov-clear]')) {
       if (!confirm('Clear the loaded schedule and on-premise files?')) return;
-      state.coverage.schedule = state.coverage.presence = null;
-      state.coverage.storedSchedule = null;
-      state.coverage.scheduleFile = state.coverage.presenceFile = state.coverage.storedScheduleFile = '';
+      state.coverage.presence = null;
+      state.coverage.presenceFile = '';
       state.coverage.asOf = null;
       try { sessionStorage.removeItem(SCHED_CACHE); } catch (err) { /* nothing cached */ }
       render();
@@ -2616,7 +2518,7 @@
     var cov = e.target.closest('[data-cov]');
     if (cov && cov.files && cov.files[0]) {
       if (cov.dataset.cov === 'workbook') { readPlxUpload(cov.files[0]); return; }
-      readCoverageFile(cov.files[0], cov.dataset.cov);
+      readCoverageFile(cov.files[0]);
       return;
     }
     var book = e.target.closest('[data-shift-book]');
@@ -2725,7 +2627,6 @@
     render();
   });
 
-  restoreSchedule();
 
   loadStoredCoverage();
   SuiteAuth.onChange(function (snap) {

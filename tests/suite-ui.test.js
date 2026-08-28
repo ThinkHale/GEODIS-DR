@@ -109,7 +109,9 @@ w.GEODISSuite.reload().then(()=>{
   console.log('— coverage: before any report is loaded —');
   click($('[data-nav="coverage"]'));
   t('on-premise tab renders', d.body.textContent.includes('On-Premise'));
-  t('three file pickers are offered', $$('[data-cov]').length===3);
+  t('two file pickers are offered', $$('[data-cov]').length===2);
+  t('and neither is the retired weekly schedule',
+    $$('[data-cov]').map(x=>x.dataset.cov).sort().join()==='presence,workbook');
   t('including the workbook', !!d.querySelector('[data-cov="workbook"]'));
   t('it asks for what it needs before showing numbers',
     d.body.textContent.includes('the PLX workbook and the on-premise export'));
@@ -120,15 +122,17 @@ w.GEODISSuite.reload().then(()=>{
   // would after a real upload.
   const SC=require('../schedule-core.js');
   const cs=w.GEODISSuite.state.coverage;
-  cs.schedule=SC.parseSchedule([
-    ['Time Period :','','8/23/2026 - 8/29/2026'],
-    ['GEODIS/US/CL/CLSCEN/CLSL/CL1523/1523'],
-    ['Employee','','','Primary Job','','Sun','','','Mon','','Tue'],
-    ['','','','','','8/23/2026','','','8/24/2026','','8/25/2026'],
-    ['Reed, Ava','','','Loader','','','','','7:30 AM - 4:00 PM','','7:30 AM - 4:00 PM'],
-    ['Nash, Cleo','','','Picker','','','','','7:30 AM - 4:00 PM','','7:30 AM - 4:00 PM'],
-    ['Vale, Vic','','','Loader','','','','','9:30 PM - 6:00 AM','','']
-  ]);
+  /* The schedule comes from the workbook's shift tags now, not a separate
+     upload. These are the stored records a workbook upload leaves behind. */
+  w.GEODISSuite.state.stores.shifts=[
+    { id:'s1', name:'Reed, Ava', nameKey:'ava reed', shift:'1st', building:'1523',
+      hours:'7:30am-4pm Mon-Fri', source:'PLX workbook' },
+    { id:'s2', name:'Nash, Cleo', nameKey:'cleo nash', shift:'1st', building:'1523',
+      hours:'7:30am-4pm Mon-Fri', source:'PLX workbook' },
+    // A night shift that started Monday and ended at 6am Tuesday.
+    { id:'s3', name:'Vale, Vic', nameKey:'vale vic', shift:'3rd', building:'1523',
+      hours:'9:30pm-6am Sun-Mon', source:'PLX workbook' }
+  ];
   cs.presence=SC.parseOnPremise([
     ['Employee Full Name & ID','On Premises','Primary location (path)','Reports To'],
     ['Reed, Ava (1001)','true','GEODIS/US/CL/CLSCEN/CLSL/CL1523/1523','Boss, Bea'],
@@ -137,7 +141,7 @@ w.GEODISSuite.reload().then(()=>{
     ['Extra, Eli (80-EELI1)','true','GEODIS/US/CL/CLSCEN/CLSL/CL1523/1523','Boss, Bea']
   ]);
   cs.asOf=new Date(2026,7,25,11,12);
-  cs.scheduleFile='schedule.xlsx'; cs.presenceFile='onprem.csv';
+  cs.presenceFile='onprem.csv';
   click($('[data-nav="coverage"]'));
 
   t('the metric strip appears', $$('.metric').length===4);
@@ -172,12 +176,18 @@ w.GEODISSuite.reload().then(()=>{
   click(link);
   t('clicking it opens that associate\'s profile', d.body.textContent.includes('Assignment, attendance'));
 
-  console.log('— coverage: a stale schedule is called out —');
+  console.log('— coverage: the schedule follows the as-of date —');
   click($('[data-nav="coverage"]'));
   cs.asOf=new Date(2026,8,10,11,12);
   click($('[data-nav="coverage"]'));
-  t('a schedule that does not cover the as-of date is flagged',
-    d.body.textContent.includes('does not include 2026-09-10'));
+  /* A derived schedule is built around whatever as-of is being looked at, so it
+     cannot be a week out of date the way an uploaded export could -- there is no
+     period to fall outside of. What CAN go stale is the workbook itself, and
+     that is reported by its own age rather than by a schedule period. */
+  t('no period warning, because a derived schedule has no period to miss',
+    !d.body.textContent.includes('does not include'));
+  t('a Thursday in September still resolves the Mon-Fri shift',
+    d.body.textContent.includes('Reed, Ava'));
 
   console.log('\n'+pass+' passed, '+fail+' failed');
   process.exit(fail?1:0);

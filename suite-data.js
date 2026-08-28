@@ -296,9 +296,6 @@
       .then(function (d) { return d.schedule && d.schedule.people ? d.schedule : null; })
       .catch(function (err) { console.warn('Could not load the stored schedule.', err); return null; });
   }
-  function saveSchedule(period, doc) {
-    return post('schedule=1&period=' + encodeURIComponent(period), doc);
-  }
   // Which days have stored checks, for the review picker.
   /* Admin collections, loaded only when the Settings page is opened -- most
      visits never need them. */
@@ -387,7 +384,6 @@
     replaceCollection: replaceCollection,
     weekStart: weekStart,
     loadSchedule: loadSchedule,
-    saveSchedule: saveSchedule,
     loadCoverage: loadCoverage,
     loadCoverageDates: loadCoverageDates,
     loadAdmin: loadAdmin,

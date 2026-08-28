@@ -29,6 +29,17 @@ const records = [
   { badge: '80-AMUNOZ8734', person: 'Abel Munoz', action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago', crmStart: '6/9/2026' }
 ];
 
+/* The schedule is the workbook's shift tags, stored server-side, rather than a
+   separate weekly upload. */
+const shiftTags = [
+  { id: 'eid:80-LGRACH3897', eid: '80-LGRACH3897', name: 'Grachen, Luz', nameKey: 'grachen luz',
+    shift: '1st', building: '1502', hours: '6am-2:30pm Mon-Fri', source: 'PLX workbook' },
+  { id: 'eid:80-FPORRA4387', eid: '80-FPORRA4387', name: 'Porras, Fernando', nameKey: 'fernando porras',
+    shift: '1st', building: '1502', hours: '6am-2:30pm Mon-Fri', source: 'PLX workbook' },
+  { id: 'eid:80-AMUNOZ8734', eid: '80-AMUNOZ8734', name: 'Munoz, Abel', nameKey: 'abel munoz',
+    shift: '2nd', building: '1502', hours: '3pm-11:30pm Mon-Fri', source: 'PLX workbook' }
+];
+
 const posts = [];
 let storedDay = {}, storedWeek = {};
 const dom = new JSDOM(`<!doctype html><html><body class="suite-active">
@@ -58,12 +69,13 @@ w.fetch = (url, opt) => {
   if (u.indexOf('plx=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ sync: {} }) });
   if (u.indexOf('schedule=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ schedule: storedWeek }) });
   if (u.indexOf('coverage=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ coverage: storedDay }) });
+  if (u.indexOf('shifts=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ shifts: shiftTags }) });
   const k = u.match(/\?(\w+)=1/)[1];
-  const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions', performance: 'performance', shifts: 'shifts', discrepancies: 'discrepancies' };
+  const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions', performance: 'performance', discrepancies: 'discrepancies' };
   return Promise.resolve({ ok: true, json: () => Promise.resolve({ [map[k]]: [] }) });
 };
 ['auth-core.js', 'tests/suite-auth-stub.js', 'suite-data.js', 'schedule-core.js', 'shift-key.js', 'pipeline-core.js', 'timeoff-core.js', 'payroll-core.js', 'suite.js'].forEach(f => w.eval(fs.readFileSync(R + f, 'utf8')));
-const d = w.document, $ = s => d.querySelector(s);
+const d = w.document, $ = s => d.querySelector(s), $$ = s => Array.from(d.querySelectorAll(s));
 const click = el => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
 const upload = (kind, aoa, name) => {
   nextAoa = aoa;
@@ -78,16 +90,11 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   d.dispatchEvent(new w.CustomEvent('geodis:records', { detail: { records } }));
   click($('[data-nav="coverage"]'));
 
-  console.log('— uploading the weekly schedule saves it —');
-  upload('schedule', scheduleAoa, 'employee_schedule_weekly.xlsx');
-  await settle(60);
-  const schedPost = posts.find(p => p.url && p.url.indexOf('schedule=1') !== -1);
-  t('a schedule POST was issued', !!schedPost);
-  t('stored under the week it covers', schedPost.url.indexOf('period=2026-08-23') !== -1);
-  t('every scheduled person written', schedPost.body.people.length === 3);
-  const luz = schedPost.body.people.find(p => p.name === 'Grachen, Luz');
-  t('shifts stored per date', luz.shifts['2026-08-25'].raw === '6:00 AM - 2:30 PM');
-  t('the schedule is no longer only in sessionStorage', !!schedPost.body.periodStart);
+  console.log('— the schedule comes from the workbook, with no second upload —');
+  t('only the workbook and the on-premise export are asked for',
+    $$('[data-cov]').map(x => x.dataset.cov).sort().join() === 'presence,workbook');
+  t('nothing is POSTed to the schedule endpoint any more',
+    !posts.some(p => p.url && p.url.indexOf('schedule=1') !== -1));
 
   console.log('— uploading on-premise saves a check —');
   upload('presence', onPremAoa, 'On Premise - Simple_2026-08-25T09_00_00.123.csv');
@@ -156,7 +163,10 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   click($('[data-profile="80-FPORRA4387"]'));
   const txt = d.body.textContent;
   t('schedule panel present', txt.indexOf('Schedule & presence') !== -1);
-  t("that person's shift is shown", txt.indexOf('6:00 AM - 2:30 PM') !== -1);
+  // From the workbook's shift tag, in the workbook's own notation -- the WFM
+  // week grid only appears for weeks that were uploaded before that went away.
+  t("that person's shift is shown", txt.indexOf('6am-2:30pm Mon-Fri') !== -1);
+  t('and which building it is at', txt.indexOf('Building 1502') !== -1);
   t('the on-premise check is shown', txt.indexOf('Not on premise') !== -1 || txt.indexOf('Not clocked in') !== -1);
   t('the documentation is shown', txt.indexOf('Badge / system issue') !== -1);
 

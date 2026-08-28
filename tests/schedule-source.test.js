@@ -1,12 +1,12 @@
 /* Which schedule the on-premise page is actually using.
 
    The workbook says who works which shift, and it is uploaded daily. A WFM
-   schedule export is uploaded rarely, if ever, and the server keeps the last
-   one. If the stored export quietly wins, the floor is measured against a
-   roster that may be days stale -- people who have since left the agency
-   workbook keep showing as "scheduled", and people added since are invisible.
-   The workbook is the default; an export overrides it only when someone
-   deliberately drops one in. */
+   schedule export used to be uploadable alongside it, and the server still
+   holds the last one anybody sent. That export must never come back to life as
+   the schedule: it can be days stale, so people who have since left the agency
+   workbook would keep showing as "scheduled" and people added since would be
+   invisible. The workbook is now the only source, and the stored weeks are
+   history that nothing schedules from. */
 const { JSDOM } = require('jsdom');
 const fs = require('fs');
 const R = require('path').join(__dirname, '..') + '/';
@@ -80,15 +80,16 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   upload('presence', onPremAoa, 'On Premise - Simple_' + TODAY + 'T09_00_00.000.csv');
   await settle(120);
 
-  console.log('— the workbook wins over a stored WFM export —');
+  console.log('— the workbook is the schedule —');
   const txt = () => d.body.textContent;
   t('the page says which source it used', txt().indexOf('Scheduled from the') !== -1);
   t('and names the workbook', txt().indexOf('PLX workbook') !== -1);
   t('somebody off the workbook is not reported as scheduled',
     !/Ghost, Gary[\s\S]{0,400}?scheduled/i.test(txt()));
-  t('the passed-over export is disclosed, not hidden',
-    txt().indexOf('stored WFM schedule') !== -1);
   t('the person on both sources is scheduled', txt().indexOf('Real, Rita') !== -1);
+  t('the retired weekly-schedule upload is gone from the page',
+    Array.from(d.querySelectorAll('[data-cov]')).map(x => x.dataset.cov).sort().join()
+      === 'presence,workbook');
 
   /* Gary is off the workbook AND off the clock, so he is not offered as somebody
      to connect -- but he is not swept away either: he is counted in the banner
@@ -104,24 +105,16 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   t('and is still in the table itself', d.querySelector('.suite-table').textContent.indexOf('Ghost, Gary') !== -1);
   t('reading as not scheduled', /Ghost, Gary[\s\S]{0,300}?Not scheduled/.test(d.querySelector('.suite-table').textContent));
 
-  console.log('— an export dropped in by hand still overrides it —');
-  // The real "Employee Schedule - Weekly" shape: a period header, a location
-  // line, then day columns whose dates sit on the row below the day names.
-  const us = x => (x.getMonth() + 1) + '/' + x.getDate() + '/' + x.getFullYear();
-  const sun = new Date(); sun.setDate(sun.getDate() - sun.getDay());
-  const sat = new Date(); sat.setDate(sat.getDate() - sat.getDay() + 6);
-  const dayName = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date().getDay()];
-  upload('schedule', [
-    ['Time Period :', '', us(sun) + ' - ' + us(sat)],
-    ['GEODIS/US/CL/CLNCEN/CLCHI/CL1517/1517'],
-    ['Employee', 'Primary Job', dayName],
-    ['', '', us(new Date())],
-    ['Ghost, Gary', 'OPR2', '6:00 AM - 11:00 PM']
-  ], 'employee_schedule_weekly.xlsx');
-  await settle(120);
-  t('the note no longer claims the workbook', d.body.textContent.indexOf('Scheduled from the') === -1);
-  t('and the hand-dropped export is what is scheduling now',
-    /Ghost, Gary/.test(d.body.textContent));
+  console.log('— the stored export cannot come back as the schedule —');
+  /* Gary is on the stored WFM week and nowhere else. If that week were ever
+     adopted again he would read as scheduled; the workbook does not know him,
+     so he must not. */
+  const garyRow = Array.from(d.querySelectorAll('.suite-table tbody tr'))
+    .find(tr => tr.textContent.indexOf('Ghost, Gary') !== -1);
+  t('somebody only on the stored week is never called scheduled',
+    garyRow && garyRow.textContent.indexOf('Not scheduled') !== -1);
+  t('and the workbook is still named as the source',
+    d.body.textContent.indexOf('Scheduled from the') !== -1);
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

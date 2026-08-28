@@ -215,3 +215,8 @@ body.suite-active>header,body.suite-active>main,body.suite-active>.foot{display:
 /* A point value that policy has cleared: shown, struck, and replaced by zero. */
 .pts-void{text-decoration:line-through;color:var(--suite-muted)}
 .cov-status.ok{background:#e3f2e9;color:var(--suite-green)}
+/* ---- phone numbers ---- */
+.phone-cell{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.phone-num{font:600 12px 'IBM Plex Mono';color:var(--suite-blue);text-decoration:none;white-space:nowrap}
+.phone-num:hover{text-decoration:underline}
+.phone-cell .sub{flex-basis:100%}

@@ -77,14 +77,15 @@ const fetchStub = async (u, o) => { fetched = { u, o }; return { ok: true, statu
 const Intake = require('../form-intake.js');
 const AttendanceImport = require('../functions/attendance-import.js');
 const rosterProfiles = async () => [];
+const Contacts = require('../contacts-core.js');
 
 const built = new Function(
   'bucket', 'readJsonFile', 'setKvCors', 'SYNC_KEY',
   'NOTES_ORIGIN', 'XLSX', 'ShiftKey', 'Sched', 'Intake', 'AttendanceImport',
-  'rosterProfiles', 'fetch', 'console',
+  'Contacts', 'rosterProfiles', 'fetch', 'console',
   consts + helpers + handler + '\nreturn {handlePlx, handlePlxUpload, handlePlxRefresh, COLLECTIONS};'
 )(bucket, readJsonFile, setKvCors, SYNC_KEY,
-  NOTES_ORIGIN, XLSX, SK, Sched, Intake, AttendanceImport, rosterProfiles, fetchStub, console);
+  NOTES_ORIGIN, XLSX, SK, Sched, Intake, AttendanceImport, Contacts, rosterProfiles, fetchStub, console);
 const { handlePlx, handlePlxUpload, handlePlxRefresh, COLLECTIONS } = built;
 
 const mkRes = () => { const r = { code: null, body: null, set() { return r }, status(c) { r.code = c; return r }, json(b) { r.body = b; return r }, send() { return r } }; return r; };

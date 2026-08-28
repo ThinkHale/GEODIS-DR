@@ -65,7 +65,7 @@
     updatedAt: null,
     profiles: new Map(),
     tasks: { kind: 'all', showDone: false },
-    stores: { attendance: [], timeOff: [], requisitions: [], performance: [], shifts: [], discrepancies: [], tasks: [],
+    stores: { attendance: [], timeOff: [], requisitions: [], performance: [], shifts: [], discrepancies: [], tasks: [], contacts: [],
       associatePto: [], locations: [], appConfig: [], timeclockLinks: [] },
     connectFor: '', connectQuery: '', connectKind: 'timeoff',
     payroll: { periods: [], week: '', period: null, tab: 'discrepancies', loading: false },
@@ -162,6 +162,10 @@
       locations: state.stores.locations,
       associatePto: state.stores.associatePto,
       shiftKeyOf: ScheduleCore.rosterKey,
+      phoneOf: (function () {
+        var ix = ContactsCore.index(state.stores.contacts, SuiteData.normBadge);
+        return function (p) { return ContactsCore.lookup(ix, p, ScheduleCore.rosterKey); };
+      })(),
       // Approved time off clears the points for the day it covers.
       ptoCover: function (requests, iso) {
         for (var i = 0; i < (requests || []).length; i++) {
@@ -688,6 +692,7 @@
       schedulePanel(p) +
       '<section class="suite-panel"><div class="suite-panel-head"><h2>Assignment &amp; reconciliation</h2></div>' +
       '<dl class="detail-list">' +
+      '<dt>Mobile</dt><dd>' + phoneCell(p, { edit: true }) + '</dd>' +
       detail('RC start', p.crmStart) + detail('Beeline start', p.beeStart) +
       detail('End date', p.endDate) + detail('End reason', p.endReason) +
       detail('Market', p.market + (p.marketVerified ? '' : ' (inferred)')) +
@@ -985,6 +990,30 @@
     if (!a.excusedBy) return esc(a.points || 0);
     return '<span class="pts-void">' + esc(a.originalPoints || 0) + '</span> ' +
       '<b>0</b><div class="sub">' + esc(a.excusedBy.type || 'PTO') + ' approved for this day</div>';
+  }
+
+  /* A number on the row that says somebody is missing.
+
+     The workflow this serves is looking the person up in TextUs and Vonage,
+     both of which are searched by number -- so it is one click to copy, and a
+     tel: link for a phone. A number matched only on a name says so: it is worth
+     less confidence than one somebody typed against a badge, and ringing the
+     wrong person is the failure worth avoiding. */
+  function phoneCell(p, opts) {
+    opts = opts || {};
+    if (!p || !p.badge) return '<span class="sub">—</span>';
+    if (!p.phone) {
+      return '<button class="suite-btn tiny" data-phone-edit="' + esc(p.badge) + '">Add number</button>';
+    }
+    var byName = /name/i.test(p.phoneSource || '') || (p.phoneSource || '').indexOf('workbook') === 0;
+    return '<div class="phone-cell">' +
+      '<a class="phone-num" href="tel:' + esc(ContactsCore.e164(p.phone)) + '">' +
+      esc(ContactsCore.format(p.phone)) + '</a>' +
+      '<button class="suite-btn tiny" data-phone-copy="' + esc(ContactsCore.format(p.phone)) +
+      '" title="Copy for TextUs or Vonage">Copy</button>' +
+      (opts.edit ? '<button class="suite-btn tiny" data-phone-edit="' + esc(p.badge) + '">Edit</button>' : '') +
+      (p.phoneSource ? '<div class="sub">' + esc(p.phoneSource) + '</div>' : '') +
+      '</div>';
   }
 
   function covMetrics(s) {
@@ -1342,7 +1371,7 @@
 
   function covTable(rows, total) {
     return '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
-      '<th>Associate</th><th>Status</th><th>On premise</th><th>Scheduled shift</th>' +
+      '<th>Associate</th><th>Status</th><th>On premise</th><th>Mobile</th><th>Scheduled shift</th>' +
       '<th>Location</th><th>Job</th><th>Supervisor</th><th>Documented</th></tr></thead><tbody>' +
       rows.slice(0, MAX_ROWS).map(function (r) {
         // Only a row that reached a roster profile can open one.
@@ -1359,6 +1388,10 @@
           (r.inSchedule ? '' : ' · no schedule row') + (r.ambiguous ? ' · duplicate name' : '') + '</div></td>' +
           '<td><span class="cov-status ' + r.severity + '">' + esc(r.statusLabel) + '</span>' + ptoNote(r) + '</td>' +
           '<td>' + (r.present ? '<span class="cov-dot on">Yes</span>' : '<span class="cov-dot off">No</span>') + '</td>' +
+          /* Only where somebody is not where they should be. A number against
+             every row would be a column of noise on a normal day. */
+          '<td>' + (r.severity === 'bad' || r.severity === 'warn'
+            ? phoneCell(r.badge ? profile(r.badge) : null) : '<span class="sub">—</span>') + '</td>' +
           '<td>' + covShiftCell(r) + '</td>' +
           '<td>' + esc(locLeaf(r.location) || '—') + '</td>' +
           '<td>' + esc(r.job || '—') + '</td>' +
@@ -2424,7 +2457,7 @@
   }
   var LOCAL_KEY = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions',
     discrepancies: 'discrepancies', users: 'users', locations: 'locations', shiftTypes: 'shiftTypes',
-    appConfig: 'appConfig', tasks: 'tasks' };
+    appConfig: 'appConfig', tasks: 'tasks', contacts: 'contacts' };
 
   /* Settings rows live in state.admin, not state.stores, so they get their own
      writer. It reloads the collection after each write rather than patching in
@@ -2502,6 +2535,45 @@
     }
     var prof = e.target.closest('[data-profile]');
     if (prof) { go('profile', prof.dataset.profile); return; }
+
+    var copyPhone = e.target.closest('[data-phone-copy]');
+    if (copyPhone) {
+      var num = copyPhone.dataset.phoneCopy;
+      var done = function () {
+        copyPhone.textContent = 'Copied';
+        setTimeout(function () { copyPhone.textContent = 'Copy'; }, 1200);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(num).then(done, function () { window.prompt('Copy this number:', num); });
+      } else {
+        window.prompt('Copy this number:', num);
+      }
+      return;
+    }
+
+    var editPhone = e.target.closest('[data-phone-edit]');
+    if (editPhone) {
+      var pr = profile(editPhone.dataset.phoneEdit);
+      if (!pr) return;
+      var typed = window.prompt('Mobile number for ' + pr.name +
+        '\n\nUsed to look them up in TextUs and Vonage.', ContactsCore.format(pr.phone));
+      if (typed === null) return;                       // cancelled
+      var trimmed = String(typed).trim();
+      // Clearing it is a deliberate act and has to be possible; a typo is not.
+      if (trimmed && !ContactsCore.isValid(trimmed)) {
+        alert('"' + trimmed + '" is not a ten-digit US number, so it was not saved.\n\n' +
+          'A wrong number is worse than none -- it reaches somebody, just not this person.');
+        return;
+      }
+      var actor = currentActor(true);
+      if (!actor) return;
+      persist('contacts', ContactsCore.record({
+        badge: pr.badge, name: pr.name, phone: trimmed,
+        eid: pr.wfmId || '', nameKey: ScheduleCore.rosterKey(pr.name),
+        source: 'Entered by hand'
+      }, actor, new Date()), 'contacts');
+      return;
+    }
 
     if (e.target.closest('[data-add-task]')) { modal('task', ''); return; }
 

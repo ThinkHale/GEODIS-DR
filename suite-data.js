@@ -32,7 +32,8 @@
     shiftTypes: 'shiftTypes',
     appConfig: 'appConfig',
     timeclockLinks: 'timeclockLinks',
-    tasks: 'tasks'
+    tasks: 'tasks',
+    contacts: 'contacts'
   };
 
   /* Attendance occurrence thresholds. GEODIS policy varies by site, so these are
@@ -123,6 +124,7 @@
         timeOff: [], performance: null, score: null, note: '',
         transitionAssociate: false, transitionPtoInitial: 0, transitionPtoBalance: 0,
         shift: '', shiftBuilding: '', shiftHours: '', shiftSource: '',
+        phone: '', phoneSource: '', phoneUpdatedAt: '',
         // Where they work: the GEODIS site number and the client account on it.
         location: '', account: '', locationLabel: ''
       });
@@ -199,6 +201,12 @@
       p.standingCls = band.cls;
       p.score = scoreOf(p);
       p.note = notes[p.badge] ? notes[p.badge].note : '';
+      /* The phone number, by whichever key reaches it. Injected like the shift
+         lookup so this file need not know how numbers are matched. */
+      if (stores.phoneOf) {
+        var ph = stores.phoneOf(p);
+        if (ph) { p.phone = ph.phone || ''; p.phoneSource = ph.source || ''; p.phoneUpdatedAt = ph.updatedAt || ''; }
+      }
       var sr = stores.shiftKeyOf ? shiftIdx[stores.shiftKeyOf(p.name)] : null;
       if (sr) {
         p.shift = sr.shift;
@@ -382,7 +390,8 @@
   // empty list rather than taking the whole suite down.
   function loadAll() {
     return Promise.all(['attendance', 'timeoff', 'requisitions', 'performance', 'shifts',
-      'discrepancies', 'associatePto', 'locations', 'appConfig', 'timeclockLinks', 'tasks']
+      'discrepancies', 'associatePto', 'locations', 'appConfig', 'timeclockLinks', 'tasks',
+      'contacts']
       .map(function (n) { return loadCollection(n); }))
       .then(function (r) {
         return {
@@ -390,7 +399,7 @@
           performance: r[3], shifts: r[4], discrepancies: r[5], associatePto: r[6],
           // Loaded for everyone, not just admins: it supplies the default account
           // name for sites the Key does not spell out.
-          locations: r[7], appConfig: r[8], timeclockLinks: r[9], tasks: r[10]
+          locations: r[7], appConfig: r[8], timeclockLinks: r[9], tasks: r[10], contacts: r[11]
         };
       });
   }

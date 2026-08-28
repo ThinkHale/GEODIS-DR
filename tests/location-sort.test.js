@@ -53,7 +53,7 @@ w.fetch = u => {
     performance: 'performance', shifts: 'shifts', discrepancies: 'discrepancies' };
   return Promise.resolve({ ok: true, json: () => Promise.resolve({ [map[k]]: stores[map[k]] }) });
 };
-['auth-core.js', 'tests/suite-auth-stub.js', 'suite-data.js', 'schedule-core.js', 'shift-key.js', 'pipeline-core.js', 'timeoff-core.js', 'payroll-core.js', 'tasks-core.js', 'suite.js']
+['auth-core.js', 'tests/suite-auth-stub.js', 'suite-data.js', 'schedule-core.js', 'shift-key.js', 'pipeline-core.js', 'timeoff-core.js', 'payroll-core.js', 'tasks-core.js', 'contacts-core.js', 'suite.js']
   .forEach(f => w.eval(fs.readFileSync(R + f, 'utf8')));
 const d = w.document, $ = s => d.querySelector(s), $$ = s => Array.from(d.querySelectorAll(s));
 const click = el => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));

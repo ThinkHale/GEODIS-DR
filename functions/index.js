@@ -37,6 +37,7 @@ const TransitionImport = require('./transition-import.js');
 const TransitionPto = require('./transition-pto.js');
 const AttendanceImport = require('./attendance-import.js');
 const ShiftKey = require('./shift-key.js');
+const Contacts = require('./contacts-core.js');
 const Auth = require('./auth-core.js');
 
 // Shared secret proving a request came from our Power Automate flow.
@@ -81,6 +82,12 @@ const COLLECTIONS = {
   shifts:       { path: 'shifts/assignments.json',       responseKey: 'shifts',
                   fields: { eid: 'str', nameKey: 'str', name: 'str', shift: 'str', building: 'str',
                             dept: 'str', account: 'str', hours: 'str', badge: 'str', source: 'str' } },
+  /* Associate phone numbers. Keyed by badge when somebody typed one in, by EID
+     or name key when harvested from a sheet -- the same shape as shift tags,
+     and joined onto a profile the same way. */
+  contacts:     { path: 'contacts/phones.json',          responseKey: 'contacts',
+                  fields: { badge: 'str', eid: 'str', nameKey: 'str', name: 'str', phone: 'str',
+                            source: 'str', updatedAt: 'str', updatedBy: 'str' } },
   /* Standing tasks: work that outlives the page it was noticed on. Pending PTO
      and open discrepancies are NOT copied in here -- they are projected into
      the task shape on read, so there is only ever one record to mark done. */
@@ -899,6 +906,42 @@ async function applyPlxWorkbook(buffer, opts) {
   } else {
     warnings.push('No "<site> - HC" tabs were found, so shift tags were left as they were.');
   }
+
+  /* Phone numbers, from any sheet that has a name column and a phone column.
+     Deliberately not tied to the HC tabs: the numbers currently live in a
+     tracker somebody already keeps, and a rule that reads whatever sheet
+     carries them means that tracker can be pasted in as a tab rather than
+     re-keyed. If a Phone column is ever added to the HC tabs, this picks it up
+     with no further change. */
+  const phones = new Map();
+  const phoneNotes = [];
+  sheets.forEach(sh => {
+    const got = Contacts.fromSheet(sh.aoa, Sched.rosterKey);
+    got.warnings.forEach(x => phoneNotes.push(sh.name + ': ' + x));
+    got.rows.forEach(r => {
+      const rec = Contacts.record({
+        eid: r.eid, nameKey: r.nameKey, name: r.name, phone: r.phone,
+        source: 'PLX workbook · ' + sh.name
+      }, null, new Date());
+      phones.set(rec.id, rec);
+    });
+  });
+  if (phones.size) {
+    /* Hand-entered numbers are keyed by badge and so never collide with these,
+       which are keyed by EID or name. That is the point: somebody who typed a
+       number against a profile has said something the sheet cannot overrule. */
+    const existing = await readJsonArray(COLLECTIONS.contacts.path);
+    const kept = existing.filter(r => r && !phones.has(r.id));
+    const merged = kept.concat(Array.from(phones.values()).map(r =>
+      Object.assign(sanitizeRecord(r, COLLECTIONS.contacts.fields), { id: r.id })));
+    await bucket.file(COLLECTIONS.contacts.path).save(JSON.stringify(merged), {
+      contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+    });
+    warnings.push(phones.size + ' phone number(s) were read from the workbook.');
+  }
+  // Said even when no numbers landed: a column full of unreadable values is
+  // worth knowing about precisely when nothing came of it.
+  phoneNotes.forEach(x => warnings.push(x));
 
   const reqSheet = sheets.filter(x => ShiftKey.REQ_SHEET.test(x.name))[0];
   let reqCount = 0;

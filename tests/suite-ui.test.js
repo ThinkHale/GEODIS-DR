@@ -30,6 +30,7 @@ w.eval(fs.readFileSync(R+'pipeline-core.js','utf8'));
 w.eval(fs.readFileSync(R+'timeoff-core.js','utf8'));
 w.eval(fs.readFileSync(R+'payroll-core.js','utf8'));
 w.eval(fs.readFileSync(R+'tasks-core.js','utf8'));
+w.eval(fs.readFileSync(R+'contacts-core.js','utf8'));
 w.eval(fs.readFileSync(R+'auth-core.js','utf8'));
 w.eval(fs.readFileSync(R+'tests/suite-auth-stub.js','utf8'));
 w.eval(fs.readFileSync(R+'suite.js','utf8'));

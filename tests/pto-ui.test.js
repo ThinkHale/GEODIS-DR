@@ -33,6 +33,10 @@ const onPremAoa = [
   ['Gone, Gus (80-GGONE2)', 'false', 'GEODIS/US/CL/CLNCEN/CLCHI/CL1523/1523', 'Boss, B']
 ];
 
+// Gus has a number on file; Ada does not.
+const contacts = [{ id: 'PH-b2', badge: 'b2', phone: '7736395639', name: 'Gus Gone',
+  source: 'Entered by hand', updatedAt: TODAY }];
+
 const dom = new JSDOM(`<!doctype html><html><body class="suite-active">
  <div id="suite-root"></div><header>h</header><main id="recon-main"><div id="tbody">R</div></main></body></html>`,
   { runScripts: 'outside-only', url: 'https://geodis.ebtools.pro/' });
@@ -49,13 +53,14 @@ w.fetch = (url, opt) => {
   if (u.indexOf('shifts=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ shifts: shiftTags }) });
   if (u.indexOf('timeoff=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ timeOff }) });
   if (u.indexOf('attendance=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ attendance }) });
+  if (u.indexOf('contacts=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ contacts }) });
   const k = u.match(/\?(\w+)=1/)[1];
   const map = { requisitions: 'requisitions', performance: 'performance', discrepancies: 'discrepancies',
     associatePto: 'associatePto', locations: 'locations', appConfig: 'appConfig', timeclockLinks: 'timeclockLinks', tasks: 'tasks' };
   return Promise.resolve({ ok: true, json: () => Promise.resolve({ [map[k]]: [] }) });
 };
 ['auth-core.js', 'tests/suite-auth-stub.js', 'suite-data.js', 'schedule-core.js', 'shift-key.js',
- 'pipeline-core.js', 'timeoff-core.js', 'payroll-core.js', 'tasks-core.js', 'suite.js']
+ 'pipeline-core.js', 'timeoff-core.js', 'payroll-core.js', 'tasks-core.js', 'contacts-core.js', 'suite.js']
   .forEach(f => w.eval(fs.readFileSync(R + f, 'utf8')));
 const d = w.document, $ = s => d.querySelector(s), $$ = s => Array.from(d.querySelectorAll(s));
 const click = el => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
@@ -85,6 +90,15 @@ const rowFor = name => $$('.cov-row').filter(r => r.textContent.indexOf(name) !=
   t('and still asks to be explained', !!gus.querySelector('.cov-disp'));
   t('the metric strip reports the PTO', d.body.textContent.indexOf('On PTO') !== -1);
 
+  console.log('— the number, where the lookup actually happens —');
+  t('the exception row carries it', gus.textContent.indexOf('(773) 639-5639') !== -1);
+  t('as something you can ring', !!gus.querySelector('a[href="tel:+17736395639"]'));
+  t('and copy for TextUs or Vonage', !!gus.querySelector('[data-phone-copy]'));
+  t('the PTO row does not -- nobody is chasing an approved absence',
+    ada.textContent.indexOf('(773)') === -1);
+  t('somebody with no number on an exception row is offered the chance to add one',
+    !!gus.querySelector('[data-phone-copy]') || !!gus.querySelector('[data-phone-edit]'));
+
   console.log('— the ledger —');
   click($('[data-nav="associates"]'));
   click($('[data-profile="b1"]'));
@@ -93,6 +107,7 @@ const rowFor = name => $$('.cov-row').filter(r => r.textContent.indexOf(name) !=
   t('the occurrence is still listed', txt.indexOf('no show') !== -1);
   t('with a note saying PTO cleared it', txt.indexOf('PTO approved for this day') !== -1);
   t('the original value is shown struck through', !!$('.pts-void'));
+  t('a profile with no number offers to add one', !!$('[data-phone-edit]'));
   t('and the point total is zero', /Attendance points[\s\S]{0,80}?>0</.test(d.body.innerHTML));
 
   click($('[data-nav="associates"]'));

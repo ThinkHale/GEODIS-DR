@@ -201,3 +201,14 @@ body.suite-active>header,body.suite-active>main,body.suite-active>.foot{display:
 .unlinked-row>span:last-child{font:600 11px Inter;color:var(--suite-amber)}
 .suite-btn.tiny{font-size:10.5px;padding:2px 7px}
 .sched-source{font-size:11.5px;color:var(--suite-muted);margin:-4px 0 12px}
+
+/* ---- tasks ---- */
+.suite-add{width:34px;height:34px;border-radius:50%;border:1px solid var(--suite-line);background:#fff;color:var(--suite-navy);font:700 20px/1 'Barlow Semi Condensed';cursor:pointer;position:relative;display:grid;place-items:center;flex:none}
+.suite-add:hover{background:var(--suite-navy);color:#fff;border-color:var(--suite-navy)}
+/* The count is what is URGENT, not what is open -- a badge that always shows a
+   number stops being read. */
+.suite-add-count{position:absolute;top:-5px;right:-5px;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:var(--suite-red);color:#fff;font:700 10px/17px 'IBM Plex Mono';box-sizing:border-box}
+.task-age{display:inline-block;font:600 10.5px 'Barlow Semi Condensed';text-transform:uppercase;letter-spacing:.3px;padding:3px 8px;border-radius:20px;background:#eef1f5;color:var(--suite-muted);white-space:nowrap}
+.task-age.warn{background:#fff3e0;color:var(--suite-orange)}
+.task-age.bad{background:#fdecea;color:var(--suite-red)}
+.task-kind{display:inline-block;font:600 10.5px 'Barlow Semi Condensed';text-transform:uppercase;letter-spacing:.3px;padding:3px 9px;border-radius:20px;background:#e8eefb;color:var(--suite-blue);white-space:nowrap}

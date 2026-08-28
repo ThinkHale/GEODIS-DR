@@ -28,7 +28,7 @@ w.fetch = u => {
   return Promise.resolve({ ok: true, json: () => Promise.resolve({ [map[k]]: [] }) });
 };
 ['auth-core.js', 'tests/suite-auth-stub.js', 'suite-data.js', 'schedule-core.js', 'shift-key.js',
- 'pipeline-core.js', 'timeoff-core.js', 'payroll-core.js', 'suite.js']
+ 'pipeline-core.js', 'timeoff-core.js', 'payroll-core.js', 'tasks-core.js', 'suite.js']
   .forEach(f => w.eval(fs.readFileSync(R + f, 'utf8')));
 const d = w.document, $ = s => d.querySelector(s);
 const click = el => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));

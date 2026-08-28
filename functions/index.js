@@ -81,6 +81,15 @@ const COLLECTIONS = {
   shifts:       { path: 'shifts/assignments.json',       responseKey: 'shifts',
                   fields: { eid: 'str', nameKey: 'str', name: 'str', shift: 'str', building: 'str',
                             dept: 'str', account: 'str', hours: 'str', badge: 'str', source: 'str' } },
+  /* Standing tasks: work that outlives the page it was noticed on. Pending PTO
+     and open discrepancies are NOT copied in here -- they are projected into
+     the task shape on read, so there is only ever one record to mark done. */
+  tasks:        { path: 'tasks/tasks.json',              responseKey: 'tasks',
+                  fields: { kind: 'str', title: 'str', detail: 'str', badge: 'str', name: 'str',
+                            market: 'str', location: 'str', status: 'str', source: 'str',
+                            sourceKind: 'str', sourceId: 'str', urgentAfterHours: 'num',
+                            createdAt: 'str', createdBy: 'str', updatedAt: 'str',
+                            statusUpdatedAt: 'str', statusUpdatedBy: 'str', statusHistory: 'log' } },
   // Payroll discrepancies raised on the GEODIS Payroll Discrepancy Form.
   discrepancies:{ path: 'payroll/discrepancies.json',    responseKey: 'discrepancies',
                   fields: { badge: 'str', name: 'str', location: 'str', date: 'str', weekEnding: 'str',

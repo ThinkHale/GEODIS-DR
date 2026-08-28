@@ -29,6 +29,7 @@ w.eval(fs.readFileSync(R+'shift-key.js','utf8'));
 w.eval(fs.readFileSync(R+'pipeline-core.js','utf8'));
 w.eval(fs.readFileSync(R+'timeoff-core.js','utf8'));
 w.eval(fs.readFileSync(R+'payroll-core.js','utf8'));
+w.eval(fs.readFileSync(R+'tasks-core.js','utf8'));
 w.eval(fs.readFileSync(R+'auth-core.js','utf8'));
 w.eval(fs.readFileSync(R+'tests/suite-auth-stub.js','utf8'));
 w.eval(fs.readFileSync(R+'suite.js','utf8'));
@@ -38,7 +39,9 @@ const click=el=>el.dispatchEvent(new w.MouseEvent('click',{bubbles:true}));
 setTimeout(()=>{
 console.log('— boot before the roster arrives —');
 t('shell renders', !!$('.suite-nav'));
-t('all nine nav items present', $$('.suite-nav-btn').length===9);
+t('all ten nav items present', $$('.suite-nav-btn').length===10);
+t('Tasks sits right after Overview',
+  $$('.suite-nav-btn').map(b=>b.dataset.nav)[1]==='tasks');
 t('empty roster prompts for the snapshot', d.body.textContent.includes('Waiting on the morning assignment snapshot'));
 t('no fabricated associates anywhere', !d.body.textContent.includes('James Dixon'));
 

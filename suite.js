@@ -45,10 +45,10 @@
     'Other': { type: 'Absent', points: 0 }
   };
   var NAV = [
-    ['overview', 'Overview'], ['associates', 'Associates'], ['coverage', 'On-Premise'],
-    ['attendance', 'Attendance'], ['timeoff', 'Time Off'], ['payroll', 'Payroll'],
-    ['requisitions', 'Beeline Requests'], ['reconciliation', 'Assignment Reconciliation'],
-    ['settings', 'Settings']
+    ['overview', 'Overview'], ['tasks', 'Tasks'], ['associates', 'Associates'],
+    ['coverage', 'On-Premise'], ['attendance', 'Attendance'], ['timeoff', 'Time Off'],
+    ['payroll', 'Payroll'], ['requisitions', 'Beeline Requests'],
+    ['reconciliation', 'Assignment Reconciliation'], ['settings', 'Settings']
   ];
 
   var state = {
@@ -64,7 +64,8 @@
     notes: {},              // shared badge -> note, published with the roster
     updatedAt: null,
     profiles: new Map(),
-    stores: { attendance: [], timeOff: [], requisitions: [], performance: [], shifts: [], discrepancies: [],
+    tasks: { kind: 'all', showDone: false },
+    stores: { attendance: [], timeOff: [], requisitions: [], performance: [], shifts: [], discrepancies: [], tasks: [],
       associatePto: [], locations: [], appConfig: [], timeclockLinks: [] },
     connectFor: '', connectQuery: '', connectKind: 'timeoff',
     payroll: { periods: [], week: '', period: null, tab: 'discrepancies', loading: false },
@@ -267,6 +268,7 @@
   function headerHtml() {
     var labels = {
       overview: ['Overview', 'Workforce command center'],
+      tasks: ['Tasks', 'Work that is outstanding, wherever it was raised'],
       associates: ['Associates', 'Roster, scorecards, and profile detail'],
       profile: ['Associate Profile', 'Assignment, attendance, time off, and performance'],
       coverage: ['On-Premise', 'Scheduled shifts vs. who is actually on premise'],
@@ -285,8 +287,14 @@
           return '<option value="' + esc(m) + '" ' + (state.market === m ? 'selected' : '') + '>' + esc(m) + '</option>';
         }).join('') + '</select>'
       : '';
+    /* A task can be raised from anywhere, because that is where they get
+       noticed -- on the floor, mid-check, reading a form. The count is what is
+       urgent, not what is open: a badge showing 40 is wallpaper. */
+    var urgent = TasksCore.summarize(openTasks(), new Date()).urgent;
+    var add = '<button class="suite-add" data-add-task title="Raise a task">+' +
+      (urgent ? '<span class="suite-add-count">' + urgent + '</span>' : '') + '</button>';
     return '<header class="suite-top"><div class="suite-heading"><h1>' + esc(x[0]) + '</h1><p>' + esc(x[1]) + '</p></div>' +
-      picker + '<div class="suite-user"><span><b>Operations</b></span><div class="suite-avatar">OP</div></div></header>';
+      picker + add + '<div class="suite-user"><span><b>Operations</b></span><div class="suite-avatar">OP</div></div></header>';
   }
 
   /* ---------- small building blocks ---------- */
@@ -1530,8 +1538,9 @@
      timeoff-core.js. An unrecognised status (older data, or something set by
      hand) is offered as-is rather than quietly relabelled. */
   // Which pipeline governs a collection, so one handler serves both.
-  var PIPELINES = { timeoff: TimeOffCore, discrepancies: PayrollCore.pipeline };
-  var LOCAL_OF = { timeoff: 'timeOff', discrepancies: 'discrepancies' };
+  var PIPELINES = { timeoff: TimeOffCore, discrepancies: PayrollCore.pipeline,
+    tasks: TasksCore.pipeline };
+  var LOCAL_OF = { timeoff: 'timeOff', discrepancies: 'discrepancies', tasks: 'tasks' };
 
   function statusSelect(t) {
     var meta = TimeOffCore.statusMeta(t.status);
@@ -1635,6 +1644,137 @@
         (p.status === 'Ended' ? ' · <b class="warn-text">Ended</b>' : '') + '</div></div>' +
         '<span>›</span></button>';
     }).join('');
+  }
+
+  /* ---------- tasks ----------
+     The queue of what is outstanding, wherever it was raised.
+
+     Two sources feed it. Stored tasks are records of their own -- raised by
+     hand, or dropped in by something that noticed work (marking somebody
+     Terminated on the on-premise check). Derived tasks are pending PTO requests
+     and open payroll discrepancies, projected into the task shape on read.
+
+     Derived ones are deliberately not copied into the tasks collection: there
+     would then be two records for one job, and marking one done would leave the
+     other lying. They are read-only here and link to the page that owns them. */
+  function storedTasks() {
+    return (state.stores.tasks || []).map(TasksCore.normalize);
+  }
+  function derivedTasks() {
+    return TasksCore.fromRecords(state.stores.timeOff || [], {
+      kind: 'pto', sourceKind: 'timeoff', source: 'Time Off',
+      needsAction: TimeOffCore.needsAction,
+      titleOf: function (r) {
+        return (r.type || 'Time off') + ' · ' + (r.name || r.badge || 'unknown') +
+          (r.start ? ' · ' + r.start + (r.end && r.end !== r.start ? ' to ' + r.end : '') : '');
+      },
+      detailOf: function (r) { return r.notes || ''; },
+      statusLabelOf: function (r) { return TimeOffCore.statusMeta(r.status).label; }
+    }).concat(TasksCore.fromRecords(state.stores.discrepancies || [], {
+      kind: 'payroll', sourceKind: 'discrepancies', source: 'Payroll',
+      // Four hours, per the payroll rule -- not the 48 everything else gets.
+      hours: TasksCore.kindMeta('payroll').hours,
+      needsAction: PayrollCore.pipeline.needsAction,
+      titleOf: function (r) {
+        return 'Payroll · ' + (r.name || r.badge || 'unknown') +
+          (r.weekEnding ? ' · week ending ' + r.weekEnding : '');
+      },
+      detailOf: function (r) { return r.details || ''; },
+      statusLabelOf: function (r) { return PayrollCore.pipeline.statusMeta(r.status).label; }
+    }));
+  }
+  // Every task, stored and derived, with the market filter applied.
+  function allTasks() {
+    return storedTasks().concat(derivedTasks()).filter(function (t) {
+      // A task with no market is never hidden: it is usually the ones with no
+      // profile attached that most need chasing.
+      return state.market === 'all' || !t.market || t.market === state.market;
+    });
+  }
+  function openTasks() { return allTasks().filter(TasksCore.isOpen); }
+
+  function urgencyChip(t, now) {
+    var u = TasksCore.urgencyOf(t, now);
+    if (u === TasksCore.NONE) return '';
+    var label = TasksCore.ageLabel(t, now);
+    var cls = u === TasksCore.URGENT ? 'bad' : u === TasksCore.DUE ? 'warn' : '';
+    return '<span class="task-age ' + cls + '">' +
+      (u === TasksCore.URGENT ? 'Urgent · ' : '') + esc(label) + '</span>';
+  }
+
+  function tasksView() {
+    if (!state.storesLoaded) return loadingPanel('tasks');
+    var now = new Date();
+    var every = allTasks();
+    var sum = TasksCore.summarize(every, now);
+    var showDone = state.tasks.showDone;
+    var q = state.query.trim().toLowerCase();
+    var rows = TasksCore.sort(every.filter(function (t) {
+      if (!showDone && !TasksCore.isOpen(t)) return false;
+      if (state.tasks.kind !== 'all' && TasksCore.kindMeta(t.kind).key !== state.tasks.kind) return false;
+      if (!q) return true;
+      return (t.title + ' ' + t.detail + ' ' + t.name + ' ' + t.badge).toLowerCase().indexOf(q) !== -1;
+    }), now);
+
+    return hero('Tasks', 'Everything outstanding, from wherever it was raised. A task stays until somebody marks it complete.', 'task', 'Raise a task') +
+      '<div class="metric-strip">' +
+      metric('Urgent', sum.urgent, 'Past the time they should have moved', sum.urgent ? 'orange' : 'green') +
+      metric('Due soon', sum.due, 'In the last quarter of their window') +
+      metric('Open', sum.open, 'Not yet complete') +
+      metric('Completed', sum.complete, 'Still on file') +
+      '</div>' +
+      (sum.urgent ? '<div class="warn-banner"><b>' + sum.urgent + '</b> task' +
+        (sum.urgent === 1 ? ' has' : 's have') + ' gone past the window. Payroll issues escalate after ' +
+        TasksCore.kindMeta('payroll').hours + ' hours, everything else after ' +
+        TasksCore.kindMeta('note').hours + '.</div>' : '') +
+      '<section class="suite-panel">' +
+      '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
+      '" placeholder="Search by title, detail, name, or badge…">' +
+      '<select class="suite-select" id="task-kind"><option value="all">All kinds</option>' +
+      TasksCore.KINDS.map(function (k) {
+        return '<option value="' + esc(k.key) + '" ' + (state.tasks.kind === k.key ? 'selected' : '') +
+          '>' + esc(k.label) + ' (' + (sum.byKind[k.key] || 0) + ')</option>';
+      }).join('') + '</select>' +
+      '<label class="cov-ctl"><input type="checkbox" id="task-done"' + (showDone ? ' checked' : '') +
+      '> <span>Show completed</span></label></div>' +
+      (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
+        '<th>Task</th><th>Kind</th><th>Associate</th><th>Raised</th><th>Age</th><th>Status</th><th></th>' +
+        '</tr></thead><tbody>' +
+        rows.slice(0, MAX_ROWS).map(function (t) { return taskRow(t, now); }).join('') +
+        '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length)
+        : empty(showDone ? 'Nothing matches those filters' : 'Nothing outstanding',
+            'Raise one with the + button in the top bar, or widen the filters.')) +
+      '</section>';
+  }
+
+  function taskRow(t, now) {
+    var u = TasksCore.urgencyOf(t, now);
+    var p = t.badge ? profile(t.badge) : null;
+    var kind = TasksCore.kindMeta(t.kind);
+    return '<tr class="' + (u === TasksCore.URGENT ? 'cov-row bad' : u === TasksCore.DUE ? 'cov-row warn' : '') + '">' +
+      '<td class="detail-cell"><div class="name">' + esc(t.title) + '</div>' +
+      (t.detail ? '<div class="sub">' + esc(t.detail) + '</div>' : '') + '</td>' +
+      '<td><span class="task-kind">' + esc(kind.label) + '</span>' +
+      (kind.unknown ? '<div class="sub warn-text">not a kind this build knows</div>' : '') + '</td>' +
+      '<td>' + (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div>' +
+                    '<div class="sub">' + esc(p.badge) + '</div>'
+                  : t.name ? '<div class="name">' + esc(t.name) + '</div>' +
+                    '<div class="sub warn-text">no profile</div>'
+                  : '<span class="sub">—</span>') + '</td>' +
+      '<td>' + esc(shortWhen(t.createdAt) || '—') + '<div class="sub">' + esc(t.source || '') + '</div></td>' +
+      '<td>' + urgencyChip(t, now) + '</td>' +
+      /* A derived task is a view of a record that lives elsewhere, so its status
+         is shown, not offered: changing it belongs on the page that owns it. */
+      '<td>' + (t.derived
+        ? '<span class="cov-status">' + esc(t.statusLabel || t.status) + '</span>' +
+          '<div class="sub">on ' + esc(TasksCore.kindMeta(t.kind).panel === 'timeoff' ? 'Time Off' : 'Payroll') + '</div>'
+        : pipelineSelect(t, TasksCore.pipeline, 'tasks')) + '</td>' +
+      '<td>' + (t.derived
+        ? '<button class="suite-btn" data-nav="' + esc(kind.panel) + '">Open ›</button>'
+        : '<button class="suite-btn" data-task-done="' + esc(t.id) + '"' +
+          (TasksCore.isOpen(t) ? '' : ' disabled') + '>Complete</button> ' +
+          '<button class="suite-btn danger" data-del="tasks|' + esc(t.id) + '">Remove</button>') +
+      '</td></tr>';
   }
 
   /* ---------- payroll ----------
@@ -2132,7 +2272,7 @@
     overview: overview, associates: associates, profile: profileView,
     coverage: coverageView, attendance: attendance, timeoff: timeoff,
     payroll: payrollView, requisitions: requisitions, reconciliation: reconciliation,
-    settings: settingsView
+    settings: settingsView, tasks: tasksView
   };
   function render() {
     unmountRecon();   // rescue the reconciliation DOM before innerHTML wipes it
@@ -2161,9 +2301,9 @@
       input = '<select name="' + name + '">' + (opts || []).map(function (o) {
         return '<option ' + (o === value ? 'selected' : '') + '>' + esc(o) + '</option>';
       }).join('') + '</select>';
-    } else if (type === 'badge') {
-      input = '<input name="' + name + '" list="roster-list" value="' + esc(value) +
-        '" required placeholder="Badge number">' + rosterDatalist();
+    } else if (type === 'badge' || type === 'badge-optional') {
+      input = '<input name="' + name + '" list="roster-list" value="' + esc(value) + '"' +
+        (type === 'badge' ? ' required' : '') + ' placeholder="Badge number">' + rosterDatalist();
     } else {
       input = '<input name="' + name + '" type="' + type + '" value="' + esc(value) + '"' +
         (type === 'number' ? ' min="0" step="0.5"' : '') + '>';
@@ -2188,6 +2328,14 @@
         field('Hours', 'hours', 'number', '8') +
         field('Status', 'status', 'select', TimeOffCore.DEFAULT_STATUS, TimeOffCore.STATUS_KEYS) +
         field('Notes', 'notes', 'text', '');
+    } else if (type === 'task') {
+      title = 'Raise a task';
+      fields = field('What needs doing', 'title', 'text', '') +
+        field('Kind', 'kind', 'select', TasksCore.DEFAULT_KIND,
+          TasksCore.KINDS.map(function (k) { return k.label; })) +
+        // Optional: plenty of tasks are about a system or a site, not a person.
+        field('Associate badge (optional)', 'badge', 'badge-optional', badge || '') +
+        field('Detail', 'detail', 'text', '');
     } else {
       title = 'New Beeline request';
       fields = field('Req ID', 'id', 'text', 'REQ-' + Date.now().toString().slice(-6)) +
@@ -2234,7 +2382,7 @@
   }
   var LOCAL_KEY = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions',
     discrepancies: 'discrepancies', users: 'users', locations: 'locations', shiftTypes: 'shiftTypes',
-    appConfig: 'appConfig' };
+    appConfig: 'appConfig', tasks: 'tasks' };
 
   /* Settings rows live in state.admin, not state.stores, so they get their own
      writer. It reloads the collection after each write rather than patching in
@@ -2312,6 +2460,20 @@
     }
     var prof = e.target.closest('[data-profile]');
     if (prof) { go('profile', prof.dataset.profile); return; }
+
+    if (e.target.closest('[data-add-task]')) { modal('task', ''); return; }
+
+    var done = e.target.closest('[data-task-done]');
+    if (done) {
+      var actor = currentActor(true);
+      if (!actor) return;
+      var t = (state.stores.tasks || []).filter(function (x) { return x.id === done.dataset.taskDone; })[0];
+      if (!t) return;
+      var patch = TasksCore.pipeline.applyStatus(t, 'Complete', actor, new Date());
+      patch.updatedAt = patch.statusUpdatedAt;
+      persist('tasks', patch, 'tasks');
+      return;
+    }
 
     var add = e.target.closest('[data-add]');
     if (add) { modal(add.dataset.add, add.dataset.badge || ''); return; }
@@ -2414,6 +2576,8 @@
       reason: row.querySelector('.cov-reason').value
     };
     return SuiteData.saveDocumentation(date, rec).then(function () {
+      return taskFromDisposition(rec, date);
+    }).then(function () {
       return SuiteData.loadCoverage(date);
     }).then(function (day) {
       if (state.coverage.reviewDate === date) state.coverage.reviewDay = day;
@@ -2423,6 +2587,42 @@
       alert('That note could not be saved, so it was not shared with anyone else.\n\n' + err.message);
     });
   }
+  /* Some dispositions are not just a note about today, they are a job for
+     somebody: an assignment that has to be ended in RC and Beeline. Noticing it
+     on the floor and recording it should not depend on the person also
+     remembering to raise it somewhere else.
+
+     The id is derived from the person and the day, so re-picking the disposition
+     updates the one task rather than growing a pile of them -- and switching
+     away from Terminated does NOT delete it, because by then somebody may
+     already be working it. */
+  var DISPOSITION_TASKS = {
+    'Terminated': { kind: 'terminate', verb: 'End the assignment for' }
+  };
+  function taskFromDisposition(rec, date) {
+    var spec = DISPOSITION_TASKS[rec.disposition];
+    if (!spec) return Promise.resolve();
+    var id = TasksCore.idFor(spec.kind, rec.key + ':' + date);
+    if ((state.stores.tasks || []).some(function (t) { return t.id === id; })) return Promise.resolve();
+    var p = rec.badge ? profile(rec.badge) : null;
+    var task = TasksCore.create({
+      id: id, kind: spec.kind,
+      title: spec.verb + ' ' + (p ? p.name : rec.name || rec.badge || 'this associate'),
+      detail: 'Marked ' + rec.disposition + ' on the on-premise check for ' + date +
+        (rec.reason ? ' — ' + rec.reason : '') + '. Ends in RC and Beeline both.',
+      badge: rec.badge || '', name: p ? p.name : (rec.name || ''),
+      market: p ? (p.market || '') : '', location: p ? (p.locationLabel || '') : '',
+      source: 'On-premise check', sourceKind: 'coverage', sourceId: rec.key
+    }, currentActor(false), new Date());
+    return SuiteData.saveRecord('tasks', task).then(function () {
+      return SuiteData.loadCollection('tasks');
+    }).then(function (rows) { state.stores.tasks = rows; }).catch(function (err) {
+      // The documentation itself already saved; say what did not follow.
+      console.warn('Could not raise the follow-up task.', err);
+      alert('The note was saved, but the follow-up task could not be raised.\n\n' + err.message);
+    });
+  }
+
   root.addEventListener('change', function (e) {
     if (e.target.dataset && e.target.dataset.userRole) {
       persistAdmin('users', { id: e.target.dataset.userRole, email: e.target.dataset.userRole, role: e.target.value });
@@ -2459,7 +2659,11 @@
       if (!rec || !pipe) return;
       var actor = currentActor(true);
       if (!actor) { render(); return; }   // they cancelled the name prompt
-      persist(kind, pipe.applyStatus(rec, e.target.value, actor), local);
+      var patch = pipe.applyStatus(rec, e.target.value, actor);
+      // A task's ageing runs off updatedAt, so touching one has to move it --
+      // otherwise working a task would not stop it escalating.
+      if (kind === 'tasks') patch.updatedAt = patch.statusUpdatedAt;
+      persist(kind, patch, local);
       return;
     }
     if (e.target.id === 'payroll-week') { openPayrollWeek(e.target.value); return; }
@@ -2523,6 +2727,8 @@
     }
     var book = e.target.closest('[data-shift-book]');
     if (book && book.files && book.files[0]) { readShiftWorkbook(book.files[0]); return; }
+    if (e.target.id === 'task-kind') { state.tasks.kind = e.target.value; render(); }
+    if (e.target.id === 'task-done') { state.tasks.showDone = e.target.checked; render(); }
     if (e.target.id === 'cov-status') { state.coverage.statusFilter = e.target.value; render(); }
     if (e.target.id === 'cov-loc') { state.coverage.location = e.target.value; render(); }
     if (e.target.id === 'cov-grace') {
@@ -2605,6 +2811,16 @@
     if (type === 'requisitions' || type === 'requisition') {
       type = 'requisitions';
       data.status = data.openings > 0 && data.filled >= data.openings ? 'Filled' : 'Open';
+    }
+    if (type === 'task') {
+      if (!String(data.title || '').trim()) { alert('A task needs a description of what has to be done.'); return; }
+      // The select shows labels; the record stores the key.
+      var picked = TasksCore.KINDS.filter(function (k) { return k.label === data.kind; })[0];
+      data.kind = picked ? picked.key : TasksCore.DEFAULT_KIND;
+      var p = data.badge ? profile(data.badge) : null;
+      if (p) { data.name = p.name; data.market = p.market || ''; data.location = p.locationLabel || ''; }
+      type = 'tasks';
+      data = TasksCore.create(data, currentActor(true) || null, new Date());
     }
     if (!data.id) data.id = type.slice(0, 2).toUpperCase() + Date.now();
     document.getElementById('suite-modal').remove();

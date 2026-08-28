@@ -152,6 +152,53 @@
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
   };
 
+  /* ---------- identifying an associate ----------
+     Three numbers follow these people around and they are not interchangeable:
+
+       EID          the Legacy Contact ID in RC. 7-8 digits. This is what the
+                    team searches by, so it is what the tool leads with.
+       Badge        the Beeline assignment number. 6 digits. It is what records
+                    are keyed by internally, because it is the one every report
+                    carries -- but it is a Beeline artefact, not how anybody
+                    refers to a person.
+       Timeclock id the WFM id, "80-JALCAL5986". The PLX workbook heads its
+                    column "EID", which is the collision worth knowing about:
+                    that column is NOT the RC Legacy Contact ID. It is called
+                    the timeclock id everywhere here so the two cannot be
+                    confused.
+
+     Every search box matches all three, so whichever number somebody has in
+     front of them finds the person. */
+  function eidOf(p) { return (p && p.empNumber) || ''; }
+  function idLine(p) {
+    if (!p) return '';
+    return (p.empNumber ? 'EID ' + esc(p.empNumber) : '<span class="warn-text">No EID</span>') +
+      (p.badge ? ' · Badge ' + esc(p.badge) : '');
+  }
+  function searchText(p, extra) {
+    if (!p) return String(extra || '');
+    return [p.name, p.empNumber, p.badge, p.timeclockId, p.market, extra || ''].join(' ');
+  }
+  /* Finding somebody from something typed into a box. The EID is tried first,
+     because that is what people have to hand; the badge and timeclock id still
+     work, so an old habit is not punished. */
+  function findByAnyId(v) {
+    var q = String(v == null ? '' : v).trim();
+    if (!q) return null;
+    var lower = q.toLowerCase();
+    var all = allProfiles();
+    var byEid = all.filter(function (p) { return String(p.empNumber || '') === q; });
+    if (byEid.length === 1) return byEid[0];
+    var direct = profile(SuiteData.normBadge(q));
+    if (direct) return direct;
+    var byClock = all.filter(function (p) {
+      return String(p.timeclockId || '').toLowerCase() === lower;
+    });
+    if (byClock.length === 1) return byClock[0];
+    var byName = all.filter(function (p) { return String(p.name || '').toLowerCase() === lower; });
+    return byName.length === 1 ? byName[0] : null;
+  }
+
   /* ---------- data ---------- */
   function rebuild() {
     state.profiles = SuiteData.buildProfiles(state.records || [], {
@@ -162,6 +209,7 @@
       locations: state.stores.locations,
       associatePto: state.stores.associatePto,
       shiftKeyOf: ScheduleCore.rosterKey,
+      timeclockLinks: state.stores.timeclockLinks,
       phoneOf: (function () {
         var ix = ContactsCore.index(state.stores.contacts, SuiteData.normBadge);
         return function (p) { return ContactsCore.lookup(ix, p, ScheduleCore.rosterKey); };
@@ -248,7 +296,7 @@
       if (!inMarket(p)) return false;
       if (state.statusFilter !== 'all' && p.status !== state.statusFilter) return false;
       if (!q) return true;
-      return (p.name + ' ' + p.badge + ' ' + p.empNumber + ' ' + p.market).toLowerCase().indexOf(q) !== -1;
+      return searchText(p).toLowerCase().indexOf(q) !== -1;
     });
   }
 
@@ -612,7 +660,7 @@
       '<section class="suite-panel">' + filters() +
       '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
       sortHead('associates', 'name', 'Associate') +
-      '<th>Employee #</th>' +
+      '<th>EID</th>' +
       sortHead('associates', 'location', 'Site / account') +
       sortHead('associates', 'market', 'Market') +
       sortHead('associates', 'shift', 'Shift') +
@@ -624,7 +672,7 @@
       (rows.length ? rows.map(function (p) {
         return '<tr><td><div class="name">' + esc(p.name || 'Unknown') + '</div>' +
           '<div class="sub">' + esc(p.badge) + (p.dup ? ' · <b class="dup-flag">DUP</b>' : '') + '</div></td>' +
-          '<td>' + esc(p.empNumber || '—') + '</td>' +
+          '<td>' + (p.empNumber ? '<b>' + esc(p.empNumber) + '</b>' : '<span class="warn-text">—</span>') + '</td>' +
           '<td>' + (p.location
             ? '<div class="name">' + esc(p.location) + '</div>' +
               (p.account ? '<div class="sub">' + esc(p.account) + '</div>' : '')
@@ -648,7 +696,7 @@
     var m = p.performance;
     return '<div class="profile-head"><div class="profile-avatar">' + esc(p.initials) + '</div>' +
       '<div class="profile-id"><h2>' + esc(p.name || 'Unknown') + '</h2>' +
-      '<p>Badge ' + esc(p.badge) + (p.empNumber ? ' · Employee #' + esc(p.empNumber) : '') +
+      '<p>' + idLine(p) +
       ' · ' + esc(p.market) + '</p>' +
       (p.altName ? '<p class="sub">Also on file as “' + esc(p.altName) + '”</p>' : '') + '</div>' +
       '<div class="profile-chips">' + statusChip(p) + reconChip(p) +
@@ -692,6 +740,10 @@
       schedulePanel(p) +
       '<section class="suite-panel"><div class="suite-panel-head"><h2>Assignment &amp; reconciliation</h2></div>' +
       '<dl class="detail-list">' +
+      '<dt>EID</dt><dd>' + (p.empNumber ? '<b>' + esc(p.empNumber) + '</b> <span class="sub">Legacy Contact ID in RC</span>'
+        : '<span class="warn-text">Not on the RC record</span>') + '</dd>' +
+      detail('Beeline badge', p.badge) +
+      (p.timeclockId ? detail('Timeclock id', p.timeclockId) : '') +
       '<dt>Mobile</dt><dd>' + phoneCell(p, { edit: true }) + '</dd>' +
       detail('RC start', p.crmStart) + detail('Beeline start', p.beeStart) +
       detail('End date', p.endDate) + detail('End reason', p.endReason) +
@@ -1104,7 +1156,7 @@
       }));
     return '<div class="filter-row">' +
       '<input class="suite-input" id="suite-search" value="' + esc(state.query) +
-      '" placeholder="Search by name, badge, employee id, or supervisor…">' +
+      '" placeholder="Search by EID, name, badge, timeclock id, or supervisor…">' +
       '<select class="suite-select" id="cov-status">' + opts.map(function (o) {
         return '<option value="' + o[0] + '" ' + (c.statusFilter === o[0] ? 'selected' : '') + '>' + esc(o[1]) + '</option>';
       }).join('') + '</select>' +
@@ -1126,7 +1178,9 @@
       else if (c.statusFilter === 'onshift') { if (!ScheduleCore.STATUS[r.status].onShift) return false; }
       else if (c.statusFilter !== 'all' && r.status !== c.statusFilter) return false;
       if (!q) return true;
-      return (r.name + ' ' + r.badge + ' ' + r.wfmId + ' ' + r.manager + ' ' + r.job).toLowerCase().indexOf(q) !== -1;
+      return searchText(r.badge ? profile(r.badge) : null,
+        r.name + ' ' + r.badge + ' ' + r.wfmId + ' ' + r.manager + ' ' + r.job)
+        .toLowerCase().indexOf(q) !== -1;
     });
   }
 
@@ -1284,7 +1338,7 @@
         .map(function (k) { return [k, ScheduleCore.STATUS[k].label + ' (' + counts[k] + ')']; }));
     return '<div class="filter-row">' +
       '<input class="suite-input" id="suite-search" value="' + esc(state.query) +
-      '" placeholder="Search by name, badge, employee id, or supervisor…">' +
+      '" placeholder="Search by EID, name, badge, timeclock id, or supervisor…">' +
       '<select class="suite-select" id="cov-status">' + opts.map(function (o) {
         return '<option value="' + o[0] + '" ' + (sel === o[0] ? 'selected' : '') + '>' + esc(o[1]) + '</option>';
       }).join('') + '</select>' +
@@ -1333,7 +1387,8 @@
             var open = r.badge ? ' data-profile="' + esc(r.badge) + '"' : '';
             return '<tr class="cov-row ' + st.severity + '">' +
               '<td><div class="' + (r.badge ? 'name link' : 'name') + '"' + open + '>' + esc(r.name) + '</div>' +
-              '<div class="sub">' + esc(r.badge ? 'Badge ' + r.badge : (r.wfmId || 'No employee id')) + '</div></td>' +
+              '<div class="sub">' + (r.badge ? idLine(profile(r.badge)) || 'Badge ' + esc(r.badge)
+                : esc(r.wfmId ? 'Timeclock ' + r.wfmId : 'No id')) + '</div></td>' +
               '<td><span class="cov-status ' + st.severity + '">' + esc(st.label) + '</span></td>' +
               '<td>' + esc(r.shift || '—') + '</td>' +
               '<td>' + esc(locLeaf(r.location) || '—') + '</td>' +
@@ -1378,7 +1433,7 @@
         var open = r.badge ? ' data-profile="' + esc(r.badge) + '"' : '';
         var nameCls = r.badge ? 'name link' : 'name';
         var sub = r.badge
-          ? 'Badge ' + esc(r.badge) +
+          ? (idLine(profile(r.badge)) || 'Badge ' + esc(r.badge)) +
             (r.rosterMatch === 'name' ? ' · matched by name' : r.rosterMatch === 'linked' ? ' · connected by hand' : '')
           : '<b class="warn-text">Not connected</b> · ' + esc(r.wfmId || 'no timeclock id') +
             ' <button class="suite-btn tiny" data-link-eid="' + esc(r.wfmId || '') +
@@ -1522,7 +1577,7 @@
       var p = profile(a.badge);
       if (!inMarket(p)) return false;
       if (!q) return true;
-      return ((p ? p.name : '') + ' ' + a.badge + ' ' + a.type + ' ' + a.date).toLowerCase().indexOf(q) !== -1;
+      return searchText(p, a.badge + ' ' + a.type + ' ' + a.date).toLowerCase().indexOf(q) !== -1;
     });
     all = sortRows(all, 'attendance', function (a, k) {
       var pr = profile(a.badge);
@@ -1539,7 +1594,7 @@
         (orphans.length === 1 ? '' : 's') + ' could not be matched to a badge on the roster and are not counted in any profile.</div>' : '') +
       '<section class="suite-panel">' +
       '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
-      '" placeholder="Search by name, badge, type, or date…"></div>' +
+      '" placeholder="Search by EID, name, badge, type, or date…"></div>' +
       (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
         sortHead('attendance', 'date', 'Date') +
         sortHead('attendance', 'name', 'Associate') +
@@ -1574,7 +1629,7 @@
       // market either. Hiding it would lose a PTO request nobody has actioned.
       if (p ? !inMarket(p) : state.market !== 'all' && t.badge) return false;
       if (!q) return true;
-      return ((p ? p.name : t.name || '') + ' ' + t.badge + ' ' + t.type + ' ' +
+      return searchText(p, (p ? '' : t.name || '') + ' ' + t.badge + ' ' + t.type + ' ' +
         t.status + ' ' + (t.source || '')).toLowerCase().indexOf(q) !== -1;
     }).sort(function (a, b) { return String(b.start || '').localeCompare(String(a.start || '')); });
     var rows = all.slice(0, MAX_ROWS);
@@ -1586,7 +1641,7 @@
         'name typed differently on the form. They are listed below and still need actioning.</div>' : '') +
       '<section class="suite-panel">' +
       '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
-      '" placeholder="Search by name, badge, type, or status…"></div>' +
+      '" placeholder="Search by EID, name, badge, type, or status…"></div>' +
       (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
         '<th>Associate</th><th>Type</th><th>Dates</th><th>Hours</th><th>Status</th><th>Attendance tie-in</th><th></th></tr></thead><tbody>' +
         rows.map(function (t) {
@@ -1674,7 +1729,7 @@
       'Search the roster for the right person — the connection is remembered, so every future ' +
       'on-premise upload will find them.</p>' +
       '<input class="suite-input" id="connect-search" value="' + esc(state.connectQuery) +
-      '" placeholder="Search by name or badge…" autofocus>' +
+      '" placeholder="Search by EID, name, or badge…" autofocus>' +
       '<div id="connect-results">' + connectResults() + '</div></div>' +
       '<div class="suite-modal-actions"><button type="button" class="suite-btn" data-close>Cancel</button></div>' +
       '</div></div>');
@@ -1697,7 +1752,7 @@
       '<p class="perf-note">Search the roster for the associate this request belongs to. ' +
       'Linking is recorded against your name.</p>' +
       '<input class="suite-input" id="connect-search" value="' + esc(state.connectQuery) +
-      '" placeholder="Search by name or badge…" autofocus>' +
+      '" placeholder="Search by EID, name, or badge…" autofocus>' +
       '<div id="connect-results">' + connectResults() + '</div></div>' +
       '<div class="suite-modal-actions"><button type="button" class="suite-btn" data-close>Cancel</button></div>' +
       '</div></div>');
@@ -1708,14 +1763,14 @@
     var q = (state.connectQuery || '').trim().toLowerCase();
     if (!q) return '<div class="connect-hint">Type a name to search ' + state.profiles.size + ' associates.</div>';
     var hits = allProfiles().filter(function (p) {
-      return (p.name + ' ' + p.badge + ' ' + p.empNumber + ' ' + p.market).toLowerCase().indexOf(q) !== -1;
+      return searchText(p).toLowerCase().indexOf(q) !== -1;
     }).sort(function (a, b) { return a.name.localeCompare(b.name); }).slice(0, 25);
     if (!hits.length) return '<div class="connect-hint">No associate matches “' + esc(q) + '”.</div>';
     return hits.map(function (p) {
       return '<button class="connect-hit" data-connect-to="' + esc(p.badge) + '">' +
         '<div class="initial">' + esc(p.initials) + '</div>' +
         '<div><div class="name">' + esc(p.name) + '</div>' +
-        '<div class="sub">' + esc(p.badge) + ' · ' + esc(p.market) +
+        '<div class="sub">' + idLine(p) + ' · ' + esc(p.market) +
         (p.status === 'Ended' ? ' · <b class="warn-text">Ended</b>' : '') + '</div></div>' +
         '<span>›</span></button>';
     }).join('');
@@ -1788,7 +1843,8 @@
       if (!showDone && !TasksCore.isOpen(t)) return false;
       if (state.tasks.kind !== 'all' && TasksCore.kindMeta(t.kind).key !== state.tasks.kind) return false;
       if (!q) return true;
-      return (t.title + ' ' + t.detail + ' ' + t.name + ' ' + t.badge).toLowerCase().indexOf(q) !== -1;
+      return searchText(t.badge ? profile(t.badge) : null,
+        t.title + ' ' + t.detail + ' ' + t.name + ' ' + t.badge).toLowerCase().indexOf(q) !== -1;
     }), now);
 
     return hero('Tasks', 'Everything outstanding, from wherever it was raised. A task stays until somebody marks it complete.', 'task', 'Raise a task') +
@@ -1804,7 +1860,7 @@
         TasksCore.kindMeta('note').hours + '.</div>' : '') +
       '<section class="suite-panel">' +
       '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
-      '" placeholder="Search by title, detail, name, or badge…">' +
+      '" placeholder="Search by EID, title, detail, or name…">' +
       '<select class="suite-select" id="task-kind"><option value="all">All kinds</option>' +
       TasksCore.KINDS.map(function (k) {
         return '<option value="' + esc(k.key) + '" ' + (state.tasks.kind === k.key ? 'selected' : '') +
@@ -1832,7 +1888,7 @@
       '<td><span class="task-kind">' + esc(kind.label) + '</span>' +
       (kind.unknown ? '<div class="sub warn-text">not a kind this build knows</div>' : '') + '</td>' +
       '<td>' + (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div>' +
-                    '<div class="sub">' + esc(p.badge) + '</div>'
+                    '<div class="sub">' + idLine(p) + '</div>'
                   : t.name ? '<div class="name">' + esc(t.name) + '</div>' +
                     '<div class="sub warn-text">no profile</div>'
                   : '<span class="sub">—</span>') + '</td>' +
@@ -1874,7 +1930,7 @@
       var p = profile(dsc.badge);
       if (p ? !inMarket(p) : state.market !== 'all' && dsc.badge) return false;
       if (!q) return true;
-      return ((p ? p.name : dsc.name || '') + ' ' + dsc.badge + ' ' + dsc.location + ' ' +
+      return searchText(p, (p ? '' : dsc.name || '') + ' ' + dsc.badge + ' ' + dsc.location + ' ' +
         dsc.details + ' ' + dsc.status).toLowerCase().indexOf(q) !== -1;
     }).sort(function (a, b) { return String(b.date || '').localeCompare(String(a.date || '')); });
     var rows = all.slice(0, MAX_ROWS);
@@ -1891,7 +1947,7 @@
         'typed differently on the form. Use Connect to link them.</div>' : '') +
       '<section class="suite-panel">' +
       '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
-      '" placeholder="Search by name, location, detail, or status…"></div>' +
+      '" placeholder="Search by EID, name, location, detail, or status…"></div>' +
       (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
         '<th>Associate</th><th>Location</th><th>Date</th><th>Week ending</th><th>Details</th>' +
         '<th>Status</th><th></th></tr></thead><tbody>' +
@@ -1899,7 +1955,7 @@
           var p = profile(dsc.badge);
           return '<tr' + (p ? '' : ' class="cov-row warn"') + '><td>' +
             (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div>' +
-                 '<div class="sub">' + esc(p.badge) + '</div>'
+                 '<div class="sub">' + idLine(p) + '</div>'
                : '<div class="name">' + esc(dsc.name || 'Unknown') + '</div>' +
                  '<div class="sub warn-text">Not matched to a profile</div>') + '</td>' +
             '<td>' + esc(dsc.location || '—') + '</td>' +
@@ -1969,7 +2025,7 @@
           return '<tr class="' + (c.afterClose ? 'cov-row bad' : '') + '"><td>' +
             (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div>'
                : '<div class="name">' + esc(c.name || c.badge) + '</div>') +
-            '<div class="sub">' + esc(c.badge) + '</div></td>' +
+            '<div class="sub">' + (idLine(profile(c.badge)) || esc(c.badge)) + '</div></td>' +
             '<td><span class="cov-status ' + (c.kind === 'removed' ? 'bad' : c.kind === 'added' ? 'warn' : '') + '">' +
             esc(c.kind) + '</span>' + (c.afterClose ? '<span class="cov-flag bad">after close</span>' : '') + '</td>' +
             '<td>' + esc(c.from) + '</td><td>' + esc(c.to) + '</td>' +
@@ -2365,9 +2421,14 @@
   }
 
   /* ---------- modals ---------- */
+  /* Offers the EID as the value, because that is the number people have in
+     front of them. The field still accepts a badge or a timeclock id -- see
+     findByAnyId -- so nobody is forced to look up a different number to type
+     the one they already know. */
   function rosterDatalist() {
     return '<datalist id="roster-list">' + allProfiles().slice(0, 2000).map(function (p) {
-      return '<option value="' + esc(p.badge) + '">' + esc(p.name) + ' · ' + esc(p.market) + '</option>';
+      return '<option value="' + esc(p.empNumber || p.badge) + '">' + esc(p.name) +
+        ' · ' + esc(p.market) + (p.empNumber ? '' : ' · badge ' + esc(p.badge)) + '</option>';
     }).join('') + '</datalist>';
   }
   function field(label, name, type, value, opts) {
@@ -2378,7 +2439,7 @@
       }).join('') + '</select>';
     } else if (type === 'badge' || type === 'badge-optional') {
       input = '<input name="' + name + '" list="roster-list" value="' + esc(value) + '"' +
-        (type === 'badge' ? ' required' : '') + ' placeholder="Badge number">' + rosterDatalist();
+        (type === 'badge' ? ' required' : '') + ' placeholder="EID, badge, or name">' + rosterDatalist();
     } else {
       input = '<input name="' + name + '" type="' + type + '" value="' + esc(value) + '"' +
         (type === 'number' ? ' min="0" step="0.5"' : '') + '>';
@@ -2389,7 +2450,7 @@
     var fields = '', title = '';
     if (type === 'attendance') {
       title = 'Log attendance occurrence';
-      fields = field('Associate badge', 'badge', 'badge', badge || '') +
+      fields = field('Associate', 'badge', 'badge', badge || '') +
         field('Date', 'date', 'date', today()) +
         field('Type', 'type', 'select', 'Absent', Object.keys(TYPE_POINTS)) +
         field('Minutes', 'minutes', 'number', '0') +
@@ -2397,7 +2458,7 @@
         field('Notes', 'notes', 'text', '');
     } else if (type === 'timeoff') {
       title = 'New time-off request';
-      fields = field('Associate badge', 'badge', 'badge', badge || '') +
+      fields = field('Associate', 'badge', 'badge', badge || '') +
         field('Type', 'type', 'select', 'PTO', TIME_OFF_TYPES) +
         field('Start', 'start', 'date', today()) + field('End', 'end', 'date', today()) +
         field('Hours', 'hours', 'number', '8') +
@@ -2409,7 +2470,7 @@
         field('Kind', 'kind', 'select', TasksCore.DEFAULT_KIND,
           TasksCore.KINDS.map(function (k) { return k.label; })) +
         // Optional: plenty of tasks are about a system or a site, not a person.
-        field('Associate badge (optional)', 'badge', 'badge-optional', badge || '') +
+        field('Associate (optional)', 'badge', 'badge-optional', badge || '') +
         field('Detail', 'detail', 'text', '');
     } else {
       title = 'New Beeline request';
@@ -2919,8 +2980,18 @@
       if (k in data) data[k] = Number(data[k]) || 0;
     });
     if (data.badge) {
-      data.badge = SuiteData.normBadge(data.badge);
-      if (!profile(data.badge) && !confirm('Badge ' + data.badge + ' is not on the current roster, so this record will not show on any profile. Save it anyway?')) return;
+      /* Whatever number somebody typed -- EID, badge, timeclock id -- is turned
+         into the badge records are keyed by. The EID is tried first because it
+         is what the team works from; nothing is saved against a key that
+         reaches no profile without saying so first. */
+      var who = findByAnyId(data.badge);
+      if (who) {
+        data.badge = who.badge;
+      } else {
+        data.badge = SuiteData.normBadge(data.badge);
+        if (!confirm('"' + data.badge + '" does not match any EID, badge, or timeclock id on the ' +
+          'current roster, so this record will not show on any profile. Save it anyway?')) return;
+      }
     }
     if (type === 'requisitions' || type === 'requisition') {
       type = 'requisitions';

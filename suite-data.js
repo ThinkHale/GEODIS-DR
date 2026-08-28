@@ -125,6 +125,11 @@
         transitionAssociate: false, transitionPtoInitial: 0, transitionPtoBalance: 0,
         shift: '', shiftBuilding: '', shiftHours: '', shiftSource: '',
         phone: '', phoneSource: '', phoneUpdatedAt: '',
+        /* The WFM id, "80-JALCAL5986". Note this is NOT empNumber: the PLX
+           workbook heads its column "EID", but that column is the timeclock id,
+           while the EID the team searches by is RC's Legacy Contact ID, which
+           arrives as empNumber. Two different numbers, one overloaded word. */
+        timeclockId: '',
         // Where they work: the GEODIS site number and the client account on it.
         location: '', account: '', locationLabel: ''
       });
@@ -164,6 +169,13 @@
     var siteName = {};
     (stores.locations || []).forEach(function (l) {
       if (l && l.code && l.name && l.active !== false) siteName[String(l.code).trim()] = l.name;
+    });
+
+    /* Timeclock ids connected to a profile by hand, badge -> id. These are the
+       decisions somebody made when no rule could join the two namespaces. */
+    var linkByBadge = {};
+    (stores.timeclockLinks || []).forEach(function (l) {
+      if (l && l.badge && l.eid) linkByBadge[normBadge(l.badge)] = l.eid;
     });
 
     var notes = stores.notes || {};
@@ -208,6 +220,9 @@
         if (ph) { p.phone = ph.phone || ''; p.phoneSource = ph.source || ''; p.phoneUpdatedAt = ph.updatedAt || ''; }
       }
       var sr = stores.shiftKeyOf ? shiftIdx[stores.shiftKeyOf(p.name)] : null;
+      if (sr && sr.eid) p.timeclockId = sr.eid;
+      // A link somebody made by hand beats one inferred from a name.
+      if (linkByBadge[p.badge]) p.timeclockId = linkByBadge[p.badge];
       if (sr) {
         p.shift = sr.shift;
         p.shiftBuilding = sr.building || '';

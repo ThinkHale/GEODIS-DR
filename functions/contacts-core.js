@@ -148,8 +148,12 @@
     if (!ix || !profile) return null;
     var hit = ix.byBadge.get(profile.badge);
     if (hit) return hit;
-    if (profile.wfmId) {
-      hit = ix.byEid.get(String(profile.wfmId).toUpperCase());
+    /* The TIMECLOCK id, not the EID. Numbers harvested from the workbook are
+       filed under the id in its column headed "EID" -- which is the WFM one,
+       not RC's Legacy Contact ID that the team searches by. Two numbers, one
+       overloaded word; reading profile.empNumber here would match nothing. */
+    if (profile.timeclockId) {
+      hit = ix.byEid.get(String(profile.timeclockId).toUpperCase());
       if (hit) return hit;
     }
     var k = nameKeyOf ? nameKeyOf(profile.name) : '';
@@ -165,7 +169,7 @@
     var keyOf = opts.nameKeyOf || function (v) { return String(v || '').toLowerCase(); };
     var byEid = new Map(), byName = new Map();
     profiles.forEach(function (p) {
-      if (p.wfmId) byEid.set(String(p.wfmId).toUpperCase(), p);
+      if (p.timeclockId) byEid.set(String(p.timeclockId).toUpperCase(), p);
       var k = keyOf(p.name);
       if (!k) return;
       byName.set(k, byName.has(k) ? null : p);   // poisoned on a duplicate

@@ -75,7 +75,7 @@ const ix = C.index([
 const look = p => C.lookup(ix, p, SC.rosterKey);
 t('by badge', look({ badge: 'b1', name: 'Ada Away' }).phone === '3125551212');
 t('by employee id when there is no badge match',
-  look({ badge: 'zz', wfmId: '80-BEID2', name: 'Ben Been' }).phone === '6303800838');
+  look({ badge: 'zz', timeclockId: '80-BEID2', name: 'Ben Been' }).phone === '6303800838');
 t('by name as the last resort',
   look({ badge: 'zz', name: 'Cara Came' }).phone === '3315751033');
 t('and nothing when no key reaches one', look({ badge: 'zz', name: 'Nobody Here' }) === null);
@@ -111,12 +111,40 @@ t('somebody with no number has an empty one, not undefined', profiles.get('b2').
 t('and without the lookup nothing is invented',
   SD.buildProfiles(records, {}).get('b1').phone === '');
 
+console.log('— the timeclock id reaches a profile —');
+{
+  /* The workbook's column headed "EID" is the WFM timeclock id, NOT the RC
+     Legacy Contact ID the team searches by. A number harvested under one must
+     not be looked up under the other. */
+  const recs = [{ badge: 'b9', empNumber: '20750899', person: 'Ada Away',
+    action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago' }];
+  const withShift = SD.buildProfiles(recs, {
+    shifts: [{ nameKey: SC.rosterKey('Ada Away'), eid: '80-AAWAY1', shift: '1st' }],
+    shiftKeyOf: SC.rosterKey
+  });
+  t('it comes off the shift tag', withShift.get('b9').timeclockId === '80-AAWAY1');
+  t('and is kept apart from the EID', withShift.get('b9').empNumber === '20750899');
+  const linked = SD.buildProfiles(recs, {
+    shifts: [{ nameKey: SC.rosterKey('Ada Away'), eid: '80-WRONG', shift: '1st' }],
+    shiftKeyOf: SC.rosterKey,
+    timeclockLinks: [{ badge: 'b9', eid: '80-BYHAND' }]
+  });
+  t('a link made by hand beats one inferred from a name',
+    linked.get('b9').timeclockId === '80-BYHAND');
+  const phones = C.index([C.record({ eid: '80-AAWAY1', phone: '7736395639', source: 'PLX workbook' })]);
+  t('so a harvested number reaches the profile',
+    C.lookup(phones, withShift.get('b9'), SC.rosterKey).phone === '7736395639');
+  t('and the EID is never mistaken for it',
+    C.lookup(C.index([C.record({ eid: '20750899', phone: '6303800838' })]),
+      withShift.get('b9'), SC.rosterKey) === null);
+}
+
 console.log('— matching harvested rows onto the roster —');
 const profs = [
-  { badge: 'b1', wfmId: '80-AEID1', name: 'Ada Away' },
-  { badge: 'b2', wfmId: '80-BEID2', name: 'Gus Gone' },
-  { badge: 'b3', wfmId: '80-C1', name: 'Sam Same' },
-  { badge: 'b4', wfmId: '80-C2', name: 'Sam Same' }
+  { badge: 'b1', timeclockId: '80-AEID1', name: 'Ada Away' },
+  { badge: 'b2', timeclockId: '80-BEID2', name: 'Gus Gone' },
+  { badge: 'b3', timeclockId: '80-C1', name: 'Sam Same' },
+  { badge: 'b4', timeclockId: '80-C2', name: 'Sam Same' }
 ];
 const m = C.matchToProfiles([
   { name: 'Away, Ada', nameKey: SC.rosterKey('Away, Ada'), eid: '', phone: '1' },

@@ -55,9 +55,15 @@
     complete:    { label: 'Shift complete', severity: 'ok',   onShift: false, desc: 'Shift is over and they have left.' },
     lingering:   { label: 'Still on site',  severity: 'warn', onShift: false, desc: 'Shift is over but they are still on premise -- overtime or a missed punch out.' },
     unscheduled: { label: 'Unscheduled',    severity: 'bad',  onShift: false, desc: 'On premise with no shift covering right now.' },
-    off:         { label: 'Off',            severity: 'ok',   onShift: false, desc: 'Not scheduled and not on premise.' }
+    off:         { label: 'Off',            severity: 'ok',   onShift: false, desc: 'Not scheduled and not on premise.' },
+    /* Approved time off covering today. onShift is false deliberately: they are
+       scheduled, but their absence is authorised, so counting them in the
+       denominator would report the floor as under-covered for a reason that is
+       nobody's attendance problem. The count is surfaced separately instead, so
+       a supervisor can still see the floor is short. */
+    pto:         { label: 'On PTO',         severity: 'ok',   onShift: false, desc: 'Approved time off covering today, so not expected on the floor.' }
   };
-  var STATUS_ORDER = ['missing', 'unscheduled', 'lingering', 'working', 'starting', 'early', 'scheduled', 'complete', 'off'];
+  var STATUS_ORDER = ['missing', 'unscheduled', 'lingering', 'working', 'starting', 'early', 'scheduled', 'complete', 'pto', 'off'];
 
   /* ---------- names ----------
      Both reports render a name as "Last, First", but casing is inconsistent
@@ -668,6 +674,57 @@
      the ones worth acting on. They are counted rather than dropped (see
      unlinkedAbsent), so the pile cannot grow invisibly; the moment one clocks in
      they appear here. */
+  /* ---------- approved time off ----------
+     Runs after the roster join, because time off is keyed by badge and a row
+     only has one once it has reached a profile.
+
+     A person with approved PTO covering the day is not missing, they are off:
+     the row is restated as `pto`, which is severity ok, so no documentation box
+     appears and no occurrence is ever offered for it. Somebody who turned up
+     anyway is left exactly as they are -- being on the clock is a fact, and PTO
+     does not un-happen it. That is a real case (a cancelled day, a change of
+     mind) and quietly relabelling it would hide hours actually worked. */
+  function applyTimeOff(result, index, iso, lookup) {
+    if (!result || !result.rows || !index) return result;
+    var find = lookup || function (badge, day) { return null; };
+    var covered = 0;
+    result.rows.forEach(function (r) {
+      if (!r.badge) return;
+      var req = find(index, r.badge, iso);
+      if (!req) return;
+      // Recorded on every matching row, present or not, so the contradiction of
+      // being on the clock during approved time off can be shown rather than
+      // smoothed over.
+      r.ptoRequest = { id: req.id, type: req.type || 'PTO', start: req.start || '', end: req.end || '' };
+      if (r.present) return;
+      // Nothing to restate for somebody who was not expected today anyway.
+      if (r.status === 'off') return;
+      r.wasStatus = r.status;
+      r.status = 'pto';
+      // Every field derived from the status has to move with it. The label is
+      // what the table prints, and leaving it behind is how a row ends up
+      // reading "Not clocked in" while counting as PTO everywhere else.
+      r.statusLabel = STATUS[r.status].label;
+      r.severity = STATUS[r.status].severity;
+      r.onShift = STATUS[r.status].onShift;
+      covered++;
+    });
+    if (covered) recount(result);
+    result.summary.onPto = result.rows.filter(function (r) { return r.status === 'pto'; }).length;
+    return result;
+  }
+
+  /* The summary is derived from the rows, so restating a row means running the
+     same derivation again rather than adjusting counters by hand. Adjusting by
+     hand is how a summary ends up disagreeing with the table under it. */
+  function recount(result) {
+    var s = summarize(result.rows);
+    // A site mismatch already ruled coverage unknowable; do not resurrect it.
+    if (result.mismatch) s.coverage = null;
+    result.summary = s;
+    return result;
+  }
+
   function unlinkedRows(rows) {
     return (rows || []).filter(function (r) { return !r.badge && r.inPresence && r.present; });
   }
@@ -1032,6 +1089,7 @@
     overlapOf: overlapOf,
     siteList: siteList,
     linkRoster: linkRoster,
+    applyTimeOff: applyTimeOff,
     unlinkedRows: unlinkedRows,
     unlinkedAbsent: unlinkedAbsent,
     linkIndex: linkIndex,

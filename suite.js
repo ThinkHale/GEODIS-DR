@@ -162,6 +162,14 @@
       locations: state.stores.locations,
       associatePto: state.stores.associatePto,
       shiftKeyOf: ScheduleCore.rosterKey,
+      // Approved time off clears the points for the day it covers.
+      ptoCover: function (requests, iso) {
+        for (var i = 0; i < (requests || []).length; i++) {
+          var r = requests[i];
+          if (TimeOffCore.isExcused(r.status) && TimeOffCore.coversDate(r, iso)) return r;
+        }
+        return null;
+      },
       notes: state.notes
     });
     validateMarket();
@@ -661,7 +669,7 @@
         '<th>Date</th><th>Type</th><th>Minutes</th><th>Points</th><th>Notes</th><th></th></tr></thead><tbody>' +
         p.attendance.map(function (a) {
           return '<tr><td>' + esc(a.date) + '</td><td>' + esc(a.type) + '</td><td>' + esc(a.minutes || 0) + '</td>' +
-            '<td>' + esc(a.points || 0) + '</td><td class="detail-cell">' + esc(a.notes || '') + '</td>' +
+            '<td>' + ptoPoints(a) + '</td><td class="detail-cell">' + esc(a.notes || '') + '</td>' +
             '<td><button class="suite-btn danger" data-del="attendance|' + esc(a.id) + '">Remove</button></td></tr>';
         }).join('') + '</tbody></table></div>' : empty('No occurrences logged')) + '</section>' +
 
@@ -888,6 +896,12 @@
     // attendance and time off from an exception.
     ScheduleCore.linkRoster(res.rows, state.profiles, SuiteData.normBadge,
       ScheduleCore.linkIndex(state.stores.timeclockLinks));
+    /* Approved time off is applied here rather than inside buildCoverage,
+       because it is keyed by badge and a row only has one once the roster join
+       above has run. */
+    ScheduleCore.applyTimeOff(res,
+      TimeOffCore.excusedIndex(state.stores.timeOff, SuiteData.normBadge),
+      ScheduleCore.isoDate(coverageAsOf()), TimeOffCore.excusedOn);
     return res;
   }
 
@@ -947,6 +961,32 @@
       '</div></section>';
   }
 
+  /* What the PTO record says, on the row it explains.
+
+     The second case is the one worth calling out: somebody with approved time
+     off who is on the clock anyway. They are left as working, because they are
+     -- but a supervisor should see the contradiction rather than have it
+     smoothed over, since the request may need cancelling before it is paid. */
+  function ptoNote(r) {
+    if (!r.ptoRequest) return '';
+    var when = r.ptoRequest.start +
+      (r.ptoRequest.end && r.ptoRequest.end !== r.ptoRequest.start ? ' to ' + r.ptoRequest.end : '');
+    if (r.status === 'pto') {
+      return '<div class="sub">' + esc(r.ptoRequest.type || 'PTO') + ' approved · ' + esc(when) + '</div>';
+    }
+    return '<div class="sub warn-text">On premise despite approved ' +
+      esc(r.ptoRequest.type || 'PTO') + ' · ' + esc(when) + '</div>';
+  }
+
+  /* An occurrence on a day the person had approved off keeps its place on the
+     ledger and loses its points. Showing the original struck through is the
+     honest form: something WAS logged, and this is why it costs nothing. */
+  function ptoPoints(a) {
+    if (!a.excusedBy) return esc(a.points || 0);
+    return '<span class="pts-void">' + esc(a.originalPoints || 0) + '</span> ' +
+      '<b>0</b><div class="sub">' + esc(a.excusedBy.type || 'PTO') + ' approved for this day</div>';
+  }
+
   function covMetrics(s) {
     var cov = s.coverage == null ? '—' : s.coverage + '%';
     return '<div class="metric-strip">' +
@@ -954,7 +994,9 @@
         s.coverage == null ? '' : s.coverage >= 90 ? 'green' : 'orange') +
       metric('Working', s.byStatus.working, 'On shift and on premise', 'green') +
       metric('Not clocked in', s.byStatus.missing, 'On shift, not on premise', s.byStatus.missing ? 'orange' : 'green') +
-      metric('Unscheduled', s.byStatus.unscheduled, 'On premise with no shift covering now', s.byStatus.unscheduled ? 'orange' : 'green') +
+      (s.onPto ? metric('On PTO', s.onPto, 'Approved time off, so not counted against coverage')
+               : metric('Unscheduled', s.byStatus.unscheduled, 'On premise with no shift covering now',
+                        s.byStatus.unscheduled ? 'orange' : 'green')) +
       '</div>';
   }
 
@@ -1315,7 +1357,7 @@
         return '<tr class="cov-row ' + r.severity + '">' +
           '<td><div class="' + nameCls + '"' + open + '>' + esc(r.name) + '</div><div class="sub">' + sub +
           (r.inSchedule ? '' : ' · no schedule row') + (r.ambiguous ? ' · duplicate name' : '') + '</div></td>' +
-          '<td><span class="cov-status ' + r.severity + '">' + esc(r.statusLabel) + '</span></td>' +
+          '<td><span class="cov-status ' + r.severity + '">' + esc(r.statusLabel) + '</span>' + ptoNote(r) + '</td>' +
           '<td>' + (r.present ? '<span class="cov-dot on">Yes</span>' : '<span class="cov-dot off">No</span>') + '</td>' +
           '<td>' + covShiftCell(r) + '</td>' +
           '<td>' + esc(locLeaf(r.location) || '—') + '</td>' +
@@ -1481,7 +1523,7 @@
               ? esc(p.location) + (p.account ? ' <span class="sub">' + esc(p.account) + '</span>' : '')
               : '<span class="sub">—</span>') + '</td>' +
             '<td>' + esc(a.type) + '</td><td>' + esc(a.minutes || 0) + '</td><td>' + esc(a.points || 0) + '</td>' +
-            '<td>' + (p ? p.points : '—') + '</td><td class="detail-cell">' + esc(a.notes || '') + '</td>' +
+            '<td>' + ptoPoints(a) + '</td><td class="detail-cell">' + esc(a.notes || '') + '</td>' +
             '<td><button class="suite-btn danger" data-del="attendance|' + esc(a.id) + '">Remove</button></td></tr>';
         }).join('') + '</tbody></table></div>' + rowCap(rows.length, all.length)
         : empty('No attendance records', 'Log an occurrence, or import the daily attendance report.')) +

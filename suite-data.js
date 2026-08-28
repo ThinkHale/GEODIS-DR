@@ -166,7 +166,34 @@
 
     var notes = stores.notes || {};
     byBadge.forEach(function (p) {
+      /* Approved time off answers for the day it covers. An occurrence logged
+         against a day the person had approved off is left on the ledger -- it
+         happened, and deleting it would hide that somebody logged it -- but it
+         stops carrying points. What was recorded and what it costs are two
+         different questions, and only the second is policy.
+
+         The test is injected (stores.ptoCover) for the same reason shiftKeyOf
+         is: this file does not need to know about the time-off pipeline to join
+         records by badge. */
+      var cover = stores.ptoCover;
+      if (cover) {
+        /* A COPY is pushed, never the caller's record. attach() shares object
+           references with the store, so zeroing in place would edit the stored
+           event itself -- the next rebuild would see nothing to excuse, and if
+           the request were later denied the original points would be gone. */
+        p.attendance = p.attendance.map(function (e) {
+          var req = e.date ? cover(p.timeOff, e.date) : null;
+          if (!req || !num(e.points)) return e;
+          var out = {};
+          Object.keys(e).forEach(function (k) { out[k] = e[k]; });
+          out.excusedBy = { id: req.id, type: req.type || 'PTO', start: req.start || '', end: req.end || '' };
+          out.originalPoints = num(e.points);
+          out.points = 0;
+          return out;
+        });
+      }
       p.points = p.attendance.reduce(function (n, e) { return n + num(e.points); }, 0);
+      p.excusedByPto = p.attendance.filter(function (e) { return e.excusedBy; }).length;
       var band = bandFor(p.points);
       p.standing = band.standing;
       p.standingCls = band.cls;

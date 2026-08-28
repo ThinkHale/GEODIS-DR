@@ -658,11 +658,23 @@
     return rows;
   }
 
-  // Everyone on the on-premise report who reached no profile. These are the rows
-  // a person has to connect by hand; until they do, that associate is invisible
-  // to attendance, points and every profile view.
+  /* Everyone on the on-premise report who reached no profile AND is on the
+     clock. These are the rows a person has to connect by hand; until they do,
+     that associate is invisible to attendance, points and every profile view.
+
+     Only people actually present are offered. Someone unconnected and not on the
+     clock has nothing to attribute yet, and most of them are GEODIS's own staff,
+     who will never have an agency profile to connect to -- listing them buries
+     the ones worth acting on. They are counted rather than dropped (see
+     unlinkedAbsent), so the pile cannot grow invisibly; the moment one clocks in
+     they appear here. */
   function unlinkedRows(rows) {
-    return (rows || []).filter(function (r) { return !r.badge && r.inPresence; });
+    return (rows || []).filter(function (r) { return !r.badge && r.inPresence && r.present; });
+  }
+  // Unconnected and on the report, but not on the clock: disclosed as a count so
+  // nothing vanishes silently.
+  function unlinkedAbsent(rows) {
+    return (rows || []).filter(function (r) { return !r.badge && r.inPresence && !r.present; });
   }
   // A timeclock id -> badge map from the stored links collection.
   function linkIndex(records) {
@@ -1021,6 +1033,7 @@
     siteList: siteList,
     linkRoster: linkRoster,
     unlinkedRows: unlinkedRows,
+    unlinkedAbsent: unlinkedAbsent,
     linkIndex: linkIndex,
     personKey: personKey,
     profileKeys: profileKeys,

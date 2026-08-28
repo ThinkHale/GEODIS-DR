@@ -86,10 +86,23 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   t('and names the workbook', txt().indexOf('PLX workbook') !== -1);
   t('somebody off the workbook is not reported as scheduled',
     !/Ghost, Gary[\s\S]{0,400}?scheduled/i.test(txt()));
-  t('they are still shown, as on the clock with no shift', txt().indexOf('Ghost, Gary') !== -1);
   t('the passed-over export is disclosed, not hidden',
     txt().indexOf('stored WFM schedule') !== -1);
   t('the person on both sources is scheduled', txt().indexOf('Real, Rita') !== -1);
+
+  /* Gary is off the workbook AND off the clock, so he is not offered as somebody
+     to connect -- but he is not swept away either: he is counted in the banner
+     and still listed once the table is widened past exceptions. */
+  const banner = d.querySelector('.cov-unlinked').textContent;
+  t('somebody off the clock is not offered for connecting',
+    banner.indexOf('Ghost, Gary') === -1);
+  t('but is disclosed as a count', banner.indexOf('1 more are unconnected') !== -1);
+  const status = $('#cov-status');
+  status.value = 'all';
+  status.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(40);
+  t('and is still in the table itself', d.querySelector('.suite-table').textContent.indexOf('Ghost, Gary') !== -1);
+  t('reading as not scheduled', /Ghost, Gary[\s\S]{0,300}?Not scheduled/.test(d.querySelector('.suite-table').textContent));
 
   console.log('— an export dropped in by hand still overrides it —');
   // The real "Employee Schedule - Weekly" shape: a period header, a location

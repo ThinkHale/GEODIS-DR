@@ -25,7 +25,8 @@
      most: it is the way to record that the person WAS here and the reader missed
      them, so a hardware gap never turns into a disciplinary record. */
   var DISPOSITIONS = ['', ScheduleCore.PRESENT_DISPOSITION, 'Called in', 'No call / no show',
-    'Approved time off', 'Late arrival', 'Left early', 'Reassigned', 'Badge / system issue', 'Other'];
+    'Approved time off', 'Late arrival', 'Left early', 'Reassigned', 'Terminated',
+    'Badge / system issue', 'Other'];
   // Disposition -> the occurrence a one-click log would create. null means the
   // absence is explained and no occurrence should be offered at all.
   var DISPOSITION_OCCURRENCE = {
@@ -37,6 +38,9 @@
     'Late arrival': { type: 'Late', points: 0.5 },
     'Left early': { type: 'Early Out', points: 0.5 },
     'Reassigned': null,
+    // Gone. Nobody accrues attendance points after they leave, and the empty
+    // shift is a staffing problem rather than a disciplinary one.
+    'Terminated': null,
     'Badge / system issue': null,
     'Other': { type: 'Absent', points: 0 }
   };
@@ -1083,7 +1087,7 @@
     });
     var unlinked = ScheduleCore.unlinkedRows(res.rows);
     if (unlinked.length) {
-      notes.unshift(unlinked.length + ' associate(s) on the on-premise report are not connected to a ' +
+      notes.unshift(unlinked.length + ' associate(s) on the clock are not connected to a ' +
         'profile, so nothing they do reaches attendance or their record. Use Connect on those rows.');
     }
     if (res.summary.noSchedule) {
@@ -1355,11 +1359,14 @@
 
   function unlinkedBanner(res) {
     var unlinked = ScheduleCore.unlinkedRows(res.rows);
+    var absent = ScheduleCore.unlinkedAbsent(res.rows);
     if (!unlinked.length) return '';
     return '<div class="warn-banner cov-unlinked"><strong>' + unlinked.length +
       ' not connected to a profile</strong>' +
       '<p>These people are on the clock but reach no associate record, so their attendance, points ' +
       'and time off go nowhere. Connecting one fixes it for every future upload.</p>' +
+      (absent.length ? '<p class="sub">' + absent.length + ' more are unconnected but not on the clock, ' +
+        'so they are not listed. They appear here if they punch in.</p>' : '') +
       '<div class="unlinked-list">' + unlinked.slice(0, 12).map(function (r) {
         return '<button class="unlinked-row" data-link-eid="' + esc(r.wfmId || '') +
           '" data-link-name="' + esc(r.name) + '">' +

@@ -149,12 +149,15 @@ w.GEODISSuite.reload().then(()=>{
   t('someone on premise with no shift is listed', d.body.textContent.includes('Extra, Eli'));
   t('a person with no schedule row says so', d.body.textContent.includes('no schedule row'));
   t('the working associate is filtered out of the exception view', !d.body.textContent.includes('Reed, Ava'));
-  // Scoped to the table: the unconnected banner legitimately lists him too,
-  // because he is on the on-premise report and reaches no profile.
   const covRows = () => $$('.cov-row').map(tr => tr.textContent).join(' ');
   t('the finished night shift is not called an exception', !covRows().includes('Vale, Vic'));
-  t('but he IS flagged as not connected to a profile',
-    $('.cov-unlinked') && $('.cov-unlinked').textContent.includes('Vale, Vic'));
+  /* He reaches no profile, but he has gone home -- there is nothing to
+     attribute to him, so he is not put in the queue of people to connect. He is
+     counted there instead, and still appears in the table below. */
+  t('somebody who has clocked out is not queued up for connecting',
+    $('.cov-unlinked') && !$('.cov-unlinked').textContent.includes('Vale, Vic'));
+  t('he is disclosed as a count rather than dropped',
+    $('.cov-unlinked').textContent.includes('not on the clock'));
 
   console.log('— coverage: filters and the roster join —');
   $('#cov-status').value='all';

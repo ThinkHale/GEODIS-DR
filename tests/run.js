@@ -12,6 +12,7 @@ try { require.resolve('jsdom'); } catch (e) { hasJsdom = false; }
 const SUITES = [
   { file: 'spine.test.js', name: 'associate spine (suite-data.js)', dom: false },
   { file: 'collections.test.js', name: 'shared collections (functions/index.js)', dom: false },
+  { file: 'reqs.test.js', name: 'Beeline requests + candidates (reqs-core.js)', dom: false },
   { file: 'coverage.test.js', name: 'schedule vs. on-premise coverage (schedule-core.js)', dom: false },
   { file: 'persistence.test.js', name: 'schedule + coverage persistence', dom: false },
   { file: 'sheet-export.test.js', name: 'GEODIS headcount spreadsheet export', dom: false },

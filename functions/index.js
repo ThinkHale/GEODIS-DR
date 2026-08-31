@@ -73,10 +73,30 @@ const COLLECTIONS = {
                   fields: { badge: 'str', name: 'str', transitionAssociate: 'str',
                             transitionPtoInitial: 'num', transitionPtoBalance: 'num',
                             source: 'str', sourceAccount: 'str', importedAt: 'str', notes: 'str' } },
+  /* Requisitions. A Beeline request IS a requisition, so the daily Beeline
+     export lands here rather than in a parallel list the tab would have to
+     reconcile against itself. Imported rows carry source 'beeline' and are keyed
+     by Request-ID; rows without that source were typed in by hand and an import
+     leaves them alone (see mergeForSave in reqs-core.js). */
   requisitions: { path: 'requisitions/requisitions.json', responseKey: 'requisitions',
                   fields: { title: 'str', department: 'str', shift: 'str', market: 'str', openings: 'num',
                             filled: 'num', priority: 'str', status: 'str', due: 'str', notes: 'str',
-                            building: 'str', reportTo: 'str', source: 'str' } },
+                            building: 'str', reportTo: 'str', source: 'str',
+                            /* The Beeline half of a requisition. Namespaced away from the
+                               fields the PLX workbook sync writes above, so the two sources
+                               land on one record without either overwriting the other. */
+                            beelineReq: 'str', beelineStatus: 'str', beelineOpenings: 'num',
+                            hired: 'num', submitted: 'num', declined: 'num', offered: 'num',
+                            jobPosition: 'str', startDate: 'str', hiringManager: 'str',
+                            supervisor: 'str', location: 'str', city: 'str', state: 'str',
+                            profitCenter: 'str', updatedAt: 'str' } },
+  /* Candidates attached to a Beeline request, one record per (req, person). The
+     export carries no per-candidate status -- its "Status" column is the
+     request's -- so none is stored; which candidate was hired is only known in
+     aggregate, from the counts on the requisition. */
+  reqCandidates:{ path: 'requisitions/candidates.json',   responseKey: 'reqCandidates',
+                  fields: { reqId: 'str', name: 'str', beelineId: 'str', externalId: 'str',
+                            badge: 'str', jobPosition: 'str', location: 'str', status: 'str' } },
   // Shift tags cross-referenced from the PLX workbook. Keyed by WFM EID where
   // there is one, name otherwise -- see shift-key.js.
   shifts:       { path: 'shifts/assignments.json',       responseKey: 'shifts',

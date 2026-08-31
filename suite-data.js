@@ -23,6 +23,7 @@
     attendance: 'attendance',
     timeoff: 'timeOff',
     requisitions: 'requisitions',
+    reqCandidates: 'reqCandidates',
     performance: 'performance',
     shifts: 'shifts',
     discrepancies: 'discrepancies',
@@ -480,7 +481,7 @@
   function loadAll() {
     return Promise.all(['attendance', 'timeoff', 'requisitions', 'performance', 'shifts',
       'discrepancies', 'associatePto', 'locations', 'appConfig', 'timeclockLinks', 'tasks',
-      'contacts']
+      'contacts', 'reqCandidates']
       .map(function (n) { return loadCollection(n); }))
       .then(function (r) {
         return {
@@ -488,7 +489,8 @@
           performance: r[3], shifts: r[4], discrepancies: r[5], associatePto: r[6],
           // Loaded for everyone, not just admins: it supplies the default account
           // name for sites the Key does not spell out.
-          locations: r[7], appConfig: r[8], timeclockLinks: r[9], tasks: r[10], contacts: r[11]
+          locations: r[7], appConfig: r[8], timeclockLinks: r[9], tasks: r[10], contacts: r[11],
+          reqCandidates: r[12]
         };
       });
   }

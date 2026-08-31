@@ -473,6 +473,178 @@ same request instead of creating a second one — and **an approval already made
 never overwritten** by a re-run. Without a response id the id falls back to a hash
 of the submission, stable for the same answers and different for new ones.
 
+## Beeline requests and the candidates on them
+
+Two Beeline exports arrive by email each morning:
+
+| Export | Carries |
+| --- | --- |
+| `GEODIS Open Reqs` | openings, the submitted/declined/offered/hired counts, hiring manager, start date, profit centre |
+| `Candidate Status per Req` | who is attached to each request, their Beeline id, job position, location, supervisor |
+
+**Both files carry one row per (request × candidate)**, with the request-level
+columns repeated down every row of the same request. Neither file's row count is
+a requisition count — 633 rows is 110 requests. `parseExport` dedupes by
+Request-ID and hangs the candidates off their request.
+
+### Two status columns that mean different things
+
+`Status` is the **request's** status, identical to `Request Status` on every
+request. `Internal Status` is the **candidate's**: Offer Confirmed, Offer Pending,
+Rejected, Pending.
+
+| Internal Status | Stage |
+| --- | --- |
+| Offer Confirmed | `hired` |
+| Offer Pending | `offered` |
+| Rejected | `declined` |
+| Pending | `review` |
+| anything else | `other` — kept, counted apart, and reported |
+
+With `Internal Status` present the pipeline no longer has to come from the reqs
+export. On the 108 requests where the two files were pulled closely enough to
+agree at all, **Offer Confirmed equals Candidates Hired and Rejected equals
+Candidates Declined, exactly** (108/108 each), and the named-candidate count
+equals Candidates Submitted. Those three are derived when the column is absent and
+flagged in `r.derived` so the UI can say they were.
+
+`Candidates Offered` is deliberately **not** derived. No combination of candidate
+statuses reproduces it on more than 104 of 108 requests, and a figure that is right
+96% of the time is worse than an honest blank beside a breakdown that is exact.
+
+### One file or two
+
+`parseExport` reads whichever columns are present and records what it found, so
+the two exports and a single combined export all go through the same code with no
+second path. `missingColumns()` reports the gap by name, and knows what is
+derivable: an export carrying `Internal Status` is not asked for Candidates Hired
+or Candidates Declined.
+
+With `Date` and `Internal Status` added, the candidate export alone still lacks
+**Candidates Requested**, **Candidates Offered**, **Bill To Profit Center Name**,
+and **Hiring Manager**. Those columns cannot be added, so two of the four are
+covered from elsewhere and two are simply not reported.
+
+### Market from the work-location number
+
+`Location Name` begins with the site: `4805 - 2202 Perimeter Rd,,Auburn,WA,US` is
+site 4805. Every one of the 29 sites observed maps to **exactly one** market, and
+the profit centre's own tail begins with that same site number on all 110
+requests — so site → market is a fact the exports state, not a guess.
+
+`learnSiteMarkets()` reads those pairs off **merged** requisitions (the profit
+centre arrives in the reqs export, the work location in the candidate export, so
+no single file states both) and the import offers to write them to the **Locations
+admin list**, which already keys a site number to a name and a market. From then
+on `applyMarket()` fills the market from the site number and marks it
+`marketFrom: 'site'`.
+
+This is one-way and time-limited: the export that names the profit centre is the
+only thing that knows which market a site belongs to. **Seed the list while that
+export still exists** — afterwards an unseeded site is a request with no market for
+good. A site the list does not know is reported by number rather than silently
+left blank, and a site two rows disagree about is not learned at all.
+
+### Openings from the PLX workbook
+
+Where the workbook lists the same requisition, its `Quantity` **is** the openings
+count. `fromRecords()` uses it only where Beeline said nothing — this fills a gap,
+it never overrides — and marks it `requestedFrom: 'workbook'`. A gap filled that
+way is not also reported as a disagreement.
+
+Today that covers 21 of 110 requests, which is the Chicago buildings: enough to
+run Chicago from, and honestly blank everywhere else.
+
+### A fill rate needs a matching denominator
+
+Hires are known for every request; openings for only some. Dividing every hire by a
+partial openings total produced a **499% fill rate**. So the summary keeps them
+apart: `hired` is every hire, `hiredAgainstRequested` counts only hires on requests
+whose openings are known, `reqsWithOpenings` says how many that is, and `fillPct`
+divides the matched pair. The metric strip names the scope rather than implying the
+figure covers everything.
+
+### Absent is not zero
+
+A count column that is not in the loaded export is `null`, never `0`. Every
+derived figure — `fillPct`, `shortBy`, `health` — guards on it and renders "—"
+rather than a number nobody measured. An unknown openings count must not read as a
+filled request or as 0% coverage.
+
+### Health
+
+| Health | Meaning |
+| --- | --- |
+| `filled` | every requested seat is hired |
+| `partial` | some hired, some still open |
+| `submitted` | nobody hired yet, but candidates are in flight |
+| `empty` | nobody hired and nobody submitted |
+| `unknown` | the loaded export carried no openings count |
+
+### Identity
+
+The market comes from `Bill To Profit Center Name` through the same `regionOf()`
+the roster uses, so requests and associates land in one market vocabulary and the
+header market picker filters both.
+
+Candidates are matched to roster profiles **by id only** — External ID, then
+Beeline ID. A candidate is not necessarily a placed associate, so a low match rate
+is expected. Name matching is deliberately not attempted: this export writes
+"Maria A Albarran" where the roster writes "Albarran, Maria", and any name rule
+would be guessing which of two similar people it had found. Wrong is worse than
+unlinked when the row is somebody's employment record.
+
+The candidate export's bare `Name` column is the **supervisor** the position
+reports to (confirmed with the site). It is request-level and is *not* the hiring
+manager — it differs from it on 17 of 110 requests. The reqs export's own sparse
+`Reports To` column outranks it where present; the two are parsed separately and
+resolved in `finish()`, so load order cannot change which supervisor a request
+shows.
+
+### One requisition, two sources
+
+The PLX workbook's "Beeline Reqs" tab is already synced into the same
+`requisitions` collection by `ShiftKey.parseRequisitions`, keyed `REQ-<number>`.
+Beeline names the same requisition `110642-1`. `reqKey()` reduces the Beeline
+Request-ID to that key — only when it is `<digits>-<digits>`, so an id of another
+shape is never merged with a sibling that merely shares a prefix — and both
+sources land on **one record** instead of two rows for the same job.
+
+They never fight over a field. The workbook sync owns `title`, `department`,
+`shift`, `building`, `openings`, `filled`, `due`, `reportTo`, `notes`, `source`,
+`status`. Beeline writes a namespaced set beside them — `beelineReq`,
+`beelineOpenings`, `hired`, `submitted`, `declined`, `offered`, `jobPosition`,
+`startDate`, `hiringManager`, `supervisor`, `market`, `location`, `profitCenter`.
+No field has two writers, so whichever syncs last cannot clobber the other and a
+disagreement stays visible instead of being silently overwritten.
+
+That makes reconciliation a straight comparison, read off the record:
+
+- `openingsDiffer` — the workbook and Beeline disagree on how many are wanted
+- `workbookOnly` — in the workbook, not in Beeline (added there early, or left
+  open after Beeline filled it)
+- `notInWorkbook` — Beeline has it, the workbook has not caught up
+
+Beeline is the system of record, so none of these is auto-resolved; they are
+surfaced for a person to settle.
+
+A record belongs to exactly one list: `beelineReq` set → a Beeline request;
+otherwise `source === 'PLX workbook'` → workbook-only; otherwise hand-entered.
+Nothing appears twice.
+
+`mergeForSave()` updates only the Beeline half of each record and leaves every
+other field as it was. A request that has left Beeline has its Beeline half
+cleared rather than the record dropped — the workbook or a person may still be the
+only record of it.
+
+Candidates go to `reqCandidates`, one record per (request, person), because the
+same person legitimately sits on several requests.
+
+Imports accumulate in the session before saving: the candidate file alone knows
+nothing about openings, so saving it on its own would blank the previous day's
+counts. Once the loaded files between them carry every column the board saves
+itself; until then the tab names the missing column and offers to save anyway.
+
 ## Shared collections
 
 Attendance, time off, requisitions, and performance live server-side, so every

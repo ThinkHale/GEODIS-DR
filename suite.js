@@ -68,8 +68,12 @@
     updatedAt: null,
     profiles: new Map(),
     tasks: { kind: 'all', showDone: false },
-    stores: { attendance: [], timeOff: [], requisitions: [], performance: [], shifts: [], discrepancies: [], tasks: [], contacts: [],
+    stores: { attendance: [], timeOff: [], requisitions: [], reqCandidates: [], performance: [], shifts: [], discrepancies: [], tasks: [], contacts: [],
       associatePto: [], locations: [], appConfig: [], timeclockLinks: [] },
+    reqSources: [],          // export files loaded this session, merged before saving
+    reqImport: null,         // last import result, for the report shown after
+    reqExpanded: {},         // request id -> candidate list open
+    reqHealth: 'all',
     connectFor: '', connectQuery: '', connectKind: 'timeoff',
     payroll: { periods: [], week: '', period: null, tab: 'discrepancies', loading: false },
     plx: { sync: null, busy: false, note: '' },   // the live workbook from SharePoint
@@ -238,9 +242,14 @@
     if (markets().indexOf(state.market) === -1) state.market = 'all';
   }
   function profile(badge) { return state.profiles.get(SuiteData.normBadge(badge)) || null; }
+  /* Every market the tool holds data for, not only the ones with associates on the
+     roster. A Beeline request derives its market from the work-location number, so
+     a market can have open requests and nobody placed yet -- and that is exactly
+     the market somebody wants to filter to. */
   function markets() {
     var set = new Set();
     allProfiles().forEach(function (p) { if (p.market) set.add(p.market); });
+    (state.stores.requisitions || []).forEach(function (r) { if (r.market) set.add(r.market); });
     return Array.from(set).sort();
   }
   /* ---------- market scoping ----------
@@ -2350,19 +2359,411 @@
           '</tr>';
       }).join('') + '</tbody></table></div>';
   }
+  /* ---------- requisitions ----------
+     Beeline is the system of record for a request. Two exports arrive by email
+     each morning -- the open reqs and the candidates on them -- and BOTH carry one
+     row per (req x candidate), so neither file's row count is a requisition count.
+     ReqsCore dedupes by Request-ID and hangs the candidates off their req.
+
+     The exports are accumulated rather than saved one at a time: the candidate
+     file alone knows nothing about openings, so saving it on its own would blank
+     yesterday's counts. Once the loaded files between them carry every column,
+     the board saves itself; until then the tab says which column is still missing
+     and offers to save anyway.
+
+     Hand-entered requests are left alone by an import (see mergeForSave) -- they
+     may be the only record of a position Beeline does not carry yet. */
+  function reqBoard() {
+    // The Locations admin list is what turns a work-location number into a market
+    // now that the daily export no longer carries the profit centre.
+    return ReqsCore.fromRecords(state.stores.requisitions, state.stores.reqCandidates,
+      state.stores.locations);
+  }
+
+  /* Site numbers this import can teach the Locations list.
+     Worth surfacing loudly: the export that states the profit centre is the only
+     thing that knows which market a site belongs to, and it is going away. Once it
+     does, an unseeded site number is a req with no market for good. */
+  function reqSiteLessons() {
+    var srcs = state.reqSources || [];
+    if (!srcs.length) return [];
+    // Deliberately WITHOUT locations: learning has to read the profit centre, not
+    // a market this list already supplied, or it would only teach itself.
+    var learned = ReqsCore.learnSiteMarkets(ReqsCore.buildBoard({ sources: srcs }).reqs);
+    var known = ReqsCore.siteMarketIndex(state.stores.locations);
+    return learned.filter(function (l) { return known.get(l.code) !== l.market; });
+  }
+
+  function saveSiteLessons() {
+    var lessons = reqSiteLessons();
+    if (!lessons.length) return;
+    var byCode = new Map();
+    (state.stores.locations || []).forEach(function (l) { byCode.set(String(l.code), Object.assign({}, l)); });
+    lessons.forEach(function (l) {
+      var cur = byCode.get(l.code);
+      // Only the market is written. A name somebody typed for this site is theirs.
+      if (cur) { cur.market = l.market; return; }
+      byCode.set(l.code, { id: 'LOC-' + l.code, code: l.code, name: '', market: l.market, active: true });
+    });
+    var records = [];
+    byCode.forEach(function (v) { if (!v.id) v.id = 'LOC-' + v.code; records.push(v); });
+    state.reqImport = { headline: 'Saving ' + lessons.length + ' site → market pairs…', warnings: [] };
+    render();
+    SuiteData.replaceCollection('locations', records).then(function () {
+      state.stores.locations = records;
+      state.admin.locations = records;
+      state.reqImport = {
+        headline: lessons.length + ' site number(s) added to Locations. Requests can now find their market ' +
+          'from the work location, with no profit-centre column.',
+        warnings: []
+      };
+      render();
+    }).catch(function (err) {
+      state.reqImport = { failed: true, headline: 'Could not save the locations: ' + err.message, warnings: [] };
+      render();
+    });
+  }
+  function reqBoardInMarket(board) {
+    if (state.market === 'all') return board.reqs;
+    return board.reqs.filter(function (r) { return !r.market || r.market === state.market; });
+  }
+  // Requisitions that reached the suite from only one side. The workbook is
+  // client-owned and hand-edited, so a row it has and Beeline does not is usually
+  // a req added there early -- or one left open after Beeline filled it.
+  function otherReqs(board, kind) {
+    var rows = kind === 'workbook' ? board.workbookOnly : board.manual;
+    if (state.market === 'all') return rows;
+    return (rows || []).filter(function (r) { return !r.market || r.market === state.market; });
+  }
+
+  function reqImportPanel() {
+    var srcs = state.reqSources || [];
+    var missing = srcs.length ? ReqsCore.missingColumns(srcs) : [];
+    return '<section class="suite-panel req-import"><div class="suite-panel-head">' +
+      '<h2>Daily Beeline export</h2><div class="suite-actions">' +
+      (srcs.length ? '<button class="suite-btn" data-req-clear="1">Start over</button> ' : '') +
+      (srcs.length && missing.length ? '<button class="suite-btn" data-req-save="1">Save anyway</button> ' : '') +
+      '<label class="suite-btn cov-pick' + (srcs.length ? '' : ' primary') + '">Add export file' +
+      '<input type="file" accept=".csv,.xlsx,.xls" data-req-file></label></div></div>' +
+      '<p class="perf-note">Drop the <b>GEODIS Open Reqs</b> and <b>Candidate Status per Req</b> exports — in either ' +
+      'order, or one combined file if the columns are all on it. Both files list one row per candidate, so the ' +
+      'request list is shorter than the row count.</p>' +
+      (srcs.length ? '<ul class="req-src">' + srcs.map(function (s) {
+        return '<li><b>' + esc(s.fileName) + '</b> · ' + s.rowCount + ' rows · ' + s.reqs.length + ' requests' +
+          (s.candidates.length ? ' · ' + s.candidates.length + ' candidates' : '') +
+          ' <span class="cov-flag">' + esc(ReqsCore.describe(s)) + '</span></li>';
+      }).join('') + '</ul>' : '') +
+      (function () {
+        var lessons = reqSiteLessons();
+        if (!lessons.length) return '';
+        return '<div class="import-report"><strong>' + lessons.length +
+          ' work-location number(s) in this import state which market they belong to.</strong>' +
+          '<p>The profit-centre column is the only thing that knows this, and it is not in the daily ' +
+          'candidate export. Saving these to Locations lets every future import find a market from the ' +
+          'work-location number alone.</p><p class="req-lessons">' +
+          lessons.slice(0, 40).map(function (l) {
+            return '<span><b>' + esc(l.code) + '</b> ' + esc(l.market) + '</span>';
+          }).join('') + (lessons.length > 40 ? '<span>…and ' + (lessons.length - 40) + ' more</span>' : '') +
+          '</p><button class="suite-btn primary" data-req-sites="1">Add ' + lessons.length +
+          ' site(s) to Locations</button></div>';
+      })() +
+      (missing.length ? '<div class="import-report bad"><strong>Still missing ' + missing.length +
+        ' column(s) — add the other export, or save without them:</strong><ul>' +
+        missing.map(function (m) { return '<li><b>' + esc(m.label) + '</b> — ' + esc(m.why) + '</li>'; }).join('') +
+        '</ul></div>' : '') +
+      (state.reqImport ? shiftImportReport(state.reqImport) : '') + '</section>';
+  }
+
+  function reqMetrics(s) {
+    return '<div class="metric-strip">' +
+      metric('Open requests', s.reqs, s.noCandidates + ' with nobody submitted') +
+      metric('Positions', s.requested == null ? '—' : s.requested,
+        s.requested == null ? 'No openings count in any loaded source'
+          : s.reqsWithOpenings < s.reqs
+            ? 'Across the ' + s.reqsWithOpenings + ' of ' + s.reqs + ' requests whose openings are known'
+            : 'Seats requested across all requests') +
+      metric('Hired', s.hired == null ? '—' : s.hired,
+        s.fillPct == null ? 'No openings count to measure against'
+          : s.reqsWithOpenings < s.reqs
+            ? s.hiredAgainstRequested + ' of those against a known opening — ' + s.fillPct + '% of ' + s.requested + ' seats'
+            : s.fillPct + '% of requested',
+        s.fillPct == null ? '' : s.fillPct >= 90 ? 'green' : 'orange') +
+      metric('Short by', s.shortBy == null ? '—' : s.shortBy, 'Seats still to fill',
+        s.shortBy ? 'orange' : 'green') +
+      '</div>' +
+      (s.stages && (s.stages.offered || s.stages.review || s.stages.declined)
+        ? '<div class="req-stages">' +
+          [['hired', 'Offer confirmed'], ['offered', 'Offer pending'], ['review', 'Pending'],
+           ['declined', 'Rejected'], ['other', 'Other']]
+            .filter(function (x) { return s.stages[x[0]]; })
+            .map(function (x) {
+              return '<span><b>' + s.stages[x[0]] + '</b> ' + esc(x[1]) + '</span>';
+            }).join('') + '</div>'
+        : '');
+  }
+
+  var REQ_HEALTH = [
+    ['all', 'All requests'], ['short', 'Not yet filled'], ['empty', 'Nobody submitted'],
+    ['submitted', 'Candidates in flight'], ['partial', 'Partly filled'], ['filled', 'Filled']
+  ];
+  function reqFilters(rows) {
+    return '<div class="filter-row">' +
+      '<input class="suite-input" id="suite-search" value="' + esc(state.query) +
+      '" placeholder="Search by request, job, manager, location, or candidate…">' +
+      '<select class="suite-select" id="req-health">' + REQ_HEALTH.map(function (o) {
+        return '<option value="' + o[0] + '" ' + (state.reqHealth === o[0] ? 'selected' : '') + '>' + esc(o[1]) + '</option>';
+      }).join('') + '</select></div>';
+  }
+  function reqMatches(r, q) {
+    if (!q) return true;
+    if ((r.id + ' ' + r.jobPosition + ' ' + r.hiringManager + ' ' + r.reportsTo + ' ' +
+      r.location + ' ' + r.market).toLowerCase().indexOf(q) !== -1) return true;
+    // Searching a candidate's name should find the request they are sitting on.
+    return r.candidates.some(function (c) {
+      return (c.name + ' ' + c.beelineId + ' ' + c.externalId).toLowerCase().indexOf(q) !== -1;
+    });
+  }
+  function reqFilter(rows) {
+    var q = state.query.trim().toLowerCase(), h = state.reqHealth;
+    return rows.filter(function (r) {
+      if (h === 'short') { if (r.shortBy === 0) return false; }
+      else if (h !== 'all' && r.health !== h) return false;
+      return reqMatches(r, q);
+    });
+  }
+
+  function reqHealthChip(r) {
+    var label = { filled: 'Filled', partial: 'Partly filled', submitted: 'In flight',
+      empty: 'Nobody submitted', unknown: 'Not reported' }[r.health];
+    var cls = { filled: 'ok', partial: 'warn', submitted: 'warn', empty: 'bad', unknown: '' }[r.health];
+    return '<span class="cov-status ' + cls + '">' + esc(label) + '</span>';
+  }
+
+  /* The candidate list a request expands into. Where the export carries Internal
+     Status, each person's own stage is shown. Where it does not, the column says
+     so rather than leaving a blank that reads as "no decision yet" -- the request
+     counts are then the only thing that knows who progressed. */
+  function reqCandidateRows(r) {
+    if (!r.candidateCount) {
+      return '<tr class="req-detail"><td colspan="7"><div class="req-none">Nobody has been submitted to this request yet.</div></td></tr>';
+    }
+    var breakdown = Object.keys(r.statusCounts || {}).map(function (k) {
+      return r.statusCounts[k] + ' ' + k.toLowerCase();
+    }).join(' · ');
+    var head = r.candidateCount + ' submitted' + (breakdown ? ' · ' + breakdown : '') +
+      (r.hasCandidateStatus ? '' :
+        ' <span class="req-note">This export does not say which candidate reached which stage.</span>');
+    return '<tr class="req-detail"><td colspan="7"><div class="req-cands">' +
+      '<div class="req-cands-head">' + head + '</div>' +
+      '<table class="suite-table"><thead><tr><th>Candidate</th><th>Status</th><th>Beeline ID</th>' +
+      '<th>External ID</th><th>On roster</th></tr></thead><tbody>' +
+      r.candidates.map(function (c) {
+        return '<tr><td><div class="' + (c.badge ? 'name link' : 'name') + '"' +
+          (c.badge ? ' data-profile="' + esc(c.badge) + '"' : '') + '>' + esc(c.name) + '</div></td>' +
+          '<td>' + (c.statusLabel
+            ? '<span class="cov-status ' + esc(c.tone || '') + '">' + esc(c.statusLabel) + '</span>'
+            : '<span class="score none">Not reported</span>') + '</td>' +
+          '<td class="mono">' + esc(c.beelineId || '—') + '</td>' +
+          '<td class="mono">' + esc(c.externalId || '—') + '</td>' +
+          '<td>' + (c.badge ? '<span class="cov-dot on">' + esc(c.rosterName || 'Yes') + '</span>'
+            : '<span class="cov-dot off">Not matched</span>') + '</td></tr>';
+      }).join('') + '</tbody></table></div></td></tr>';
+  }
+
+  function beelineReqTable(rows) {
+    return '<div class="suite-table-wrap"><table class="suite-table req-table"><thead><tr>' +
+      '<th></th><th>Request</th><th>Market / site</th><th>Positions</th><th>Submitted</th>' +
+      '<th>Filled</th><th>Hiring manager</th></tr></thead><tbody>' +
+      rows.slice(0, MAX_ROWS).map(function (r) {
+        var open = !!state.reqExpanded[r.id];
+        return '<tr class="req-row ' + (open ? 'open' : '') + '" data-req-expand="' + esc(r.id) + '">' +
+          '<td class="req-caret"><span>' + (open ? '▾' : '▸') + '</span></td>' +
+          '<td><div class="name">' + esc(r.jobPosition || 'Beeline request') + '</div>' +
+          '<div class="sub">' + esc(r.id) + (r.startDate ? ' · starts ' + esc(r.startDate) : '') + '</div></td>' +
+          '<td><div class="name">' + esc(r.market || '—') +
+          (r.marketFrom === 'site' ? '<span class="cov-flag" title="Derived from the work-location number, not read off a profit centre.">from site</span>' : '') +
+          '</div><div class="sub">' + esc(reqSite(r)) + '</div></td>' +
+          '<td>' + (r.requested == null ? '<span class="score none">—</span>' : r.requested) +
+          (r.requestedFrom === 'workbook' ? '<div class="sub">from the workbook</div>' : '') +
+          (r.openingsDiffer ? '<div class="sub warn-text">workbook says ' + r.workbookOpenings + '</div>' : '') +
+          '</td>' +
+          '<td>' + r.candidateCount + '</td>' +
+          '<td>' + (r.fillPct == null
+            ? '<span class="score none">—</span>'
+            : '<span class="score ' + (r.fillPct < 70 ? 'bad' : r.fillPct < 90 ? 'warn' : '') + '">' +
+              r.hired + ' / ' + r.requested + '</span>') +
+          ' ' + reqHealthChip(r) + '</td>' +
+          '<td><div class="name">' + esc(r.hiringManager || '—') + '</div>' +
+          (r.reportsTo ? '<div class="sub">reports to ' + esc(r.reportsTo) + '</div>' : '') + '</td></tr>' +
+          (open ? reqCandidateRows(r) : '');
+      }).join('') + '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length);
+  }
+  function reqSite(r) {
+    var loc = ReqsCore.parseLocation(r.location);
+    if (!loc.city && !loc.site) return '—';
+    return (loc.site ? loc.site + ' · ' : '') + loc.city + (loc.state ? ', ' + loc.state : '');
+  }
+
   function requisitions() {
     if (!state.storesLoaded) return loadingPanel('requisitions');
-    var q = state.query.trim().toLowerCase();
-    var rows = requisitionsInMarket().filter(function (r) {
-      if (!q) return true;
-      return (r.id + ' ' + r.title + ' ' + r.department + ' ' + r.shift + ' ' + r.priority + ' ' + r.status).toLowerCase().indexOf(q) !== -1;
-    });
-    return hero('Beeline Requests', 'Hiring demand from opening through fulfillment.', 'requisition', 'New request') +
-      '<section class="suite-panel">' +
-      '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
-      '" placeholder="Search requisitions…"></div>' +
-      (rows.length ? reqTable(rows, false) : empty('No Beeline requests yet')) + '</section>';
+    var board = reqBoard();
+    ReqsCore.linkRoster(board.reqs, state.profiles, SuiteData.normBadge);
+    var inMarket = reqBoardInMarket(board);
+    var rows = reqFilter(inMarket);
+    var manual = otherReqs(board, 'manual');
+    var wbOnly = otherReqs(board, 'workbook');
+
+    var body = board.reqs.length
+      ? reqMetrics(summarizeVisible(inMarket)) +
+        (board.warnings.length ? warnList(board.warnings) : '') +
+        reqReconNote(board) +
+        '<section class="suite-panel">' + reqFilters(rows) +
+        (rows.length ? beelineReqTable(rows)
+          : empty('No requests match those filters', 'Widen the search or the status filter.')) +
+        '</section>'
+      : '<section class="suite-panel"><div class="workflow-empty">' +
+        'No Beeline requests loaded yet. Add the daily export above to see open requests and who is on them.' +
+        '</div></section>';
+
+    return hero('Beeline Requests', 'Open requests and the candidates attached to them.', 'requisition', 'New request') +
+      reqImportPanel() + body +
+      (wbOnly.length
+        ? '<section class="suite-panel"><div class="suite-panel-head"><h2>In the PLX workbook, not in Beeline</h2></div>' +
+          '<p class="perf-note">The workbook is edited by the client, so a request can appear there before Beeline has it — ' +
+          'or stay open after Beeline filled it. Beeline is the system of record; these are left for a person to settle.</p>' +
+          reqTable(wbOnly, false) + '</section>'
+        : '') +
+      (manual.length
+        ? '<section class="suite-panel"><div class="suite-panel-head"><h2>Added by hand</h2></div>' +
+          '<p class="perf-note">Requests typed into the suite rather than imported from Beeline or the workbook. ' +
+          'An import leaves these alone.</p>' +
+          reqTable(manual, false) + '</section>'
+        : '');
   }
+
+  /* What the two sources disagree about. Shown above the table rather than buried
+     on the rows it affects, because "the workbook has not caught up" is a thing to
+     go and fix, not a per-row footnote. */
+  function reqReconNote(board) {
+    var s = board.summary, bits = [];
+    var unknown = {};
+    board.reqs.forEach(function (r) { if (r.marketUnknownSite) unknown[r.marketUnknownSite] = true; });
+    var sites = Object.keys(unknown);
+    if (sites.length) {
+      bits.push('<b>' + sites.length + '</b> work-location number(s) are not in the Locations list, so those ' +
+        'requests have no market: ' + sites.slice(0, 12).map(esc).join(', ') +
+        (sites.length > 12 ? '…' : '') + '. Add them under Settings → Locations.');
+    }
+    if (s.reqsWithOpenings < s.reqs) {
+      bits.push('<b>' + (s.reqs - s.reqsWithOpenings) + '</b> request(s) have no openings count from any source, ' +
+        'so they show no fill figure. The PLX workbook supplies it where it lists the request.');
+    }
+    if (s.openingsDiffer) {
+      bits.push('<b>' + s.openingsDiffer + '</b> request(s) where the workbook and Beeline disagree on how many are wanted.');
+    }
+    if (board.workbookOnly && board.workbookOnly.length) {
+      bits.push('<b>' + board.workbookOnly.length + '</b> request(s) in the PLX workbook that Beeline does not have.');
+    }
+    if (!bits.length) return '';
+    return '<div class="warn-banner"><strong>PLX workbook vs. Beeline</strong><ul>' +
+      bits.map(function (b) { return '<li>' + b + '</li>'; }).join('') + '</ul></div>';
+  }
+
+  // The metric strip reflects what the market filter is showing, not the whole file.
+  // The metric strip reflects what the market filter is showing, so it re-totals
+  // the visible rows through the same rules the core summary uses.
+  function summarizeVisible(reqs) {
+    var s = { reqs: reqs.length, candidates: 0, requested: null, hired: null,
+      hiredAgainstRequested: null, reqsWithOpenings: 0, shortBy: null,
+      noCandidates: 0, stages: { hired: 0, offered: 0, review: 0, declined: 0, other: 0 } };
+    reqs.forEach(function (r) {
+      s.candidates += r.candidateCount;
+      if (r.stages) ReqsCore.STAGE_ORDER.forEach(function (k) { s.stages[k] += r.stages[k] || 0; });
+      if (!r.candidateCount) s.noCandidates++;
+      if (r.requested != null) {
+        s.requested = (s.requested || 0) + r.requested;
+        s.reqsWithOpenings++;
+        if (r.hired != null) s.hiredAgainstRequested = (s.hiredAgainstRequested || 0) + r.hired;
+      }
+      if (r.hired != null) s.hired = (s.hired || 0) + r.hired;
+      if (r.shortBy != null) s.shortBy = (s.shortBy || 0) + r.shortBy;
+    });
+    s.fillPct = s.requested == null || s.hiredAgainstRequested == null || s.requested <= 0
+      ? null : Math.round(s.hiredAgainstRequested / s.requested * 100);
+    return s;
+  }
+  function warnList(ws) {
+    return '<div class="warn-banner"><strong>Check these before acting on the numbers</strong><ul>' +
+      ws.slice(0, 8).map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') +
+      (ws.length > 8 ? '<li>…and ' + (ws.length - 8) + ' more.</li>' : '') + '</ul></div>';
+  }
+
+  function readReqExport(file) {
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      try {
+        // raw:true keeps 04/27/2026 as written; a spreadsheet reader would
+        // reformat it to 4/27/26. ReqsCore.isoDate accepts either, but there is no
+        // reason to hand it the lossier one.
+        var wb = XLSX.read(e.target.result, { type: 'array', raw: true });
+        var ws = wb.Sheets[wb.SheetNames[0]];
+        var aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+        var parsed = ReqsCore.parseExport(aoa, file.name);
+        if (parsed.warnings.length && !parsed.reqs.length) throw new Error(parsed.warnings[0]);
+        if (!parsed.reqs.length) throw new Error('No requests were found in this file.');
+        state.reqSources = (state.reqSources || [])
+          .filter(function (s) { return s.fileName !== file.name; })
+          .concat([parsed]);
+        state.reqImport = null;
+        // Everything the board needs is loaded: save without a second click.
+        if (!ReqsCore.missingColumns(state.reqSources).length) saveReqImport();
+        else render();
+      } catch (err) {
+        console.error(err);
+        state.reqImport = { failed: true, headline: 'Could not read "' + file.name + '": ' + err.message, warnings: [] };
+        render();
+      }
+    };
+    reader.onerror = function () { alert('Failed to read "' + file.name + '".'); };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function saveReqImport() {
+    var srcs = state.reqSources || [];
+    if (!srcs.length) return;
+    // With the Locations list, so a request whose export carried no profit centre
+    // still gets its market from the work-location number BEFORE it is stored --
+    // otherwise the market would be derived for display and blank on the record,
+    // and the header market picker would never learn it exists.
+    var board = ReqsCore.buildBoard({ sources: srcs, locations: state.stores.locations });
+    var reqRecords = ReqsCore.toReqRecords(board);
+    var candRecords = ReqsCore.toCandidateRecords(board);
+    var merged = ReqsCore.mergeForSave(state.stores.requisitions, reqRecords);
+    state.reqImport = { headline: 'Saving ' + reqRecords.length + ' requests…', warnings: [] };
+    render();
+
+    Promise.all([
+      SuiteData.replaceCollection('requisitions', merged),
+      SuiteData.replaceCollection('reqCandidates', candRecords)
+    ]).then(function () {
+      state.stores.requisitions = merged;
+      state.stores.reqCandidates = candRecords;
+      rebuild();
+      var missing = ReqsCore.missingColumns(srcs);
+      state.reqImport = {
+        headline: reqRecords.length + ' requests and ' + candRecords.length + ' candidates imported from ' +
+          srcs.length + ' file' + (srcs.length === 1 ? '' : 's'),
+        warnings: board.warnings.concat(missing.map(function (m) {
+          return 'Saved without "' + m.label + '" — ' + m.why + '.';
+        }))
+      };
+      render();
+    }).catch(function (err) {
+      state.reqImport = { failed: true, headline: 'Could not save the requests: ' + err.message, warnings: [] };
+      render();
+    });
+  }
+
 
   /* ---------- reconciliation ----------
      The existing tool is not reimplemented here. Its DOM (#recon-main, with all
@@ -2822,6 +3223,19 @@
       }, 'attendance');
       return;
     }
+    var reqEx = e.target.closest('[data-req-expand]');
+    if (reqEx && !e.target.closest('[data-profile]')) {
+      var rid = reqEx.dataset.reqExpand;
+      if (state.reqExpanded[rid]) delete state.reqExpanded[rid]; else state.reqExpanded[rid] = true;
+      render();
+      return;
+    }
+    if (e.target.closest('[data-req-save]')) { saveReqImport(); return; }
+    if (e.target.closest('[data-req-sites]')) { saveSiteLessons(); return; }
+    if (e.target.closest('[data-req-clear]')) {
+      state.reqSources = []; state.reqImport = null; render(); return;
+    }
+
     var fill = e.target.closest('[data-fill]');
     if (fill) {
       var r = state.stores.requisitions.find(function (x) { return x.id === fill.dataset.fill; });
@@ -2997,6 +3411,10 @@
     }
     var book = e.target.closest('[data-shift-book]');
     if (book && book.files && book.files[0]) { readShiftWorkbook(book.files[0]); return; }
+
+    var reqFile = e.target.closest('[data-req-file]');
+    if (reqFile && reqFile.files && reqFile.files[0]) { readReqExport(reqFile.files[0]); return; }
+    if (e.target.id === 'req-health') { state.reqHealth = e.target.value; render(); return; }
     if (e.target.id === 'task-kind') { state.tasks.kind = e.target.value; render(); }
     if (e.target.id === 'task-done') { state.tasks.showDone = e.target.checked; render(); }
     if (e.target.id === 'cov-status') { state.coverage.statusFilter = e.target.value; render(); }

@@ -737,6 +737,71 @@ similar names apart before clicking. A workbook row with no timeclock id at all
 cannot be connected this way and is reported separately — that one is fixed in the
 workbook.
 
+## The shared IL PTO tracker
+
+One workbook, shared with another branch. GEODIS PTO sits on three tabs that do
+not share a shape, and the tab a row is on is what says where the request stands:
+
+| Tab | Meaning | Status |
+| --- | --- | --- |
+| `30080` | St. Louis | `Submitted to Payroll` |
+| `GEODIS - 20062` | Chicago, with payroll | `Submitted to Payroll` |
+| `20062 Geodis Processed` | Chicago, processed | `Completed` |
+
+Both working tabs carry a banner about the payroll deadline, so a row on one has
+been approved *and* handed over. `Completed` comes from the processed tab and
+nowhere else — except that `Processed = Yes` completes a row wherever it is
+written, and an explicit denial or cancellation outranks the tab.
+
+`30080` keeps every client on one sheet. Of its 26 rows, 24 are Crescent Park,
+Fed Ex and Kraft; those are counted and named in the import report, never
+imported. A row vanishing without explanation is how an importer loses trust.
+
+Tabs are matched loosely, because a shared workbook gets renamed — and the
+processed test runs first, since "20062 Geodis Processed" matches the pending
+pattern too. Columns are found by header text and the header row by looking for
+"Associate Name", never by position: two of the three tabs carry a banner above
+the header and the third does not.
+
+### Typed by hand, and it shows
+
+`8/24/26`, `13-Jul` with no year anywhere in the cell, `N/A`, and two dates
+crammed into one as `6/15/2026 & 6/16/2026` for a single 16-hour request. Each is
+read for what it plainly says. A missing year comes from the submission date on
+the same row — the only other date the row states — and a date that cannot be read
+is reported and falls back to the week ending rather than invented.
+
+### Identity
+
+The tracker's `EID` is the **RC Legacy Contact ID**, matched against a profile's
+`empNumber`. It is *not* the WFM timeclock id that the PLX workbook also calls
+"EID" — see [Connecting the workbook roster to profiles](#connecting-the-workbook-roster-to-profiles).
+Against the live roster that reaches 45 of 56 requests; the rest are past
+assignments off the active roster, imported with no badge so the existing
+unmatched-request flow can connect them. Dropping an approved day off is worse
+than showing one that needs connecting.
+
+### Nothing is deleted
+
+The record id is the EID plus the days it covers, deliberately **not** the hours: a
+request that moves from a working tab to the processed one, or has its hours
+corrected, is the same request and must update rather than leave a stale twin. All
+56 GEODIS rows produce 56 distinct ids and none appears on two tabs.
+
+A request that disappears from the sheet is not evidence it did not happen — it is
+a shared spreadsheet somebody edited. So:
+
+- its record **stays exactly as it was**, and
+- if payroll still had it, a `pto` task is raised asking whether it was paid,
+  cancelled, or removed by mistake.
+
+A request that had already completed goes quietly: the processed tab is trimmed as
+it grows, and that is housekeeping, not a decision. The task id is derived from the
+request, so re-importing updates one task rather than asking again every morning.
+
+An import touches only its own rows. The other PTO workbook, the Forms intake and
+anything entered by hand are not this tracker's to change.
+
 ## Shared collections
 
 Attendance, time off, requisitions, and performance live server-side, so every

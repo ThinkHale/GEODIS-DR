@@ -1899,20 +1899,37 @@
           badgeForEid: badgeForEid(), source: PTO_TRACKER_SOURCE, pipeline: TimeOffCore
         });
         var merged = PtoTrackerCore.mergeForSave(state.stores.timeOff, built.records, PTO_TRACKER_SOURCE);
+        /* A request that left the sheet without reaching the processed tab is a
+           question, not a deletion: its record stays and somebody is asked. */
+        var newTasks = PtoTrackerCore.vanishedTasks(merged.vanished, {
+          tasks: TasksCore, existing: state.stores.tasks,
+          source: PTO_TRACKER_SOURCE, actor: currentActor(false)
+        });
 
         state.ptoImport = { headline: 'Saving ' + built.records.length + ' PTO requests…', warnings: [] };
         render();
 
-        SuiteData.replaceCollection('timeoff', merged).then(function () {
-          state.stores.timeOff = merged;
+        SuiteData.replaceCollection('timeoff', merged.records).then(function () {
+          if (!newTasks.length) return null;
+          return SuiteData.replaceCollection('tasks', (state.stores.tasks || []).concat(newTasks));
+        }).then(function () {
+          state.stores.timeOff = merged.records;
+          if (newTasks.length) state.stores.tasks = (state.stores.tasks || []).concat(newTasks);
           rebuild();
           var others = Object.keys(parsed.otherClients).map(function (c) {
             return parsed.otherClients[c] + ' ' + c;
           }).join(', ');
           state.ptoImport = {
             headline: built.records.length + ' GEODIS PTO requests imported from ' + parsed.sheets.length +
-              ' tab(s) · ' + (built.records.length - built.unmatched.length) + ' reached an associate',
+              ' tab(s) · ' + (built.records.length - built.unmatched.length) + ' reached an associate' +
+              (newTasks.length ? ' · ' + newTasks.length + ' left the sheet unprocessed and became a task' : ''),
             warnings: parsed.warnings.concat(
+              merged.vanished.length
+                ? [merged.vanished.length + ' request(s) are no longer on any tab but never reached the ' +
+                   'processed one. Their records are kept as they were' +
+                   (newTasks.length ? ' and ' + newTasks.length + ' task(s) were raised to settle them' :
+                    ' and a task was already open for them') + '.']
+                : [],
               built.unmatched.length
                 ? [built.unmatched.length + ' request(s) name somebody who is not on the current roster — ' +
                    'usually a past assignment. They are listed below to connect by hand.']

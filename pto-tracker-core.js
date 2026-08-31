@@ -30,10 +30,14 @@
   var TABS = [
     { kind: 'processed', test: /geodis/i, andTest: /process/i, branch: '20062',
       status: 'Completed', label: 'Chicago — processed' },
+    /* A row on a working tab has been approved and handed to payroll -- that is
+       what the tabs are for, and both carry a banner telling people to have it in
+       before the payroll deadline. It becomes Completed when it appears on the
+       processed tab, and not before. */
     { kind: 'pending', test: /geodis/i, branch: '20062',
-      status: 'Approved', label: 'Chicago — approved, not yet processed' },
+      status: 'Submitted to Payroll', label: 'Chicago — with payroll, not yet processed' },
     { kind: 'branch', test: /^\s*30080\s*$/, branch: '30080',
-      status: 'Approved', label: 'St. Louis' }
+      status: 'Submitted to Payroll', label: 'St. Louis — with payroll' }
   ];
   function tabFor(name) {
     var n = String(name || '');
@@ -310,14 +314,66 @@
     return { records: out, unmatched: unmatched };
   }
 
-  /* An import replaces what this tracker last said and leaves every other time-off
-     record alone -- the Forms intake and anything entered by hand are not this
-     workbook's to remove. A request deleted from the sheet disappears from here
-     too, which is the point: the sheet is the record of what was approved. */
+  /* An import updates what this tracker says and leaves every other time-off record
+     alone -- the Forms intake and anything entered by hand are not this workbook's
+     to touch.
+
+     It also deletes nothing. A request that disappears from the sheet without
+     reaching the processed tab is not evidence it did not happen; it is a shared
+     spreadsheet somebody edited. Silently dropping it would erase an approved day
+     off, and quietly keeping it would let a cancellation sit as though it were
+     still with payroll. So the record stays exactly as it was and the
+     disappearance is reported, for a task somebody answers.
+
+     A request that had already completed is left alone when it goes: the processed
+     tab is trimmed as it grows, and that is housekeeping, not a decision. */
   function mergeForSave(existing, imported, source) {
     source = source || 'IL Shared PTO Tracker';
-    var kept = (existing || []).filter(function (r) { return r.source !== source; });
-    return kept.concat(imported || []);
+    var incoming = imported || [];
+    var byId = {};
+    incoming.forEach(function (r) { byId[String(r.id)] = r; });
+
+    var out = [], vanished = [];
+    (existing || []).forEach(function (r) {
+      if (r.source !== source) { out.push(r); return; }      // somebody else's record
+      if (byId[String(r.id)]) return;                        // still on the sheet; replaced below
+      out.push(r);                                           // gone from the sheet, kept regardless
+      if (String(r.status || '') !== 'Completed') vanished.push(r);
+    });
+    return { records: out.concat(incoming), vanished: vanished };
+  }
+
+  /* A task for each request that left the sheet with payroll still holding it.
+     The id is derived from the request, so re-importing updates one task rather
+     than growing a pile of identical ones, and answering it closes the question
+     rather than the row reappearing tomorrow. */
+  function vanishedTasks(vanished, opts) {
+    opts = opts || {};
+    var tasks = opts.tasks;
+    if (!tasks || !tasks.create) return [];
+    var existing = opts.existing || [];
+    var actor = opts.actor || { name: opts.source || 'IL Shared PTO Tracker', id: '', source: 'import' };
+    var now = opts.now instanceof Date ? opts.now : new Date();
+    return (vanished || []).map(function (r) {
+      var id = tasks.idFor ? tasks.idFor('ptoTracker', r.id) : 'TK:ptoTracker:' + r.id;
+      var already = (existing || []).filter(function (t) { return t && t.id === id; })[0];
+      if (already) return null;    // already asked; asking again every morning is noise
+      var when = r.start === r.end ? r.start : r.start + ' to ' + r.end;
+      return tasks.create({
+        id: id,
+        kind: 'pto',
+        title: 'PTO left the tracker before it was processed',
+        detail: (r.name || 'This associate') + ' — ' + (r.hours || 0) + 'h on ' + when +
+          ' was on the tracker and is no longer on any tab, and it never reached the processed tab. ' +
+          'Confirm whether it was paid, cancelled, or removed by mistake.',
+        badge: r.badge || '',
+        name: r.name || '',
+        location: r.location || '',
+        source: opts.source || 'IL Shared PTO Tracker',
+        sourceKind: 'ptoTracker',
+        sourceId: r.id
+      }, actor, now);
+    }).filter(Boolean);
   }
 
   root.PtoTrackerCore = {
@@ -331,7 +387,8 @@
     parseTracker: parseTracker,
     requestId: requestId,
     toTimeOffRecords: toTimeOffRecords,
-    mergeForSave: mergeForSave
+    mergeForSave: mergeForSave,
+    vanishedTasks: vanishedTasks
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.PtoTrackerCore;
 })(typeof window !== 'undefined' ? window : this);

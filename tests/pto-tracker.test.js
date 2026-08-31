@@ -51,8 +51,13 @@ console.log('— where a request stands —');
 const pending = P.TABS.filter(x => x.kind === 'pending')[0];
 const processed = P.TABS.filter(x => x.kind === 'processed')[0];
 const branch = P.TABS.filter(x => x.kind === 'branch')[0];
-t('the pending tab means approved, not yet processed', P.statusFor(pending, 'approved', '') === 'Approved');
-t('the branch tab means approved', P.statusFor(branch, 'Approved', '') === 'Approved');
+// A row on a working tab has been approved AND handed to payroll -- both tabs
+// carry a banner about the payroll deadline. Completed comes later, and only from
+// the processed tab.
+t('the pending tab means it is with payroll', P.statusFor(pending, 'approved', '') === 'Submitted to Payroll');
+t('the branch tab means the same', P.statusFor(branch, 'Approved', '') === 'Submitted to Payroll');
+t('and neither is Completed until it is processed',
+  P.statusFor(pending, 'approved', '') !== 'Completed' && P.statusFor(branch, 'Approved', '') !== 'Completed');
 t('the processed tab means completed', P.statusFor(processed, 'Approved', 'Yes') === 'Completed');
 // The processed tab has rows with a blank Status but Processed = Yes.
 t('processed with no decision recorded is still completed', P.statusFor(processed, '', 'Yes') === 'Completed');
@@ -61,7 +66,7 @@ t('"Already Paid; Bill only" is completed', P.statusFor(processed, 'Already Paid
 t('Processed = Yes completes a row on any tab', P.statusFor(pending, 'approved', 'Yes') === 'Completed');
 t('a denial is honoured over the tab', P.statusFor(processed, 'Denied', 'Yes') === 'Denied');
 t('so is a cancellation', P.statusFor(pending, 'Cancelled', '') === 'Cancelled');
-t('case and spacing do not change the answer', P.statusFor(pending, '  APPROVED ', '') === 'Approved');
+t('case and spacing do not change the answer', P.statusFor(pending, '  APPROVED ', '') === 'Submitted to Payroll');
 
 /* ---------- the workbook ----------
    Shaped like the real one: a banner above the header on two tabs and not the
@@ -107,7 +112,7 @@ t('a row keeps the branch it was written on', (() => {
 })());
 t('and the status its tab implies', (() => {
   const s = {}; r.requests.forEach(x => { s[x.name] = x.status; });
-  return s['Geo Person'] === 'Approved' && s['Chi Person'] === 'Approved' &&
+  return s['Geo Person'] === 'Submitted to Payroll' && s['Chi Person'] === 'Submitted to Payroll' &&
     s['Done Person'] === 'Completed' && s['Two Day Person'] === 'Completed';
 })());
 
@@ -190,13 +195,57 @@ const existing = [
   { id: 'HAND-1' },
   { id: 'PTOIL-OLD', source: 'IL Shared PTO Tracker' }
 ];
-const merged = P.mergeForSave(existing, [{ id: 'PTOIL-NEW', source: 'IL Shared PTO Tracker' }]);
+const merged = P.mergeForSave(existing, [{ id: 'PTOIL-NEW', source: 'IL Shared PTO Tracker' }]).records;
 t('the other PTO workbook is untouched', merged.some(x => x.id === 'PTO-XLS-1'));
 t('so is the Forms intake', merged.some(x => x.id === 'FORM-1'));
 t('so is anything entered by hand', merged.some(x => x.id === 'HAND-1'));
-// The sheet is the record of what was approved: a row deleted there goes here too.
-t('a row since deleted from the tracker is removed', !merged.some(x => x.id === 'PTOIL-OLD'));
 t('and the new row is in', merged.some(x => x.id === 'PTOIL-NEW'));
+
+console.log('— a request that leaves the sheet —');
+/* A shared spreadsheet somebody edits is not evidence a day off did not happen.
+   Nothing is deleted: the record stays as it was, and an in-flight one becomes a
+   question for somebody to answer. */
+const Tasks = require('../tasks-core.js');
+const before = [
+  { id: 'PTOIL-A', source: 'IL Shared PTO Tracker', status: 'Submitted to Payroll',
+    name: 'Vanished Vic', hours: 8, start: '2026-08-01', end: '2026-08-01', badge: 'B9' },
+  { id: 'PTOIL-B', source: 'IL Shared PTO Tracker', status: 'Completed',
+    name: 'Done Dana', hours: 8, start: '2026-07-01', end: '2026-07-01', badge: 'B8' },
+  { id: 'PTOIL-C', source: 'IL Shared PTO Tracker', status: 'Submitted to Payroll',
+    name: 'Still Here', hours: 4, start: '2026-08-20', end: '2026-08-20', badge: 'B7' },
+  { id: 'FORM-9', source: 'Microsoft Forms', status: 'Received', name: 'Forms Person' }
+];
+const again = P.mergeForSave(before, [
+  { id: 'PTOIL-C', source: 'IL Shared PTO Tracker', status: 'Completed', name: 'Still Here' }
+]);
+t('a row still on the sheet is updated, not duplicated',
+  again.records.filter(x => x.id === 'PTOIL-C').length === 1 &&
+  again.records.filter(x => x.id === 'PTOIL-C')[0].status === 'Completed');
+t('a row that left the sheet is kept, never deleted', again.records.some(x => x.id === 'PTOIL-A'));
+t('and reported, because payroll still had it',
+  again.vanished.length === 1 && again.vanished[0].id === 'PTOIL-A');
+// The processed tab gets trimmed as it grows; that is housekeeping, not a decision.
+t('one that had already completed goes quietly', again.records.some(x => x.id === 'PTOIL-B') &&
+  !again.vanished.some(x => x.id === 'PTOIL-B'));
+t('other sources are still untouched', again.records.some(x => x.id === 'FORM-9'));
+
+console.log('— the question it raises —');
+const raised = P.vanishedTasks(again.vanished, { tasks: Tasks, existing: [] });
+t('one task per vanished request', raised.length === 1);
+t('filed where PTO is worked', raised[0].kind === 'pto');
+t('naming the person, the hours and the day',
+  /Vanished Vic/.test(raised[0].detail) && /8h/.test(raised[0].detail) && /2026-08-01/.test(raised[0].detail));
+t('and asking the actual question',
+  /paid, cancelled, or removed by mistake/i.test(raised[0].detail));
+t('it carries the badge, so it reaches the profile', raised[0].badge === 'B9');
+t('and points back at the request it came from',
+  raised[0].sourceKind === 'ptoTracker' && raised[0].sourceId === 'PTOIL-A');
+// Asking again every morning is noise, not diligence.
+t('importing again does not ask a second time',
+  P.vanishedTasks(again.vanished, { tasks: Tasks, existing: raised }).length === 0);
+t('no vanished rows means no tasks', P.vanishedTasks([], { tasks: Tasks }).length === 0);
+t('without a task module it degrades quietly rather than throwing',
+  P.vanishedTasks(again.vanished, {}).length === 0);
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

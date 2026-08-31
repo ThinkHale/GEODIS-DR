@@ -580,6 +580,110 @@
     };
   }
 
+  /* ---------- connecting the workbook roster to profiles ----------
+     The workbook states an EID for every associate on it; the roster states a
+     badge. Nothing states both, so a profile only ever learns its EID by matching
+     on NAME -- and the two systems disagree about surnames often enough that a
+     handful of people never join up. One letter is enough: "Wilingham, Ahmad" on
+     the workbook against "Willingham, Ahmad" on the roster, and that person is
+     invisible to attendance, points and time off.
+
+     A connection made by hand is stored in timeclockLinks and outlives every
+     upload, so this is a job done once and then only for new starters. What makes
+     it minutes rather than an afternoon is the suggestion: the roster is searched
+     for the closest name not already spoken for, and offered for one click.
+
+     Nothing here connects anything on its own. A high score is a reason to look,
+     not a decision -- "Meneses Arias, Kevin" and "Arias, Kevin" score well and may
+     be two people, and a wrong connection files one person's attendance against
+     another.
+
+     similarity(a, b) is injected rather than imported, so this file keeps no
+     dependency of its own; the app passes ReconcileCore.nameSimilarity. */
+  function connectionReview(opts) {
+    opts = opts || {};
+    var shifts = opts.shifts || [];
+    var profiles = opts.profiles || [];
+    var similarity = opts.similarity || function () { return 0; };
+    var min = opts.min == null ? 0.6 : opts.min;
+    var maxSuggestions = opts.maxSuggestions || 3;
+
+    // An EID already on a profile is connected, however it got there -- a name
+    // that happened to match, or somebody's earlier decision.
+    var connectedEids = {};
+    profiles.forEach(function (p) {
+      if (p && p.timeclockId) connectedEids[String(p.timeclockId).trim().toUpperCase()] = p;
+    });
+    // Only a profile with no EID yet can be offered: one already connected is
+    // spoken for, and offering it again invites two people onto one record.
+    var available = profiles.filter(function (p) { return p && !p.timeclockId; });
+
+    var out = { total: 0, connected: 0, unconnected: [], noEid: [] };
+    var seen = {};
+    shifts.forEach(function (r) {
+      if (!r) return;
+      var eid = String(r.eid || '').trim();
+      if (!eid) {
+        // A workbook row with no EID cannot be connected by this route at all.
+        out.noEid.push({ name: r.name || '', shift: r.shift || '', building: r.building || '' });
+        return;
+      }
+      var key = eid.toUpperCase();
+      if (seen[key]) return;
+      seen[key] = true;
+      out.total++;
+      if (connectedEids[key]) { out.connected++; return; }
+
+      var scored = [];
+      available.forEach(function (p) {
+        var score = similarity(r.name, p.name);
+        if (score >= min) scored.push({ badge: p.badge, name: p.name, empNumber: p.empNumber || '', score: score });
+      });
+      scored.sort(function (a, b) { return b.score - a.score; });
+      out.unconnected.push({
+        eid: eid,
+        name: r.name || '',
+        nameKey: r.nameKey || '',
+        shift: r.shift || '',
+        building: r.building || '',
+        dept: r.dept || '',
+        suggestions: scored.slice(0, maxSuggestions),
+        best: scored.length ? scored[0].score : 0
+      });
+    });
+
+    // Closest first: what a person can settle at a glance comes first, and what
+    // needs real thought sinks below it rather than blocking it.
+    out.unconnected.sort(function (a, b) {
+      return b.best - a.best || String(a.name).localeCompare(String(b.name));
+    });
+
+    /* Two workbook rows whose best suggestion is the same profile. Only one can
+       be right, so neither is offered for one click -- that is exactly where a
+       hasty click files somebody's attendance against a stranger. */
+    var byBadge = {};
+    out.unconnected.forEach(function (u) {
+      if (!u.suggestions.length) return;
+      var b = u.suggestions[0].badge;
+      (byBadge[b] = byBadge[b] || []).push(u);
+    });
+    Object.keys(byBadge).forEach(function (b) {
+      if (byBadge[b].length < 2) return;
+      byBadge[b].forEach(function (u) { u.contested = true; });
+    });
+
+    out.summary = {
+      total: out.total,
+      connected: out.connected,
+      unconnected: out.unconnected.length,
+      withSuggestion: out.unconnected.filter(function (u) { return u.suggestions.length && !u.contested; }).length,
+      contested: out.unconnected.filter(function (u) { return u.contested; }).length,
+      noMatch: out.unconnected.filter(function (u) { return !u.suggestions.length; }).length,
+      noEid: out.noEid.length
+    };
+    return out;
+  }
+
   var api = {
     KEY_SHEET: KEY_SHEET,
     HC_SHEET: HC_SHEET,
@@ -600,7 +704,8 @@
     scheduleFromShifts: scheduleFromShifts,
     accountOf: accountOf,
     validateAgainstKey: validateAgainstKey,
-    indexShifts: indexShifts
+    indexShifts: indexShifts,
+    connectionReview: connectionReview
   };
   root.ShiftKey = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

@@ -1501,6 +1501,10 @@
       'and time off go nowhere. Connecting one fixes it for every future upload.</p>' +
       (absent.length ? '<p class="sub">' + absent.length + ' more are unconnected but not on the clock, ' +
         'so they are not listed. They appear here if they punch in.</p>' : '') +
+      // The whole backlog, not just whoever happens to be on the clock right now.
+      '<p class="sub">Settings → Connections lists every workbook associate who reaches no profile, ' +
+      'with the closest roster name suggested. <button class="suite-btn tiny" data-open-connections="1">' +
+      'Review all connections</button></p>' +
       '<div class="unlinked-list">' + unlinked.slice(0, 12).map(function (r) {
         return '<button class="unlinked-row" data-link-eid="' + esc(r.wfmId || '') +
           '" data-link-name="' + esc(r.name) + '">' +
@@ -2159,7 +2163,7 @@
     var a = state.auth;
     var admin = a.account && AuthCore.isAdmin(a.account);
     var tabs = [['account', 'Account'], ['users', 'Users'], ['locations', 'Locations'],
-      ['shifts', 'Shifts'], ['links', 'RC links']];
+      ['shifts', 'Shifts'], ['connections', 'Connections'], ['links', 'RC links']];
     if (!state.admin.loaded && state.admin.tab !== 'account') loadAdminData();
     return hero('Settings', 'Accounts, roles, locations and shifts.', '', '') +
       (a.signedIn && !admin
@@ -2175,8 +2179,124 @@
         : !state.admin.loaded ? loadingPanel('settings')
         : state.admin.tab === 'users' ? usersPanel(admin)
         : state.admin.tab === 'locations' ? listPanel('locations', admin)
+        : state.admin.tab === 'connections' ? connectionsPanel()
         : state.admin.tab === 'links' ? appConfigPanel(admin)
         : listPanel('shiftTypes', admin));
+  }
+
+  /* ---------- connections ----------
+     The one-time job. The workbook knows every associate's EID and the roster
+     knows every associate's badge, and nothing knows both -- so a profile only
+     learns its EID when the two systems happen to spell the name the same way.
+     Where they do not, that person is invisible to attendance, points and time
+     off, and no amount of re-uploading will fix it.
+
+     A connection made here is stored against the EID and outlives every upload,
+     so this list is worked once and then only when somebody new starts. */
+  function connectionData() {
+    return ShiftKey.connectionReview({
+      shifts: state.stores.shifts,
+      profiles: allProfiles(),
+      similarity: ReconcileCore.nameSimilarity
+    });
+  }
+
+  // Confident enough to offer as a single click. Below this the suggestion is
+  // still shown, but the button says "Review" and opens the search instead.
+  var CONNECT_CONFIDENT = 0.88;
+
+  function connectionsPanel() {
+    var rev = connectionData();
+    var s = rev.summary;
+    var q = state.query.trim().toLowerCase();
+    var rows = rev.unconnected.filter(function (u) {
+      if (!q) return true;
+      return (u.name + ' ' + u.eid + ' ' + u.building + ' ' +
+        u.suggestions.map(function (x) { return x.name; }).join(' ')).toLowerCase().indexOf(q) !== -1;
+    });
+
+    if (!state.stores.shifts.length) {
+      return '<section class="suite-panel"><div class="workflow-empty">' +
+        'No PLX workbook roster has been imported yet, so there is nothing to connect. ' +
+        'Import it from the Associates tab first.</div></section>';
+    }
+
+    return '<div class="metric-strip">' +
+      metric('Connected', s.connected, 'of ' + s.total + ' on the workbook roster',
+        s.connected === s.total ? 'green' : '') +
+      metric('Not connected', s.unconnected, 'Invisible to attendance and points',
+        s.unconnected ? 'orange' : 'green') +
+      metric('Ready to connect', s.withSuggestion, 'A close name is waiting on one click') +
+      metric('Need a decision', s.contested + s.noMatch,
+        s.contested + ' contested · ' + s.noMatch + ' with no near match') +
+      '</div>' +
+      (s.noEid ? '<div class="warn-banner"><b>' + s.noEid + '</b> workbook row(s) have no EID at all, ' +
+        'so they cannot be connected this way — fix the EID column in the workbook.</div>' : '') +
+      '<section class="suite-panel">' +
+      '<div class="suite-panel-head"><h2>Workbook roster not connected to a profile</h2></div>' +
+      '<p class="perf-note">The workbook spells a name one way and the roster another, so these people ' +
+      'never join up. Connecting one is remembered against the timeclock id and survives every future ' +
+      'upload. <b>Check the suggestion before accepting it</b> — a close score is a reason to look, not a ' +
+      'decision, and a wrong connection files one person’s attendance against another.</p>' +
+      '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
+      '" placeholder="Search by name, timeclock id, or building…"></div>' +
+      (rows.length ? connectionTable(rows)
+        : empty(s.unconnected ? 'Nothing matches that search' : 'Everyone on the workbook roster is connected',
+          s.unconnected ? 'Clear the search to see the rest.'
+            : 'New starters will appear here when the workbook next names somebody the roster spells differently.')) +
+      '</section>';
+  }
+
+  function connectionTable(rows) {
+    return '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
+      '<th>On the workbook</th><th>Timeclock id</th><th>Site / shift</th>' +
+      '<th>Closest roster match</th><th></th></tr></thead><tbody>' +
+      rows.slice(0, MAX_ROWS).map(function (u) {
+        var top = u.suggestions[0];
+        var confident = top && top.score >= CONNECT_CONFIDENT && !u.contested;
+        return '<tr class="' + (u.contested ? 'cov-row warn' : '') + '">' +
+          '<td><div class="name">' + esc(u.name) + '</div>' +
+          (u.dept ? '<div class="sub">' + esc(u.dept) + '</div>' : '') + '</td>' +
+          '<td class="mono">' + esc(u.eid) + '</td>' +
+          '<td>' + esc(u.building || '—') + (u.shift ? ' · ' + esc(u.shift) : '') + '</td>' +
+          '<td>' + (top
+            ? '<div class="name">' + esc(top.name) + '</div><div class="sub">' +
+              (top.empNumber ? 'EID ' + esc(top.empNumber) + ' · ' : '') +
+              '<b class="' + (confident ? 'ok-text' : 'warn-text') + '">' +
+              Math.round(top.score * 100) + '% name match</b>' +
+              (u.contested ? ' · <span class="warn-text">another row wants this person too</span>' : '') +
+              '</div>'
+            : '<span class="score none">No near match on the roster</span>') + '</td>' +
+          '<td>' + (confident
+            ? '<button class="suite-btn primary" data-connect-accept="' + esc(u.eid) +
+              '|' + esc(top.badge) + '|' + esc(u.name) + '">Connect</button>'
+            : '<button class="suite-btn" data-link-eid="' + esc(u.eid) +
+              '" data-link-name="' + esc(u.name) + '">Review…</button>') + '</td>' +
+          '</tr>';
+      }).join('') + '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length);
+  }
+
+  /* Accepting a suggestion writes the same record the search modal writes, so
+     there is one shape of connection however it was made. */
+  function acceptConnection(eid, badge, workbookName) {
+    var actor = currentActor(true);
+    if (!actor) return;
+    var target = profile(badge);
+    if (!target) { alert('That associate is no longer on the roster.'); return; }
+    SuiteData.saveRecord('timeclockLinks', {
+      id: 'TCL-' + eid.replace(/[^A-Za-z0-9_-]/g, ''),
+      eid: eid, badge: badge,
+      name: workbookName, rosterName: target.name,
+      linkedBy: actor.name, linkedAt: new Date().toISOString()
+    }).then(function () {
+      return SuiteData.loadCollection('timeclockLinks');
+    }).then(function (rows) {
+      state.stores.timeclockLinks = rows;
+      rebuild();
+      render();
+    }).catch(function (err) {
+      alert('That connection could not be saved.\n\n' + err.message);
+    });
   }
 
   function accountPanel() {
@@ -3312,6 +3432,20 @@
       }
       return;
     }
+    if (e.target.closest('[data-open-connections]')) {
+      state.admin.tab = 'connections';
+      if (!state.admin.loaded) loadAdminData();
+      go('settings');
+      return;
+    }
+
+    var acc = e.target.closest('[data-connect-accept]');
+    if (acc) {
+      var bits = acc.dataset.connectAccept.split('|');
+      acceptConnection(bits[0], bits[1], bits.slice(2).join('|'));
+      return;
+    }
+
     var lk = e.target.closest('[data-link-eid]');
     if (lk) { linkModal(lk.dataset.linkEid, lk.dataset.linkName); return; }
     var conn = e.target.closest('[data-connect]');

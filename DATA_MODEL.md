@@ -645,6 +645,48 @@ nothing about openings, so saving it on its own would blank the previous day's
 counts. Once the loaded files between them carry every column the board saves
 itself; until then the tab names the missing column and offers to save anyway.
 
+## Connecting the workbook roster to profiles
+
+Three identifiers, and no single source states more than two of them:
+
+| Number | Stated by | On a profile |
+| --- | --- | --- |
+| Badge | RC / Beeline | `badge` |
+| RC Legacy Contact ID (the "EID" the team searches by) | RC | `empNumber` |
+| Timeclock id, `80-AWILLI3693` (the workbook's "EID" column, and WFM's) | PLX workbook, on-premise report | `timeclockId` |
+
+The Beeline export cannot carry the timeclock id, so a profile only ever learns
+one by **matching on name** — and the workbook and RC disagree about surnames
+often enough that people fall through. One letter is enough: the workbook's
+`Wilingham, Ahmad` against RC's `Willingham, Ahmad` and that associate reaches no
+profile at all, so their attendance, points and time off go nowhere.
+
+`ShiftKey.connectionReview()` lists every workbook row whose timeclock id is on no
+profile, and searches the roster for the closest name **not already spoken for**.
+Settings → Connections shows the list; accepting a suggestion writes a
+`timeclockLinks` record keyed by timeclock id, which outlives every upload. So it
+is a job done once, then only when somebody new starts.
+
+### It suggests; it never decides
+
+A high score is a reason to look, not a decision. Two guards keep it that way:
+
+- A profile that already holds a timeclock id is **never suggested again** — it is
+  spoken for, and offering it twice invites two people onto one record.
+- When two workbook rows share a best suggestion, **both are marked contested** and
+  neither gets a one-click button. This is not hypothetical: "Arias Velasquez,
+  Lina" at 1536 and "Arias, Lina" at 1519 both score 100% against one roster
+  profile and are two different people with two different timeclock ids.
+
+Below `CONNECT_CONFIDENT` (0.88) the suggestion is still shown, but the button
+opens the roster search instead of connecting. A wrong connection files one
+person's attendance against another, so nothing is ever connected automatically.
+
+The building, shift and department travel with each row so a person can tell two
+similar names apart before clicking. A workbook row with no timeclock id at all
+cannot be connected this way and is reported separately — that one is fixed in the
+workbook.
+
 ## Shared collections
 
 Attendance, time off, requisitions, and performance live server-side, so every

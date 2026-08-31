@@ -45,7 +45,7 @@ w.fetch = (u, o) => {
     performance: 'performance', shifts: 'shifts', discrepancies: 'discrepancies' };
   return Promise.resolve({ ok: true, json: () => Promise.resolve({ [map[k]]: [] }) });
 };
-['auth-core.js', 'tests/suite-auth-stub.js', 'suite-data.js', 'schedule-core.js', 'shift-key.js',
+['auth-core.js', 'tests/suite-auth-stub.js', 'reconcile-core.js', 'suite-data.js', 'schedule-core.js', 'shift-key.js',
  'pipeline-core.js', 'timeoff-core.js', 'payroll-core.js', 'tasks-core.js', 'contacts-core.js', 'reqs-core.js', 'suite.js']
   .forEach(f => w.eval(fs.readFileSync(R + f, 'utf8')));
 const d = w.document, $ = s => d.querySelector(s), $$ = s => Array.from(d.querySelectorAll(s));
@@ -61,8 +61,9 @@ const signInAs = acct => w.__setAuth({ signedIn: true, email: acct.email, accoun
   console.log('— the page exists —');
   t('Settings is in the sidebar', !!$('[data-nav="settings"]'));
   click($('[data-nav="settings"]'));
-  t('five sections', $$('[data-settings-tab]').length === 5);
+  t('six sections', $$('[data-settings-tab]').length === 6);
   t('including RC links', !!$('[data-settings-tab="links"]'));
+  t('including Connections', !!$('[data-settings-tab="connections"]'));
   t('opens on Account', $('[data-settings-tab="account"]').className.indexOf('primary') !== -1);
 
   console.log('— signed out —');

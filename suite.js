@@ -145,16 +145,32 @@
     /* Once somebody is signed in, that IS the actor. This is the single place
        the switch happens, which is why the change log was built to carry an id
        and a source from the start. */
-    if (state.auth.signedIn && state.auth.account) {
-      var acct = state.auth.account;
-      return PipelineCore.actorOf(acct.name || acct.email, acct.email, 'account');
+    /* Being signed in is enough. The account RECORD may not have loaded -- it
+       comes from the admin users list, which only an administrator can read -- and
+       falling through to the browser prompt because of that asked a signed-in
+       person to type the name they had just signed in with, and silently did
+       nothing when they dismissed it. */
+    if (state.auth.signedIn && (state.auth.account || state.auth.email)) {
+      var acct = state.auth.account || {};
+      var who = acct.name || acct.email || state.auth.email;
+      return PipelineCore.actorOf(who, acct.email || state.auth.email, 'account');
     }
     var name = '';
     try { name = localStorage.getItem(ACTOR_KEY) || ''; } catch (e) { /* private mode */ }
     if (!name && promptIfMissing) {
       name = (window.prompt('Your name, so status changes can be attributed.\n\n' +
         'This is stored in this browser only, until sign-in is added.', '') || '').trim();
-      if (!name) return null;
+      /* Every caller of currentActor(true) is about to write something and cannot
+         without a name. Returning null quietly meant the click just did nothing --
+         no save, no message, nothing to tell you the difference between "it failed"
+         and "it worked but the list has not caught up". Say it out loud instead;
+         a browser that has been told to suppress dialogs will not show the prompt
+         at all, and this is the only sign you would get. */
+      if (!name) {
+        alert('That was not saved, because it records who made the change and no name was given.\n\n' +
+          'Sign in under Settings, or answer the name prompt, and try again.');
+        return null;
+      }
       try { localStorage.setItem(ACTOR_KEY, name); } catch (e) { /* ignore */ }
     }
     var id = '';
@@ -3787,6 +3803,10 @@
           return SuiteData.loadCollection('timeclockLinks');
         }).then(function (rows) {
           state.stores.timeclockLinks = rows;
+          // Without this the profiles keep their old timeclock ids, so the person
+          // you just connected stays on the unconnected list and the save looks
+          // exactly like a failure.
+          rebuild();
           render();
         }).catch(function (err) {
           alert('That connection could not be saved.\n\n' + err.message);

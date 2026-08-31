@@ -604,15 +604,35 @@
     opts = opts || {};
     var shifts = opts.shifts || [];
     var profiles = opts.profiles || [];
+    var links = opts.links || [];
     var similarity = opts.similarity || function () { return 0; };
     var min = opts.min == null ? 0.6 : opts.min;
     var maxSuggestions = opts.maxSuggestions || 3;
 
-    // An EID already on a profile is connected, however it got there -- a name
-    // that happened to match, or somebody's earlier decision.
+    /* An EID already on a profile is connected, however it got there -- a name
+       that happened to match, or somebody's earlier decision.
+
+       A profile holds ONE timeclock id, but a person can genuinely have several:
+       the same associate appears under 80- for one agency and 87- for another, and
+       a workbook row can carry a mistyped id belonging to somebody else. So the
+       stored links are consulted too. Otherwise connecting such a person saved
+       correctly and changed nothing on screen -- their profile kept the other id,
+       the row stayed unconnected, and it could be connected forever without ever
+       clearing. */
+    var byBadge = {};
+    profiles.forEach(function (p) { if (p && p.badge) byBadge[String(p.badge).trim()] = p; });
     var connectedEids = {};
     profiles.forEach(function (p) {
       if (p && p.timeclockId) connectedEids[String(p.timeclockId).trim().toUpperCase()] = p;
+    });
+    // A link only counts if it points at somebody actually on the roster.
+    var linkedByBadge = {};
+    links.forEach(function (l) {
+      if (!l || !l.eid || !l.badge) return;
+      var p = byBadge[String(l.badge).trim()];
+      if (!p) return;
+      connectedEids[String(l.eid).trim().toUpperCase()] = p;
+      (linkedByBadge[l.badge] = linkedByBadge[l.badge] || []).push(String(l.eid).trim());
     });
     // Only a profile with no EID yet can be offered: one already connected is
     // spoken for, and offering it again invites two people onto one record.
@@ -661,16 +681,27 @@
     /* Two workbook rows whose best suggestion is the same profile. Only one can
        be right, so neither is offered for one click -- that is exactly where a
        hasty click files somebody's attendance against a stranger. */
-    var byBadge = {};
+    // Named apart from byBadge above, which maps a badge to its PROFILE. Reusing
+    // that name here quietly replaced the profile lookup for everything below.
+    var claimants = {};
     out.unconnected.forEach(function (u) {
       if (!u.suggestions.length) return;
       var b = u.suggestions[0].badge;
-      (byBadge[b] = byBadge[b] || []).push(u);
+      (claimants[b] = claimants[b] || []).push(u);
     });
-    Object.keys(byBadge).forEach(function (b) {
-      if (byBadge[b].length < 2) return;
-      byBadge[b].forEach(function (u) { u.contested = true; });
+    Object.keys(claimants).forEach(function (b) {
+      if (claimants[b].length < 2) return;
+      claimants[b].forEach(function (u) { u.contested = true; });
     });
+
+    /* One person carrying several timeclock ids. Usually legitimate -- the same
+       associate under two agencies -- but it is also what a mistyped id in the
+       workbook looks like, so it is disclosed rather than assumed either way. */
+    out.multiLinked = Object.keys(linkedByBadge)
+      .filter(function (b) { return linkedByBadge[b].length > 1; })
+      .map(function (b) {
+        return { badge: b, name: byBadge[b] ? byBadge[b].name : '', eids: linkedByBadge[b] };
+      });
 
     out.summary = {
       total: out.total,
@@ -679,7 +710,8 @@
       withSuggestion: out.unconnected.filter(function (u) { return u.suggestions.length && !u.contested; }).length,
       contested: out.unconnected.filter(function (u) { return u.contested; }).length,
       noMatch: out.unconnected.filter(function (u) { return !u.suggestions.length; }).length,
-      noEid: out.noEid.length
+      noEid: out.noEid.length,
+      multiLinked: out.multiLinked.length
     };
     return out;
   }

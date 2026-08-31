@@ -96,6 +96,43 @@ t('the threshold is the caller\'s to set', (() => {
   return r.unconnected[0].suggestions.length === 1;
 })());
 
+console.log('— a person with more than one timeclock id —');
+/* A profile holds ONE timeclock id, but a person can genuinely have several: the
+   same associate under two agencies (80- and 87-), or a workbook row carrying an
+   id that belongs to somebody else. Checking only the profile's single slot meant
+   such a person could be connected over and over and never leave the list. */
+const twoIdShifts = [{ eid: '80-EPASQU7641', name: 'Ahmad Mullilkhil, Naseer', nameKey: 'naseer ahmad mullilkhil' }];
+const twoIdProfiles = [{ badge: '238498', name: 'Naseer ahmad Mullilkhil', timeclockId: '80-NAHMAD9750' }];
+t('without the links the row never clears', ShiftKey.connectionReview({
+  shifts: twoIdShifts, profiles: twoIdProfiles, similarity: sim
+}).summary.unconnected === 1);
+t('a stored link counts as connected even when the profile holds a different id', (() => {
+  const r = ShiftKey.connectionReview({
+    shifts: twoIdShifts, profiles: twoIdProfiles, similarity: sim,
+    links: [{ eid: '80-EPASQU7641', badge: '238498' }]
+  });
+  return r.summary.unconnected === 0 && r.summary.connected === 1;
+})());
+t('and the double id is disclosed rather than assumed to be fine', (() => {
+  const r = ShiftKey.connectionReview({
+    shifts: twoIdShifts, profiles: twoIdProfiles, similarity: sim,
+    links: [{ eid: '80-EPASQU7641', badge: '238498' }, { eid: '80-NAHMAD9750', badge: '238498' }]
+  });
+  return r.summary.multiLinked === 1 && r.multiLinked[0].eids.length === 2 &&
+    r.multiLinked[0].name === 'Naseer ahmad Mullilkhil';
+})());
+t('one id per person is not reported as a conflict', ShiftKey.connectionReview({
+  shifts: twoIdShifts, profiles: twoIdProfiles, similarity: sim,
+  links: [{ eid: '80-EPASQU7641', badge: '238498' }]
+}).summary.multiLinked === 0);
+t('a link pointing at nobody on the roster connects nothing', (() => {
+  const r = ShiftKey.connectionReview({
+    shifts: twoIdShifts, profiles: twoIdProfiles, similarity: sim,
+    links: [{ eid: '80-EPASQU7641', badge: 'GONE' }]
+  });
+  return r.summary.unconnected === 1 && r.summary.multiLinked === 0;
+})());
+
 console.log('— degenerate input —');
 t('no shifts is not a crash', ShiftKey.connectionReview({ profiles: profiles, similarity: sim }).summary.total === 0);
 t('no profiles means everyone is unconnected with no suggestions', (() => {

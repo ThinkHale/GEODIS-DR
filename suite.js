@@ -2318,6 +2318,9 @@
     return ShiftKey.connectionReview({
       shifts: state.stores.shifts,
       profiles: allProfiles(),
+      // A profile holds one timeclock id; the links hold every one somebody has
+      // connected. Without them a person with two ids never leaves this list.
+      links: state.stores.timeclockLinks,
       similarity: ReconcileCore.nameSimilarity
     });
   }
@@ -2353,6 +2356,7 @@
       '</div>' +
       (s.noEid ? '<div class="warn-banner"><b>' + s.noEid + '</b> workbook row(s) have no EID at all, ' +
         'so they cannot be connected this way — fix the EID column in the workbook.</div>' : '') +
+      multiLinkNote(rev) +
       '<section class="suite-panel">' +
       '<div class="suite-panel-head"><h2>Workbook roster not connected to a profile</h2></div>' +
       '<p class="perf-note">The workbook spells a name one way and the roster another, so these people ' +
@@ -2366,6 +2370,26 @@
           s.unconnected ? 'Clear the search to see the rest.'
             : 'New starters will appear here when the workbook next names somebody the roster spells differently.')) +
       '</section>';
+  }
+
+  /* People carrying more than one timeclock id. Often legitimate -- the same
+     associate under two agencies, 80- for one and 87- for the other -- but it is
+     also exactly what a mistyped id in the workbook looks like, and the two are
+     told apart by reading the ids, not by a rule. Worth showing either way: the
+     mistyped case means somebody else's id is sitting on this person's row. */
+  function multiLinkNote(rev) {
+    var rows = rev.multiLinked || [];
+    if (!rows.length) return '';
+    return '<div class="warn-banner"><strong>' + rows.length +
+      ' associate(s) are connected to more than one timeclock id</strong>' +
+      '<p>Two ids for one person is normal where they work under two agencies. Where the ids do not ' +
+      'look like the same person, the workbook has somebody else’s id on their row — fix it at source, ' +
+      'because every report keyed on that id is being attributed to the wrong person.</p>' +
+      '<ul>' + rows.slice(0, 10).map(function (m) {
+        return '<li><b>' + esc(m.name || m.badge) + '</b> — ' +
+          m.eids.map(function (e) { return '<span class="mono">' + esc(e) + '</span>'; }).join(' , ') + '</li>';
+      }).join('') + (rows.length > 10 ? '<li>…and ' + (rows.length - 10) + ' more.</li>' : '') +
+      '</ul></div>';
   }
 
   function connectionTable(rows) {

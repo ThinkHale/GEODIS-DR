@@ -21,7 +21,7 @@ function harness(opts) {
     { runScripts: 'outside-only', url: 'https://geodis.ebtools.pro/' });
   const w = dom.window;
   const alerts = [], prompts = [];
-  let links = [];
+  let links = (opts.links || []).slice();
   w.alert = m => alerts.push(m);
   w.confirm = () => true;
   w.scrollTo = () => {};
@@ -31,7 +31,10 @@ function harness(opts) {
     const s = String(u);
     if (o && o.method === 'POST') {
       const b = JSON.parse(o.body);
-      if (s.indexOf('timeclockLinks=1') !== -1 && b.id) links.push(b);
+      if (s.indexOf('timeclockLinks=1') !== -1 && b.id) {
+        if (b._delete) links = links.filter(x => x.id !== b.id);
+        else links.push(b);
+      }
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
     }
     if (s.indexOf('timeclockLinks=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ timeclockLinks: links }) });
@@ -120,15 +123,87 @@ async function openAndPick(h) {
     await new Promise(r => setTimeout(r, 30));
     h.w.GEODISSuite.go('settings');
     await new Promise(r => setTimeout(r, 40));
-    t('the person is listed to start with', h.$$('.suite-table tbody tr').length === 1);
+    t('the person is listed to start with', h.$$('.connect-pending tbody tr').length === 1);
     await openAndPick(h);
     t('the connection is saved', h.links().length === 1);
     t('the timeclock id reaches the profile', h.w.GEODISSuite.profile('B2').timeclockId === '80-ZZOTHER111');
     // Without a rebuild the profile keeps its old id and the row stays put, which
     // is indistinguishable from the save having failed.
-    t('and the row is gone from the list', h.$$('.suite-table tbody tr').length === 0);
+    t('and the row is gone from the unconnected list', h.$$('.connect-pending tbody tr').length === 0);
+    t('and appears on the connected list, where it can be undone',
+      h.$$('.connect-made tbody tr').length === 1 && !!h.$('[data-disconnect]'));
     t('the modal is closed', !h.$('#suite-modal'));
     t('no alert, because nothing went wrong', h.alerts.length === 0);
+  }
+
+  console.log('— undoing a connection —');
+  {
+    /* A connection is a decision, and decisions are sometimes wrong: the workbook
+       can carry another person's timeclock id. Two links on one badge here, as
+       Naseer really has -- his own, and Edwin Pasquel's off the workbook row. */
+    const seeded = [
+      { id: 'TCL-80-WRONG0001', eid: '80-WRONG0001', badge: 'B2', rosterName: 'Someone Else Entirely', name: 'Zzz', linkedBy: 'Cody', linkedAt: '2026-08-31T00:00:00Z' },
+      { id: 'TCL-80-RIGHT0002', eid: '80-RIGHT0002', badge: 'B2', rosterName: 'Someone Else Entirely', name: 'Zzz', linkedBy: 'Cody', linkedAt: '2026-08-27T00:00:00Z' }
+    ];
+    const h = harness({ links: seeded });
+    await new Promise(r => setTimeout(r, 60));
+    const st = h.w.GEODISSuite.state;
+    st.storesLoaded = true;
+    st.stores.shifts = [{ eid: '80-WRONG0001', name: 'Zzz, Totally Different', nameKey: 'totally different zzz', shift: '2nd', building: '1536' }];
+    st.stores.timeclockLinks = seeded.slice();
+    h.d.dispatchEvent(new h.w.CustomEvent('geodis:records', { detail: { records: [
+      { badge: 'B2', person: 'Someone Else Entirely', empNumber: 'E2', action: 'matched', actionLabel: 'M', reason: '', market: 'Chicago' }
+    ] } }));
+    await new Promise(r => setTimeout(r, 40));
+    h.w.__setAuth({ signedIn: true, email: 'cody@geodis.com', account: { email: 'cody@geodis.com', name: 'Cody', role: 'admin', enabled: true, markets: [] } });
+    st.admin.tab = 'connections'; st.admin.loaded = true;
+    h.w.GEODISSuite.go('settings');
+    await new Promise(r => setTimeout(r, 40));
+
+    t('both connections are listed', h.$$('.connect-made tbody tr').length === 2);
+    t('each can be undone', h.$$('.connect-made [data-disconnect]').length === 2);
+    t('two ids on one person are flagged', h.$$('.warn-banner').some(b => /more than one timeclock id/.test(b.textContent)));
+    // A stored link makes the row count as connected, so it is NOT on the list above.
+    t('and the workbook row counts as connected', h.$$('.connect-pending tbody tr').length === 0);
+
+    h.click(h.$('[data-disconnect="TCL-80-WRONG0001"]'));
+    await new Promise(r => setTimeout(r, 150));
+    t('removing one leaves the other', st.stores.timeclockLinks.length === 1 &&
+      st.stores.timeclockLinks[0].eid === '80-RIGHT0002');
+    t('the profile falls back to the id that remains',
+      h.w.GEODISSuite.profile('B2').timeclockId === '80-RIGHT0002');
+    /* The workbook still carries the wrong id, so the person returns to the
+       unconnected list. That is the point: the tool keeps asking until the source
+       is fixed, rather than remembering a decision that papers over a data error. */
+    t('the workbook row goes back to unconnected', h.$$('.connect-pending tbody tr').length === 1);
+    t('and one id left means no conflict to flag',
+      !h.$$('.warn-banner').some(b => /more than one timeclock id/.test(b.textContent)));
+  }
+
+  console.log('— disconnecting asks first —');
+  {
+    const one = [{ id: 'TCL-X', eid: '80-X', badge: 'B2', rosterName: 'Someone Else Entirely', linkedBy: 'Cody', linkedAt: '2026-08-31T00:00:00Z' }];
+    const h = harness({ links: one });
+    await new Promise(r => setTimeout(r, 60));
+    const st = h.w.GEODISSuite.state;
+    st.storesLoaded = true;
+    st.stores.shifts = [];
+    st.stores.timeclockLinks = one.slice();
+    h.d.dispatchEvent(new h.w.CustomEvent('geodis:records', { detail: { records: [
+      { badge: 'B2', person: 'Someone Else Entirely', action: 'matched', actionLabel: 'M', reason: '', market: 'Chicago' }
+    ] } }));
+    await new Promise(r => setTimeout(r, 40));
+    st.admin.tab = 'connections'; st.admin.loaded = true;
+    h.w.GEODISSuite.go('settings');
+    await new Promise(r => setTimeout(r, 40));
+    let asked = null;
+    h.w.confirm = m => { asked = m; return false; };          // the person says no
+    h.click(h.$('[data-disconnect="TCL-X"]'));
+    await new Promise(r => setTimeout(r, 80));
+    t('it asks before removing anything', !!asked);
+    t('naming who and which id', /80-X/.test(asked) && /Someone Else Entirely/.test(asked));
+    t('and warning that the workbook is unchanged', /workbook/i.test(asked));
+    t('saying no removes nothing', st.stores.timeclockLinks.length === 1);
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');

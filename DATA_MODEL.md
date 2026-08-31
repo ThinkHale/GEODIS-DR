@@ -688,6 +688,35 @@ Settings → Connections shows the list; accepting a suggestion writes a
 `timeclockLinks` record keyed by timeclock id, which outlives every upload. So it
 is a job done once, then only when somebody new starts.
 
+### One person, several timeclock ids
+
+A profile holds a single `timeclockId`, filled from a badge-keyed map that keeps
+one value. People legitimately have more than one: the same associate converted
+from another agency appears under `80-` for one and `87-` for the other. So
+`connectionReview` consults the stored **links** as well as the profile — a link
+pointing at somebody on the roster connects that id, whichever one the profile's
+single slot happens to hold. Without that, such a person could be connected any
+number of times and never leave the list.
+
+Two ids on one badge are reported rather than assumed to be fine. Where they read
+as the same person it is an agency conversion; where they do not, the workbook has
+somebody else's id on that row and every report keyed on it is being attributed to
+the wrong person. Telling those apart means reading the ids, which is a person's
+job, not a rule's.
+
+### Disconnecting
+
+A connection is a decision, and decisions are sometimes wrong. Every link is
+listed with who made it and when, and can be removed.
+
+Disconnecting does **not** change the workbook. If the row there still carries the
+wrong id, that person returns to the unconnected list on the next look — which is
+correct: the tool should keep asking until the source is fixed rather than
+remembering a decision that papers over a data error. The confirmation says so.
+
+Connections are shown even when no workbook has been imported this session,
+because a connection made in one session has to be correctable in the next.
+
 ### It suggests; it never decides
 
 A high score is a reason to look, not a decision. Two guards keep it that way:

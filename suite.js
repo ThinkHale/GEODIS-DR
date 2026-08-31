@@ -2340,9 +2340,12 @@
     });
 
     if (!state.stores.shifts.length) {
+      /* Nothing to review without the workbook -- but connections already made are
+         still shown, and still undoable. Hiding them behind an import meant a
+         connection made in one session could not be corrected in the next. */
       return '<section class="suite-panel"><div class="workflow-empty">' +
         'No PLX workbook roster has been imported yet, so there is nothing to connect. ' +
-        'Import it from the Associates tab first.</div></section>';
+        'Import it from the Associates tab first.</div></section>' + connectedPanel();
     }
 
     return '<div class="metric-strip">' +
@@ -2369,7 +2372,7 @@
         : empty(s.unconnected ? 'Nothing matches that search' : 'Everyone on the workbook roster is connected',
           s.unconnected ? 'Clear the search to see the rest.'
             : 'New starters will appear here when the workbook next names somebody the roster spells differently.')) +
-      '</section>';
+      '</section>' + connectedPanel();
   }
 
   /* People carrying more than one timeclock id. Often legitimate -- the same
@@ -2387,13 +2390,17 @@
       'because every report keyed on that id is being attributed to the wrong person.</p>' +
       '<ul>' + rows.slice(0, 10).map(function (m) {
         return '<li><b>' + esc(m.name || m.badge) + '</b> — ' +
-          m.eids.map(function (e) { return '<span class="mono">' + esc(e) + '</span>'; }).join(' , ') + '</li>';
+          m.eids.map(function (e) {
+            return '<span class="mono">' + esc(e) + '</span> ' +
+              '<button class="suite-btn tiny danger" data-disconnect="TCL-' +
+              esc(String(e).replace(/[^A-Za-z0-9_-]/g, '')) + '">Disconnect</button>';
+          }).join(' &nbsp; ') + '</li>';
       }).join('') + (rows.length > 10 ? '<li>…and ' + (rows.length - 10) + ' more.</li>' : '') +
       '</ul></div>';
   }
 
   function connectionTable(rows) {
-    return '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
+    return '<div class="suite-table-wrap"><table class="suite-table connect-pending"><thead><tr>' +
       '<th>On the workbook</th><th>Timeclock id</th><th>Site / shift</th>' +
       '<th>Closest roster match</th><th></th></tr></thead><tbody>' +
       rows.slice(0, MAX_ROWS).map(function (u) {
@@ -2419,6 +2426,93 @@
               '" data-link-name="' + esc(u.name) + '">Review…</button>') + '</td>' +
           '</tr>';
       }).join('') + '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length);
+  }
+
+  /* ---------- undoing a connection ----------
+     A connection is a decision somebody made, and decisions are sometimes wrong:
+     the workbook can carry another person's timeclock id, and connecting it files
+     that id against the wrong associate. Until now there was no way back.
+
+     Disconnecting does NOT fix the workbook. If the row there still carries the
+     wrong id, that person returns to the unconnected list on the next look --
+     which is right: the tool should keep asking until the source is corrected. */
+  function connectedList() {
+    var links = state.stores.timeclockLinks || [];
+    var perBadge = {};
+    links.forEach(function (l) { perBadge[l.badge] = (perBadge[l.badge] || 0) + 1; });
+    var q = state.query.trim().toLowerCase();
+    return links.map(function (l) {
+      var p = profile(l.badge);
+      return {
+        id: l.id, eid: l.eid, badge: l.badge,
+        rosterName: l.rosterName || (p ? p.name : ''),
+        workbookName: l.name || '',
+        linkedBy: l.linkedBy || '', linkedAt: l.linkedAt || '',
+        onRoster: !!p,
+        alsoLinked: perBadge[l.badge] > 1
+      };
+    }).filter(function (r) {
+      if (!q) return true;
+      return (r.eid + ' ' + r.rosterName + ' ' + r.workbookName + ' ' + r.badge + ' ' + r.linkedBy)
+        .toLowerCase().indexOf(q) !== -1;
+    }).sort(function (a, b) {
+      // The ones worth reviewing first: a person with two ids, then anyone whose
+      // profile has left the roster, then by name.
+      return (b.alsoLinked - a.alsoLinked) || (a.onRoster - b.onRoster) ||
+        String(a.rosterName).localeCompare(String(b.rosterName));
+    });
+  }
+
+  function connectedPanel() {
+    var rows = connectedList();
+    if (!(state.stores.timeclockLinks || []).length) return '';
+    return '<section class="suite-panel"><div class="suite-panel-head">' +
+      '<h2>Connected by hand</h2></div>' +
+      '<p class="perf-note">Every connection somebody made, newest concerns first. Disconnecting one puts ' +
+      'that associate back on the list above — it does not change the workbook, so if the row there still ' +
+      'carries the wrong id, they will keep reappearing until it is corrected at source.</p>' +
+      (rows.length
+        ? '<div class="suite-table-wrap"><table class="suite-table connect-made"><thead><tr>' +
+          '<th>Timeclock id</th><th>Connected to</th><th>On the workbook as</th><th>By</th><th></th>' +
+          '</tr></thead><tbody>' +
+          rows.slice(0, MAX_ROWS).map(function (r) {
+            return '<tr class="' + (r.alsoLinked ? 'cov-row warn' : '') + '">' +
+              '<td class="mono">' + esc(r.eid) + '</td>' +
+              '<td><div class="' + (r.onRoster ? 'name link' : 'name') + '"' +
+              (r.onRoster ? ' data-profile="' + esc(r.badge) + '"' : '') + '>' +
+              esc(r.rosterName || r.badge) + '</div>' +
+              '<div class="sub">' + (r.onRoster ? 'Badge ' + esc(r.badge)
+                : '<b class="warn-text">no longer on the roster</b>') +
+              (r.alsoLinked ? ' · <span class="warn-text">also linked to another id</span>' : '') +
+              '</div></td>' +
+              '<td>' + esc(r.workbookName || '—') + '</td>' +
+              '<td>' + esc(r.linkedBy || '—') +
+              (r.linkedAt ? '<div class="sub">' + esc(String(r.linkedAt).slice(0, 10)) + '</div>' : '') + '</td>' +
+              '<td><button class="suite-btn danger" data-disconnect="' + esc(r.id) + '">Disconnect</button></td>' +
+              '</tr>';
+          }).join('') + '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length)
+        : empty('Nothing matches that search', 'Clear the search to see every connection.')) +
+      '</section>';
+  }
+
+  function disconnect(id) {
+    var rec = (state.stores.timeclockLinks || []).filter(function (x) { return x.id === id; })[0];
+    if (!rec) return;
+    var who = rec.rosterName || rec.badge;
+    if (!confirm('Disconnect ' + rec.eid + ' from ' + who + '?\n\n' +
+      'Anything that reaches ' + who + ' through that timeclock id — attendance, points, ' +
+      'time off — stops doing so.\n\n' +
+      'This does not change the PLX workbook. If the row there still carries this id, ' +
+      'they will appear on the unconnected list again.')) return;
+    SuiteData.deleteRecord('timeclockLinks', id).then(function () {
+      return SuiteData.loadCollection('timeclockLinks');
+    }).then(function (rows) {
+      state.stores.timeclockLinks = rows;
+      rebuild();
+      render();
+    }).catch(function (err) {
+      alert('That connection could not be removed.\n\n' + err.message);
+    });
   }
 
   /* Accepting a suggestion writes the same record the search modal writes, so
@@ -3535,6 +3629,9 @@
       go('settings');
       return;
     }
+
+    var dc = e.target.closest('[data-disconnect]');
+    if (dc) { disconnect(dc.dataset.disconnect); return; }
 
     var acc = e.target.closest('[data-connect-accept]');
     if (acc) {

@@ -430,16 +430,14 @@
       .then(function (r) { return { users: r[0], locations: r[1], shiftTypes: r[2], appConfig: r[3] }; });
   }
 
-  /* ---------- the live PLX workbook ----------
-     Power Automate pushes it here from SharePoint; the browser cannot read
-     SharePoint itself. loadPlxSync() is what the workbook last produced;
-     requestPlxRefresh() asks for a fresh pull if a flow is configured. */
+  /* ---------- the PLX workbook ----------
+     It lives in another Microsoft tenant, so nothing here can go and fetch it:
+     somebody uploads it, and loadPlxSync() reports what that upload produced. */
   function loadPlxSync() {
     return getJson(API + '?plx=1')
       .then(function (d) { return d.sync || {}; })
       .catch(function (err) { console.warn('Could not read the PLX sync state.', err); return {}; });
   }
-  function requestPlxRefresh() { return post('plxRefresh=1', {}); }
   // Uploading the workbook from the browser. Everything it carries -- shift tags,
   // open orders, attendance history and point balances -- refreshes in one pass.
   function uploadPlx(payload) { return post('plxUpload=1', payload); }
@@ -516,7 +514,6 @@
     loadCoverageDates: loadCoverageDates,
     loadAdmin: loadAdmin,
     loadPlxSync: loadPlxSync,
-    requestPlxRefresh: requestPlxRefresh,
     uploadPlx: uploadPlx,
     loadPayrollPeriods: loadPayrollPeriods,
     loadPayrollPeriod: loadPayrollPeriod,

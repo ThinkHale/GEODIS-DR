@@ -87,6 +87,11 @@ t('performance score = avg(96,90,99)', txt.includes('95'));
 t('time off joined', txt.includes('PTO'));
 t('assignment + reconciliation section', txt.includes('Assignment') && txt.includes('Recommended action'));
 t('attendance history table rendered', $$('.suite-table').length>0);
+/* The occurrence is on the sheet, so the profile shows it and stops there --
+   removing it here would leave the workbook still carrying the point. */
+t('the occurrence cannot be removed from the profile', !$('[data-del^="attendance|"]'));
+t('nor logged from it', !$('[data-add="attendance"]'));
+t('the profile links to the workbook instead', !!$('.suite-panel a[href*="sharepoint.com"]'));
 
 console.log('— unscored associate shows no invented number —');
 click($('[data-nav="associates"]'));
@@ -107,6 +112,13 @@ stores.attendance.push({id:'a9',badge:'',name:'Nobody, No',date:'2026-08-24',typ
 w.GEODISSuite.reload().then(()=>{
   click($('[data-nav="attendance"]'));
   t('orphaned import row surfaced, not dropped', d.body.textContent.includes('reach no profile'));
+  console.log('— attendance is a window onto the workbook, not a form —');
+  t('the logged occurrence is shown', d.body.textContent.includes('Absent'));
+  t('with no way to remove it', !$('[data-del^="attendance|"]'));
+  t('and no way to add one', !$('[data-add="attendance"]'));
+  t('the page names the sheet that owns it',
+    d.body.textContent.includes('Logged on the PLX workbook'));
+  t('and links to its attendance tab', !!$('a[href*="sharepoint.com"]'));
   t('a departed associate keeps a profile instead of becoming one',
     !!w.GEODISSuite.profile('7777') === false && w.GEODISSuite.state.profiles.size > 0);
   /* A current occurrence reaching nobody is a warning; the same row marked as

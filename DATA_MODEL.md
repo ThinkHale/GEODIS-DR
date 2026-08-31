@@ -31,7 +31,7 @@ Badges are normalized (`SuiteData.normBadge`) before every lookup, matching
 | Identity | `badge`, `empNumber`, `name`, `altName`, `initials` | snapshot |
 | Assignment | `status`, `market`, `marketVerified`, `marketRaw`, `crmStart`, `beeStart`, `endDate`, `endReason` | snapshot |
 | Reconciliation | `action`, `actionLabel`, `actionReason`, `overridden`, `reconciled`, `dup`, `newBadge`, `note` | snapshot + shared overrides/notes |
-| Attendance | `attendance[]`, `points`, `standing`, `standingCls` | `attendance` collection |
+| Attendance | `attendance[]`, `points`, `standing`, `standingCls` | `attendance` collection (read-only — see below) |
 | Time off | `timeOff[]` | `timeoff` collection |
 | Performance | `performance`, `score` | `performance` collection |
 
@@ -204,29 +204,51 @@ reviewed.
 ### Documenting an absence
 
 A documented absence stores a disposition and a free-text reason. It never creates
-an attendance occurrence on its own — `DISPOSITION_OCCURRENCE` in `suite.js` maps a
-disposition to the occurrence a **one-click** action would create, and a disposition
-of `Approved time off`, `Reassigned`, or `Badge / system issue` maps to `null`, so a
-badge-reader gap can never become a disciplinary record.
+an attendance occurrence: `DISPOSITION_OCCURRENCE` in `suite.js` maps a disposition
+to what the **workbook** should end up carrying for that day, and the row states it
+rather than writing it. A disposition of `Approved time off`, `Reassigned`, or
+`Badge / system issue` maps to `null`, so a badge-reader gap can never become a
+disciplinary record.
 
-## The live PLX workbook
+## Attendance is read-only
 
-The workbook lives in SharePoint, which **the browser cannot read**: it is a
-different origin and needs Microsoft 365 auth this tool does not have. So Power
-Automate reads it and posts it to `?plx=1` with the sync key, exactly as it
-already does for the daily reports.
+Attendance is logged on the attendance tab of the PLX workbook, and only there.
+The tool **reads** that tab — `functions/attendance-import.js` turns it into the
+`attendance` collection on every workbook upload — and offers no way to add,
+edit, or remove an occurrence.
 
-Two things come out of it:
+That is deliberate. An occurrence typed into the tool would never reach the sheet
+the site actually runs on, so the two would disagree about somebody's point
+balance, and a balance that exists in only one of the two systems is worse than
+no balance at all. Every attendance surface (the Attendance tab, the profile's
+attendance history, the coverage documentation row) links out to
+`PLX_ATTENDANCE_URL` instead of offering a form.
+
+`TYPE_POINTS` in `suite.js` survives as the policy scale the sheet is read by;
+`attendance-import.js` must agree with it, which `tests/point-policy.test.js`
+pins.
+
+## The PLX workbook
+
+The workbook lives in **another Microsoft tenant**, so nothing here can go and
+fetch it — not the browser (different origin, and it needs Microsoft 365 auth
+this tool does not have) and not a Power Automate flow either. Somebody uploads
+it, on the On-Premise page, whenever they run attendance. There is no
+refresh-from-SharePoint button, because there is nothing on this side to trigger.
+
+Three things come out of it:
 
 | Tab | Becomes |
 | --- | --- |
 | `Geodis Key` + `<site> - HC` | shift tags (`shifts` collection) |
 | `2026 - Beeline Reqs` | open orders (`requisitions` collection) |
+| `2026 Attendance` + `Attendance Tracker` | occurrences (`attendance` collection) |
 
 `plx/sync.json` records when it last landed, what came out of it, and any
-warnings, which is what the Refresh button on the reconciliation page shows.
+warnings, which is what the bar on the reconciliation page and the note on the
+Attendance tab both read.
 
-### A refresh never wipes a person's work
+### An upload never wipes a person's work
 
 The sheet does not track `filled` or where a requisition stands, so those are
 carried over from whatever was already stored. A req that has **left** the sheet
@@ -240,15 +262,14 @@ a single CSV-ish sheet. So the push is rejected unless at least one recognisable
 tab is present, and the error names the tabs it did find. Without that, the wrong
 file would record a perfectly successful-looking sync that produced nothing.
 
-### The Refresh button
+### `?plxRefresh=1` has no caller
 
-`?plxRefresh=1` (browser origin, not the sync key) calls a Power Automate
-**"When an HTTP request is received"** flow whose URL is held in the optional
-`PLX_FLOW_URL` secret — server-side, because anyone holding that URL could
-trigger the flow.
-
-The secret is optional. Without it the button still works: it reloads the last
-workbook that was pushed and says so, rather than failing opaquely.
+The endpoint is still in `functions/index.js`: given the optional `PLX_FLOW_URL`
+secret it calls a Power Automate **"When an HTTP request is received"** flow.
+Nothing in the browser calls it any more. The workbook is in a tenant no flow
+here can reach, so a button offering to fetch it promised something it could not
+deliver — and, worse, sent whoever pressed it to a flow run history to debug a
+flow that does not exist. Uploading is the only route in.
 
 ## Shift tags
 

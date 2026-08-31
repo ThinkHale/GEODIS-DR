@@ -58,23 +58,35 @@ t('suite nav still visible alongside it', !!$('.suite-nav'));
 t('legacy standalone header stays parked on body', $('body > header').parentNode===d.body);
 t('suite renders its own header', $('.suite-top').closest('.suite-main')!==null);
 
-console.log('— writes go to the shared server store —');
+/* Attendance is deliberately NOT the example here. It is logged on the PLX
+   workbook and only read back, so the tool offers no way to add one -- a point
+   balance the workbook never hears about is worse than no balance at all. */
+console.log('— attendance is read-only —');
 click($('[data-nav="attendance"]'));
-click($('[data-add="attendance"]'));
+t('nothing offers to log an occurrence', !$('[data-add="attendance"]'));
+t('and the page says where they are logged', d.body.textContent.includes('Logged on the PLX workbook'));
+const wb=$$('a[href*="sharepoint.com"]');
+t('linking out to the sheet that owns them', wb.length>0);
+t('opening in its own tab', wb[0].target==='_blank' && /noopener/.test(wb[0].rel));
+
+console.log('— writes go to the shared server store —');
+click($('[data-nav="timeoff"]'));
+click($('[data-add="timeoff"]'));
 t('modal opened', !!$('#suite-modal'));
-const form=$('[data-form="attendance"]');
+const form=$('[data-form="timeoff"]');
 form.querySelector('[name="badge"]').value='1001';
-form.querySelector('[name="date"]').value='2026-08-24';
-form.querySelector('[name="points"]').value='1';
+form.querySelector('[name="start"]').value='2026-08-24';
+form.querySelector('[name="end"]').value='2026-08-24';
+form.querySelector('[name="hours"]').value='8';
 form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
 setTimeout(()=>{
-  const p=posted.filter(x=>x.url&&x.url.includes('attendance=1'));
+  const p=posted.filter(x=>x.url&&x.url.includes('timeoff=1'));
   t('one POST issued', p.length===1);
   t('POST carries the badge, not a fake associate id', p[0].body.badge==='1001');
   t('POST carries a stable id', typeof p[0].body.id==='string'&&p[0].body.id.length>0);
   t('nothing written to localStorage', w.localStorage.length===0);
-  t('point landed on the profile', w.GEODISSuite.profile('1001').points===1);
-  t('standing recomputed', w.GEODISSuite.profile('1001').standing==='Good standing');
+  t('it landed on the profile', w.GEODISSuite.profile('1001').timeOff.length===1);
+  t('with the hours it was saved with', w.GEODISSuite.profile('1001').timeOff[0].hours===8);
 
   console.log('— one market across both views —');
   click($('[data-nav="overview"]'));

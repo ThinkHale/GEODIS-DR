@@ -55,11 +55,16 @@ const send = updatedAt => d.dispatchEvent(new w.CustomEvent('geodis:records', { 
   send(hoursAgo(21));
   t('21 hours means two runs were missed', d.body.textContent.indexOf('should refresh twice a day') !== -1);
 
+  /* The workbook is not automated -- it lives in another Microsoft tenant, so
+     somebody uploads it. Its absence must point at the upload, not at a Power
+     Automate flow that was never going to fetch it. */
   console.log('— a workbook that has never arrived —');
   send(hoursAgo(3));
   click($('[data-nav="reconciliation"]'));
-  t('says so plainly', d.body.textContent.indexOf('never arrived from SharePoint') !== -1);
-  t('and tells you where to look', d.body.textContent.indexOf('reauthorising') !== -1);
+  t('says so plainly', d.body.textContent.indexOf('No PLX workbook has been uploaded yet') !== -1);
+  t('and tells you where to do it', d.body.textContent.indexOf('On-Premise page') !== -1);
+  t('offering a way there', !!$('.plx-bar [data-nav="coverage"]'));
+  t('and never offers to fetch it from SharePoint', !$('[data-plx-refresh]'));
   t('rather than showing a bare zero', d.body.textContent.indexOf('0 shift tags') === -1);
 
   console.log('— a workbook that arrived, then stopped —');

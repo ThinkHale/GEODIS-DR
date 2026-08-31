@@ -11,15 +11,23 @@
   var MAX_ROWS = 250;   // cap rendered rows; the roster runs to the hundreds
 
   /* GEODIS policy: PTO is 0, an absence is 1, a no-call/no-show is 2, and a late
-     or early-out is half an absence. Editable on every entry -- these are the
-     starting points so the common cases are one click.
+     or early-out is half an absence.
 
-     attendance-import.js MUST agree with this. The same occurrence cannot be
-     worth more because it arrived by import than because somebody typed it. */
+     Attendance is not typed into this tool. It is logged on the PLX workbook and
+     read back from it, so this scale exists to READ that sheet by -- never to
+     score an occurrence the tool invented. attendance-import.js MUST agree with
+     it: the same occurrence cannot be worth more because of how it arrived. */
   var TYPE_POINTS = {
     'Present': 0, 'Late': 0.5, 'Early Out': 0.5, 'Absent': 1,
     'No Call / No Show': 2, 'Excused': 0
   };
+  /* The attendance tab of the PLX workbook -- where occurrences are actually
+     logged. An occurrence typed into this tool would never reach that sheet, and
+     a point balance that exists in only one of the two is worse than none, so
+     the tool reads attendance and links out to it rather than offering to add. */
+  var PLX_ATTENDANCE_URL = 'https://geodis.sharepoint.com/:x:/r/sites/chicago-campus-operations/' +
+    '_layouts/15/Doc.aspx?sourcedoc=%7B22D6D56E-60DC-4966-8143-0DA8DEF03515%7D' +
+    '&file=PLX%20-%20Geodis%20Spreadsheet.xlsx&action=default&mobileredirect=true';
   var TIME_OFF_TYPES = ['PTO', 'VTO', 'Sick', 'Personal', 'LOA'];
   /* How a documented absence is characterised. "Badge / system issue" matters
      most: it is the way to record that the person WAS here and the reader missed
@@ -27,21 +35,25 @@
   var DISPOSITIONS = ['', ScheduleCore.PRESENT_DISPOSITION, 'Called in', 'No call / no show',
     'Approved time off', 'Late arrival', 'Left early', 'Reassigned', 'Terminated',
     'Badge / system issue', 'Other'];
-  // Disposition -> the occurrence a one-click log would create. null means the
-  // absence is explained and no occurrence should be offered at all.
+  /* Disposition -> what the workbook should end up carrying for that day. It is
+     shown, never written: whoever documents the floor here still logs the
+     occurrence on the sheet, and knowing what the day is worth before they get
+     there is the whole point. null means the absence is explained and costs
+     nothing, so there is nothing to carry over. */
   var DISPOSITION_OCCURRENCE = {
     // They were here -- the reader saw a punch out, or missed the punch in.
     'Present': null,
-    'Called in': { type: 'Absent', points: 1 },
-    'No call / no show': { type: 'No Call / No Show', points: 2 },
+    'Called in': { type: 'Absent', points: TYPE_POINTS['Absent'] },
+    'No call / no show': { type: 'No Call / No Show', points: TYPE_POINTS['No Call / No Show'] },
     'Approved time off': null,
-    'Late arrival': { type: 'Late', points: 0.5 },
-    'Left early': { type: 'Early Out', points: 0.5 },
+    'Late arrival': { type: 'Late', points: TYPE_POINTS['Late'] },
+    'Left early': { type: 'Early Out', points: TYPE_POINTS['Early Out'] },
     'Reassigned': null,
     // Gone. Nobody accrues attendance points after they leave, and the empty
     // shift is a staffing problem rather than a disciplinary one.
     'Terminated': null,
     'Badge / system issue': null,
+    // Something happened, but not something the policy scale scores.
     'Other': { type: 'Absent', points: 0 }
   };
   var NAV = [
@@ -80,7 +92,7 @@
     reqWhen: 'all',          // start-date window
     connectFor: '', connectQuery: '', connectKind: 'timeoff',
     payroll: { periods: [], week: '', period: null, tab: 'discrepancies', loading: false },
-    plx: { sync: null, busy: false, note: '' },   // the live workbook from SharePoint
+    plx: { sync: null, busy: false, note: '' },   // the last PLX workbook uploaded
     auth: { signedIn: false, email: '', account: null, loading: false, error: '' },
     admin: { users: [], locations: [], shiftTypes: [], appConfig: [], loaded: false, tab: 'account' },
     shiftKey: null,          // parsed "Geodis Key" vocabulary, when a workbook is loaded
@@ -323,6 +335,8 @@
   function icon(name) {
     return {
       overview: '<path d="M3 11l9-8 9 8v9a1 1 0 01-1 1h-5v-7H9v7H4a1 1 0 01-1-1z"/>',
+      tasks: '<path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/>' +
+        '<rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12l2 2 4-4"/>',
       associates: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0116 0"/>',
       coverage: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
       attendance: '<rect x="3" y="5" width="18" height="16" rx="1"/><path d="M8 3v4m8-4v4M3 10h18m-13 5l2 2 5-5"/>',
@@ -370,7 +384,8 @@
        noticed -- on the floor, mid-check, reading a form. The count is what is
        urgent, not what is open: a badge showing 40 is wallpaper. */
     var urgent = TasksCore.summarize(openTasks(), new Date()).urgent;
-    var add = '<button class="suite-add" data-add-task title="Raise a task">+' +
+    var add = '<button class="suite-add" data-add-task title="Raise a task">' +
+      '<span class="suite-add-plus">+</span><span class="suite-add-label">Task</span>' +
       (urgent ? '<span class="suite-add-count">' + urgent + '</span>' : '') + '</button>';
     return '<header class="suite-top"><div class="suite-heading"><h1>' + esc(x[0]) + '</h1><p>' + esc(x[1]) + '</p></div>' +
       picker + add + '<div class="suite-user"><span><b>Operations</b></span><div class="suite-avatar">OP</div></div></header>';
@@ -389,6 +404,16 @@
   function hero(title, sub, action, label) {
     return '<div class="module-hero"><div><h2>' + esc(title) + '</h2><p>' + esc(sub) + '</p></div>' +
       (action ? '<button class="suite-btn primary" data-add="' + action + '">+ ' + esc(label) + '</button>' : '') + '</div>';
+  }
+  // The same hero for a page that only reads: its action opens the sheet that
+  // owns the data, in a new tab, instead of a form that writes here.
+  function heroLink(title, sub, href, label) {
+    return '<div class="module-hero"><div><h2>' + esc(title) + '</h2><p>' + esc(sub) + '</p></div>' +
+      extLink(href, label, 'suite-btn primary') + '</div>';
+  }
+  function extLink(href, label, cls) {
+    return '<a class="' + cls + '" href="' + esc(href) + '" target="_blank" rel="noopener">' +
+      esc(label) + '<span class="ext-mark" aria-hidden="true">\u2197</span></a>';
   }
   function filters(placeholder) {
     return '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
@@ -807,14 +832,14 @@
 
       '<div class="suite-grid"><div class="suite-stack">' +
       '<section class="suite-panel"><div class="suite-panel-head"><h2>Attendance history</h2>' +
-      '<div class="suite-actions"><button class="suite-btn primary" data-add="attendance" data-badge="' + esc(p.badge) + '">+ Log occurrence</button></div></div>' +
+      '<div class="suite-actions">' + extLink(PLX_ATTENDANCE_URL, 'Open the workbook', 'suite-btn') + '</div></div>' +
       (p.attendance.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
-        '<th>Date</th><th>Type</th><th>Minutes</th><th>Points</th><th>Notes</th><th></th></tr></thead><tbody>' +
+        '<th>Date</th><th>Type</th><th>Minutes</th><th>Points</th><th>Notes</th></tr></thead><tbody>' +
         p.attendance.map(function (a) {
-          return '<tr><td>' + esc(a.date) + '</td><td>' + esc(a.type) + '</td><td>' + esc(a.minutes || 0) + '</td>' +
-            '<td>' + ptoPoints(a) + '</td><td class="detail-cell">' + esc(a.notes || '') + '</td>' +
-            '<td><button class="suite-btn danger" data-del="attendance|' + esc(a.id) + '">Remove</button></td></tr>';
-        }).join('') + '</tbody></table></div>' : empty('No occurrences logged')) + '</section>' +
+          return '<tr><td>' + esc(a.date) + '</td><td>' + esc(a.type) + '</td><td>' + minutesCell(a) + '</td>' +
+            '<td>' + ptoPoints(a) + '</td><td class="detail-cell">' + esc(a.notes || '') + '</td></tr>';
+        }).join('') + '</tbody></table></div>'
+        : empty('No occurrences logged', 'Occurrences arrive with the PLX workbook.')) + '</section>' +
 
       '<section class="suite-panel"><div class="suite-panel-head"><h2>Performance</h2></div>' +
       (m ? '<div class="perf-grid">' +
@@ -1359,10 +1384,12 @@
       '<input class="suite-input cov-reason" data-doc-key="' + esc(key) + '" data-doc-name="' + esc(r.name) +
       '" data-doc-badge="' + esc(r.badge || '') + '" value="' + esc(doc ? doc.reason : '') +
       '" placeholder="Reason…">' +
-      // Logging an occurrence is a policy call, so it is offered, never automatic.
-      (occ && r.badge ? '<button class="suite-btn cov-log" data-log-badge="' + esc(r.badge) +
-        '" data-log-type="' + esc(occ.type) + '" data-log-points="' + occ.points +
-        '" data-log-reason="' + esc(doc.reason || doc.disposition) + '">Log ' + esc(occ.type) + '</button>' : '') +
+      /* What this day is worth, said rather than written. The occurrence itself
+         belongs on the PLX workbook: logging it here would put a point balance
+         in the tool that the sheet the site runs on never hears about. */
+      (occ ? '<span class="cov-occ" title="Log this on the attendance tab of the PLX workbook.">' +
+        esc(occ.type) + ' · ' + esc(occ.points) + ' pt' + (occ.points === 1 ? '' : 's') +
+        ' on the workbook</span>' : '') +
       (occ === null ? '<span class="cov-excused">Excused · no points</span>' : '') +
       '</div>';
   }
@@ -1715,6 +1742,25 @@
     reader.readAsArrayBuffer(file);
   }
 
+  /* Attendance is not entered here, so the page has to say where it IS entered
+     and how stale the copy on screen is. A read-only table with no explanation
+     reads as a broken page; one that names the sheet and links to it reads as
+     the sheet's window, which is what it is. */
+  function workbookNote() {
+    var sync = state.plx.sync;
+    return '<section class="suite-panel plx-bar"><div class="plx-info">' +
+      '<strong>Logged on the PLX workbook</strong>' +
+      '<span>Occurrences and points are recorded on the workbook\u2019s attendance tab, not in this ' +
+      'tool. This page reads that sheet, so anything typed here would never reach it \u2014 log it ' +
+      'on the workbook and it appears here on the next upload.</span>' +
+      (sync && sync.syncedAt
+        ? '<span>Last read from the workbook ' + esc(shortWhen(sync.syncedAt)) +
+          ' (' + esc(ageLabel(sync.syncedAt)) + ').</span>'
+        : '<span class="warn-text">No workbook has been uploaded yet, so nothing has been read from ' +
+          'the attendance tab. Upload it on the On-Premise page.</span>') +
+      '</div></section>';
+  }
+
   /* ---------- attendance ---------- */
   function attendance() {
     if (!state.records) return needsRoster();
@@ -1736,7 +1782,10 @@
     var rows = all.slice(0, MAX_ROWS);
     var orphans = SuiteData.unmatched(state.profiles, state.stores.attendance);
 
-    return hero('Attendance', 'Occurrences and points, joined to the assignment roster by badge.', 'attendance', 'Log occurrence') +
+    return heroLink('Attendance',
+        'Occurrences and points read from the PLX workbook, joined to the assignment roster by badge.',
+        PLX_ATTENDANCE_URL, 'Open the attendance tab') +
+      workbookNote() +
       orphanNote(orphans) +
       '<section class="suite-panel">' +
       '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
@@ -1746,10 +1795,10 @@
         sortHead('attendance', 'name', 'Associate') +
         sortHead('attendance', 'location', 'Site / account') +
         sortHead('attendance', 'type', 'Type') +
-        '<th title="Minutes late or short. Only set on an occurrence logged by hand; the workbook records what happened and on which day, never for how long.">Minutes</th>' +
+        '<th title="Minutes late or short. The workbook records what happened and on which day, never for how long, so only occurrences logged by hand before this page went read-only carry one.">Minutes</th>' +
         sortHead('attendance', 'points', 'Points') +
         '<th title="This associate\u2019s total across every occurrence -- not a running total down this table.">Balance</th>' +
-        '<th>Notes</th><th></th></tr></thead><tbody>' +
+        '<th>Notes</th></tr></thead><tbody>' +
         rows.map(function (a) {
           var p = profile(a.badge);
           return '<tr><td>' + esc(a.date) + '</td>' +
@@ -1761,10 +1810,11 @@
             '<td>' + esc(a.type) + '</td><td>' + minutesCell(a) + '</td>' +
             '<td>' + ptoPoints(a) + '</td>' +
             '<td>' + (p ? '<b>' + esc(p.points) + '</b>' : '<span class="sub">&mdash;</span>') + '</td>' +
-            '<td class="detail-cell">' + esc(a.notes || '') + '</td>' +
-            '<td><button class="suite-btn danger" data-del="attendance|' + esc(a.id) + '">Remove</button></td></tr>';
+            '<td class="detail-cell">' + esc(a.notes || '') +
+              (a.source ? '<div class="sub">' + esc(a.source) + '</div>' : '') + '</td></tr>';
         }).join('') + '</tbody></table></div>' + rowCap(rows.length, all.length)
-        : empty('No attendance records', 'Log an occurrence, or import the daily attendance report.')) +
+        : empty('No attendance records',
+            'Occurrences arrive with the PLX workbook. Upload it on the On-Premise page to pull the attendance tab through.')) +
       '</section>';
   }
 
@@ -1997,7 +2047,7 @@
         t.title + ' ' + t.detail + ' ' + t.name + ' ' + t.badge).toLowerCase().indexOf(q) !== -1;
     }), now);
 
-    return hero('Tasks', 'Everything outstanding, from wherever it was raised. A task stays until somebody marks it complete.', 'task', 'Raise a task') +
+    return hero('Tasks', 'Everything outstanding, from wherever it was raised. A task stays until somebody marks it complete.') +
       '<div class="metric-strip">' +
       metric('Urgent', sum.urgent, 'Past the time they should have moved', sum.urgent ? 'orange' : 'green') +
       metric('Due soon', sum.due, 'In the last quarter of their window') +
@@ -3100,11 +3150,6 @@
       plxBar() + '<div id="recon-mount"></div>';
   }
 
-  /* The live PLX workbook lives in SharePoint, which the browser cannot read --
-     different origin, and it needs Microsoft 365 auth this tool does not have.
-     Power Automate pushes it here instead, so this button asks for a fresh pull
-     and then reloads. When no on-demand flow is configured it still reloads
-     whatever was last pushed, and says which of the two just happened. */
   /* A feed that stops arriving looks exactly like a feed with nothing new, and
      the difference only showed up in Power Automate's raw output. Anything the
      tool depends on being refreshed says how old it is, and says so loudly once
@@ -3140,12 +3185,11 @@
         ? '<span>From the PLX workbook · ' + esc(sync.shiftTags || 0) + ' shift tags across ' +
           esc(sync.sites || 0) + ' sites · ' + esc(sync.openOrders || 0) + ' open orders · synced ' +
           esc(when) + ' (' + esc(ageLabel(sync.syncedAt)) + ')</span>'
-        : '<span class="warn-text">The PLX workbook has never arrived from SharePoint. ' +
-          'Check the flow run history — a 401 there means its SharePoint connection needs reauthorising.</span>') +
+        : '<span class="warn-text">No PLX workbook has been uploaded yet, so there is nothing ' +
+          'to reconcile against. Upload it on the On-Premise page.</span>') +
       (p.note ? '<span class="plx-note">' + esc(p.note) + '</span>' : '') +
       '</div>' +
-      '<button class="suite-btn primary" data-plx-refresh ' + (p.busy ? 'disabled' : '') + '>' +
-      (p.busy ? 'Refreshing…' : 'Refresh from SharePoint') + '</button></section>' +
+      '<button class="suite-btn" data-nav="coverage">Upload a workbook</button></section>' +
       (sync && sync.warnings && sync.warnings.length
         ? '<div class="warn-banner cov-warn"><strong>From the last workbook</strong><ul>' +
           sync.warnings.slice(0, 6).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') +
@@ -3154,42 +3198,6 @@
         : '');
   }
 
-  function refreshPlx() {
-    if (state.plx.busy) return;
-    state.plx.busy = true;
-    state.plx.note = '';
-    render();
-    var before = state.plx.sync && state.plx.sync.syncedAt;
-    SuiteData.requestPlxRefresh().then(function (r) {
-      // A triggered pull takes a moment to come back, so give the flow a beat
-      // before reading, then say plainly whether anything actually moved.
-      var wait = r && r.triggered ? 4000 : 0;
-      return new Promise(function (done) { setTimeout(done, wait); }).then(function () {
-        return SuiteData.loadPlxSync();
-      }).then(function (sync) {
-        state.plx.sync = sync;
-        if (r && r.triggered) {
-          state.plx.note = sync.syncedAt && sync.syncedAt !== before
-            ? 'Pulled a fresh copy just now.'
-            : 'Asked SharePoint for a fresh copy; it has not landed yet. Refresh again in a moment.';
-        } else {
-          state.plx.note = (r && r.message) || 'Reloaded the last workbook that was pushed.';
-        }
-        return SuiteData.loadCollection('shifts');
-      }).then(function (shifts) {
-        state.stores.shifts = shifts;
-        return SuiteData.loadCollection('requisitions');
-      }).then(function (reqs) {
-        state.stores.requisitions = reqs;
-        rebuild();
-      });
-    }).catch(function (err) {
-      state.plx.note = 'Could not refresh: ' + err.message;
-    }).then(function () {
-      state.plx.busy = false;
-      render();
-    });
-  }
   function mountRecon() {
     var main = document.getElementById('recon-main'), slot = document.getElementById('recon-mount');
     if (main && slot && main.parentNode !== slot) slot.appendChild(main);
@@ -3249,15 +3257,7 @@
   }
   function modal(type, badge) {
     var fields = '', title = '';
-    if (type === 'attendance') {
-      title = 'Log attendance occurrence';
-      fields = field('Associate', 'badge', 'badge', badge || '') +
-        field('Date', 'date', 'date', today()) +
-        field('Type', 'type', 'select', 'Absent', Object.keys(TYPE_POINTS)) +
-        field('Minutes', 'minutes', 'number', '0') +
-        field('Policy points', 'points', 'number', '1') +
-        field('Notes', 'notes', 'text', '');
-    } else if (type === 'timeoff') {
+    if (type === 'timeoff') {
       title = 'New time-off request';
       fields = field('Associate', 'badge', 'badge', badge || '') +
         field('Type', 'type', 'select', 'PTO', TIME_OFF_TYPES) +
@@ -3317,7 +3317,9 @@
       alert('That record could not be removed.\n\n' + err.message);
     });
   }
-  var LOCAL_KEY = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions',
+  /* Attendance is absent on purpose: it is read from the PLX workbook and
+     written nowhere, so it has no writer key here. */
+  var LOCAL_KEY = { timeoff: 'timeOff', requisitions: 'requisitions',
     discrepancies: 'discrepancies', users: 'users', locations: 'locations', shiftTypes: 'shiftTypes',
     appConfig: 'appConfig', tasks: 'tasks', contacts: 'contacts' };
 
@@ -3505,7 +3507,6 @@
     if (lk) { linkModal(lk.dataset.linkEid, lk.dataset.linkName); return; }
     var conn = e.target.closest('[data-connect]');
     if (conn) { connectModal(conn.dataset.connect, conn.dataset.connectKind || 'timeoff'); return; }
-    if (e.target.closest('[data-plx-refresh]')) { refreshPlx(); return; }
     var ptab = e.target.closest('[data-payroll-tab]');
     if (ptab) {
       state.payroll.tab = ptab.dataset.payrollTab;
@@ -3549,17 +3550,6 @@
       navigator.clipboard.writeText(ScheduleCore.toTsv(exx, false)).then(function () {
         copy.textContent = 'Copied ' + exx.rows.length + ' rows';
       }).catch(function () { alert('Could not copy to the clipboard.'); });
-      return;
-    }
-    var log = e.target.closest('[data-log-badge]');
-    if (log) {
-      var d = log.dataset;
-      persist('attendance', {
-        id: 'AT' + Date.now(), badge: d.logBadge,
-        date: ScheduleCore.isoDate(coverageAsOf()),
-        type: d.logType, minutes: 0, points: Number(d.logPoints),
-        notes: d.logReason || 'From shift coverage'
-      }, 'attendance');
       return;
     }
     var reqEx = e.target.closest('[data-req-expand]');
@@ -3769,13 +3759,6 @@
       var d = new Date(e.target.value);
       if (!isNaN(d.getTime())) { state.coverage.asOf = d; render(); }
     }
-  });
-
-  // Picking an attendance type fills in that type's default point value.
-  document.addEventListener('change', function (e) {
-    if (!e.target.closest('[data-form="attendance"]') || e.target.name !== 'type') return;
-    var pts = e.target.form.querySelector('[name="points"]');
-    if (pts) pts.value = TYPE_POINTS[e.target.value];
   });
 
   document.addEventListener('input', function (e) {

@@ -105,6 +105,18 @@ const upload = (kind, aoa, name) => {
   t('on all of them', seen.every(Boolean));
   t('and next to the user block',
     $('.suite-add').nextElementSibling && $('.suite-add').nextElementSibling.classList.contains('suite-user'));
+  t('it says what it raises, rather than being a bare +',
+    $('.suite-add-label').textContent === 'Task');
+
+  /* One + button, not two. The Tasks page used to carry its own, which made the
+     top-bar one look like it did something else. */
+  click($('[data-nav="tasks"]'));
+  t('the Tasks page does not repeat it', !$('[data-add="task"]'));
+  t('and every tab has an icon in the sidebar, Tasks included',
+    Array.from(d.querySelectorAll('.suite-nav-btn')).every(b => {
+      const svg = b.querySelector('svg');
+      return svg && svg.innerHTML.trim().length > 0;
+    }));
 
   console.log('— work funnels in without being copied —');
   click($('[data-nav="tasks"]'));

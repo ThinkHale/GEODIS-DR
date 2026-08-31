@@ -120,15 +120,22 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   t('keyed to the person', docPost.body.document.key === 'b:80-FPORRA4387');
   t('disposition saved', docPost.body.document.disposition === 'Called in');
   await settle(40);
-  t('a one-click occurrence is now offered', !!$('[data-log-badge]'));
-  t('it carries the policy points, not zero', $('[data-log-badge]').dataset.logPoints === '1');
+  /* The occurrence is NOT logged from here. Attendance lives on the PLX
+     workbook, and a point balance the workbook never hears about is worse than
+     none -- so the row says what the day is worth and leaves the logging there. */
+  t('what the day costs is stated', !!$('.cov-occ'));
+  t('with the policy points, not zero', $('.cov-occ').textContent.indexOf('1 pt') !== -1);
+  t('and named as the workbook\u2019s job', $('.cov-occ').textContent.indexOf('workbook') !== -1);
+  t('nothing offers to log it here', !$('[data-log-badge]'));
+  t('and nothing was written to attendance',
+    !posts.some(p => p.url && p.url.indexOf('attendance=1') !== -1));
 
-  console.log('— an excused disposition offers no occurrence —');
+  console.log('— an excused disposition costs nothing —');
   const disp2 = $('.cov-disp');
   disp2.value = 'Badge / system issue';
   disp2.dispatchEvent(new w.Event('change', { bubbles: true }));
   await settle(60);
-  t('no occurrence button for a reader fault', !$('[data-log-badge]'));
+  t('no occurrence at all for a reader fault', !$('.cov-occ'));
   t('shown as excused instead', d.body.textContent.indexOf('Excused') !== -1);
 
   console.log('— building the spreadsheet paste —');

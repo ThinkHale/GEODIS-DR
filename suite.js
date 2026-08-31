@@ -585,12 +585,26 @@
     // Everything below is scoped to the selected market -- see profilesInMarket().
     var all = profilesInMarket();
     var timeOff = byBadgeInMarket(state.stores.timeOff);
-    var reqs = requisitionsInMarket();
+    /* Beeline requests come off the board, not the raw records. The import
+       writes beelineOpenings/hired, namespaced away from the openings/filled the
+       PLX workbook sync owns, so reading the records directly saw only the
+       handful of requests the workbook also lists and understated the shortfall
+       by hundreds of seats. */
+    var reqBoardAll = reqBoard();
+    var reqRows = reqBoardInMarket(reqBoardAll);
+    var reqSummary = summarizeVisible(reqRows);
+    var otherReqRows = otherReqs(reqBoardAll, 'workbook').concat(otherReqs(reqBoardAll, 'manual'));
     var active = all.filter(function (p) { return p.status === 'Active'; });
     var exceptions = all.filter(function (p) { return !p.reconciled; }).length;
     var pending = timeOff.filter(function (t) { return TimeOffCore.needsAction(t.status); }).length;
-    var open = reqs.filter(function (r) { return r.status !== 'Filled'; })
-      .reduce(function (n, r) { return n + Math.max(0, Number(r.openings || 0) - Number(r.filled || 0)); }, 0);
+    /* Seats still to fill, from EVERY source. A request the PLX workbook has and
+       Beeline does not is still a position somebody has to fill, so leaving it out
+       of the queue would repeat the bug this figure was just fixed for. */
+    var otherShort = otherReqRows.filter(function (r) { return r.status !== 'Filled'; })
+      .reduce(function (n, r) {
+        return n + Math.max(0, Number(r.openings || 0) - Number(r.filled || 0));
+      }, 0);
+    var open = (reqSummary.shortBy == null ? 0 : reqSummary.shortBy) + otherShort;
     var atRisk = all.filter(function (p) { return p.points >= 5; }).length;
 
     /* "Upcoming" has to mean upcoming, not "most recent". A request is upcoming
@@ -618,7 +632,10 @@
       t.html + '</section>' +
       '<section class="suite-panel"><div class="suite-panel-head"><h2>Beeline requests &amp; coverage</h2>' +
       '<div class="suite-actions"><button class="suite-btn" data-nav="requisitions">View requests</button></div></div>' +
-      (reqs.length ? reqTable(reqs.slice(0, 5), true) : empty('No Beeline requests yet')) +
+      (reqRows.length
+        ? overviewReqNote(reqSummary, otherReqRows, otherShort) + overviewReqTable(reqRows.slice(0, 5))
+        : otherReqRows.length ? reqTable(otherReqRows.slice(0, 5), true)
+        : empty('No Beeline requests yet')) +
       '</section></div><div class="suite-stack">' +
       '<section class="suite-panel"><div class="suite-panel-head"><h2>Upcoming PTO</h2>' +
       '<div class="suite-actions"><button class="suite-btn" data-nav="timeoff">View all</button></div></div>' +
@@ -630,6 +647,44 @@
       alertRow(open, 'Unfilled Beeline request positions', 'requisitions') +
       alertRow(atRisk, 'Associates at 5+ attendance points', 'attendance') +
       '</section></div></div>';
+  }
+
+  /* The dashboard's request panel. Deliberately not the full table: five rows,
+     the columns somebody scanning a dashboard acts on, and no expansion. */
+  function overviewReqNote(s, others, otherShort) {
+    var bits = ['<b>' + s.reqs + '</b> open request' + (s.reqs === 1 ? '' : 's')];
+    if (s.requested != null) {
+      bits.push('<b>' + (s.hiredAgainstRequested || 0) + '</b> of <b>' + s.requested + '</b> seats filled');
+      if (s.shortBy) bits.push('<b class="warn-text">' + s.shortBy + '</b> short');
+    }
+    if (s.reqsWithOpenings < s.reqs) {
+      // Otherwise "12 of 40 seats filled" reads as if it covered all of them.
+      bits.push('<span class="sub">openings known for ' + s.reqsWithOpenings + ' of ' + s.reqs + '</span>');
+    }
+    /* Requests only the workbook or a person knows about are counted apart rather
+       than folded in: their seats are real, but their figures come from a
+       different place and averaging the two would say neither clearly. */
+    if ((others || []).length) {
+      bits.push('<span class="sub">plus <b>' + others.length + '</b> not in Beeline' +
+        (otherShort ? ', <b class="warn-text">' + otherShort + '</b> short' : '') + '</span>');
+    }
+    return '<div class="overview-req-note">' + bits.join(' · ') + '</div>';
+  }
+  function overviewReqTable(rows) {
+    return '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
+      '<th>Request</th><th>Market</th><th>Submitted</th><th>Filled</th></tr></thead><tbody>' +
+      rows.map(function (r) {
+        return '<tr><td><div class="name">' + esc(r.jobPosition || 'Beeline request') + '</div>' +
+          '<div class="sub">' + esc(r.id) + (r.startDate ? ' · starts ' + esc(r.startDate) : '') + '</div></td>' +
+          '<td>' + esc(r.market || '—') + '</td>' +
+          '<td>' + r.candidateCount + '</td>' +
+          '<td>' + (r.fillPct == null
+            ? '<span class="score none">—</span>'
+            : '<span class="score ' + (r.fillPct < 70 ? 'bad' : r.fillPct < 90 ? 'warn' : '') + '">' +
+              r.hired + ' / ' + r.requested + '</span>') +
+          (r.shortBy ? '<div class="sub warn-text">' + r.shortBy + ' short</div>' : '') +
+          '</td></tr>';
+      }).join('') + '</tbody></table></div>';
   }
 
   /* Real 7-day attendance rate, computed from logged occurrences. "Rate" is the

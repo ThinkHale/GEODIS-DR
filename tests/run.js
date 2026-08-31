@@ -14,6 +14,7 @@ const SUITES = [
   { file: 'collections.test.js', name: 'shared collections (functions/index.js)', dom: false },
   { file: 'reqs.test.js', name: 'Beeline requests + candidates (reqs-core.js)', dom: false },
   { file: 'connections.test.js', name: 'connecting the workbook roster to profiles', dom: false },
+  { file: 'pto-tracker.test.js', name: 'the shared IL PTO tracker', dom: false },
   { file: 'overview-reqs.test.js', name: 'the dashboard Beeline requests panel', dom: true },
   { file: 'connect-flow.test.js', name: 'making a connection from Settings', dom: true },
   { file: 'coverage.test.js', name: 'schedule vs. on-premise coverage (schedule-core.js)', dom: false },

@@ -26,7 +26,7 @@ w.fetch=(url,opt)=>{
   const k=u.match(/\?(\w+)=1/); const map={attendance:'attendance',timeoff:'timeOff',requisitions:'requisitions',performance:'performance',shifts:'shifts',discrepancies:'discrepancies'};
   return Promise.resolve({ok:true,json:()=>Promise.resolve({[map[k[1]]]:[]})});
 };
-['auth-core.js','tests/suite-auth-stub.js','reconcile-core.js','suite-data.js','schedule-core.js','shift-key.js','pipeline-core.js','timeoff-core.js','payroll-core.js','tasks-core.js','contacts-core.js','reqs-core.js'].forEach(f=>w.eval(fs.readFileSync(R+f,'utf8')));
+['auth-core.js','tests/suite-auth-stub.js','reconcile-core.js','suite-data.js','schedule-core.js','shift-key.js','pipeline-core.js','timeoff-core.js','payroll-core.js','tasks-core.js','contacts-core.js','reqs-core.js', 'pto-tracker-core.js'].forEach(f=>w.eval(fs.readFileSync(R+f,'utf8')));
 w.eval(html.match(/<script>\n"use strict";([\s\S]*?)<\/script>/)[1]);
 w.eval(fs.readFileSync(R+'suite.js','utf8'));
 

@@ -86,6 +86,7 @@
       associatePto: [], locations: [], appConfig: [], timeclockLinks: [] },
     reqSources: [],          // export files loaded this session, merged before saving
     reqImport: null,         // last import result, for the report shown after
+    ptoImport: null,         // the shared IL PTO tracker's last import
     reqExpanded: {},         // request id -> candidate list open
     reqHealth: 'all',
     reqSite: 'all',          // work-location number, within the chosen market
@@ -1835,6 +1836,109 @@
   }
 
   /* ---------- time off ---------- */
+  /* ---------- the shared IL PTO tracker ----------
+     One workbook, shared with another branch, where GEODIS PTO sits on three tabs
+     and other clients' associates sit on one of them. PtoTrackerCore reads it; the
+     rows become ordinary time-off records and go through the same pipeline as the
+     Forms intake, so nothing downstream has to know where a request came from.
+
+     A row whose EID reaches no profile is still imported. The Time Off tab already
+     surfaces unmatched requests for somebody to connect, and dropping an approved
+     day off because the person has left the active roster would lose it. */
+  var PTO_TRACKER_SOURCE = 'IL Shared PTO Tracker';
+
+  function ptoTrackerLink() {
+    var rows = state.stores.appConfig || state.admin.appConfig || [];
+    var r = rows.filter(function (x) { return x.key === 'ilPtoTrackerUrl'; })[0];
+    return r ? String(r.value || '').trim() : '';
+  }
+
+  // EID (the RC Legacy Contact ID the tracker writes) -> badge.
+  function badgeForEid() {
+    var map = {};
+    allProfiles().forEach(function (p) {
+      var e = String(p.empNumber || '').trim();
+      if (e && !map[e]) map[e] = p.badge;
+    });
+    return function (eid) { return map[String(eid || '').trim()] || ''; };
+  }
+
+  function ptoImportPanel() {
+    var imp = state.ptoImport;
+    var link = ptoTrackerLink();
+    return '<section class="suite-panel pto-import"><div class="suite-panel-head">' +
+      '<h2>Shared IL PTO tracker</h2><div class="suite-actions">' +
+      (link ? '<a class="suite-btn" href="' + esc(link) + '" target="_blank" rel="noopener">Open the spreadsheet</a> ' : '') +
+      '<label class="suite-btn cov-pick primary">Import tracker' +
+      '<input type="file" accept=".xlsx,.xls" data-pto-book></label></div></div>' +
+      '<p class="perf-note">The workbook Chicago and St. Louis share. GEODIS PTO is read from the ' +
+      '<b>30080</b>, <b>GEODIS - 20062</b> and <b>20062 Geodis Processed</b> tabs; rows on 30080 for other ' +
+      'clients are counted and left alone. An import replaces what this tracker last said and does not ' +
+      'touch requests from any other source.' +
+      (link ? '' : ' <span class="warn-text">No spreadsheet link is set — add one under Settings → RC links.</span>') +
+      '</p>' +
+      (imp ? shiftImportReport(imp) : '') + '</section>';
+  }
+
+  function readPtoTracker(file) {
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      try {
+        var wb = XLSX.read(e.target.result, { type: 'array' });
+        var sheets = wb.SheetNames.map(function (n) {
+          return { name: n, aoa: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: '' }) };
+        });
+        var parsed = PtoTrackerCore.parseTracker(sheets);
+        if (!parsed.sheets.length) {
+          throw new Error('None of the GEODIS tabs were found. Expected 30080, GEODIS - 20062 and 20062 Geodis Processed.');
+        }
+        if (!parsed.requests.length) {
+          throw new Error('The GEODIS tabs were read but hold no GEODIS rows.');
+        }
+        var built = PtoTrackerCore.toTimeOffRecords(parsed, {
+          badgeForEid: badgeForEid(), source: PTO_TRACKER_SOURCE, pipeline: TimeOffCore
+        });
+        var merged = PtoTrackerCore.mergeForSave(state.stores.timeOff, built.records, PTO_TRACKER_SOURCE);
+
+        state.ptoImport = { headline: 'Saving ' + built.records.length + ' PTO requests…', warnings: [] };
+        render();
+
+        SuiteData.replaceCollection('timeoff', merged).then(function () {
+          state.stores.timeOff = merged;
+          rebuild();
+          var others = Object.keys(parsed.otherClients).map(function (c) {
+            return parsed.otherClients[c] + ' ' + c;
+          }).join(', ');
+          state.ptoImport = {
+            headline: built.records.length + ' GEODIS PTO requests imported from ' + parsed.sheets.length +
+              ' tab(s) · ' + (built.records.length - built.unmatched.length) + ' reached an associate',
+            warnings: parsed.warnings.concat(
+              built.unmatched.length
+                ? [built.unmatched.length + ' request(s) name somebody who is not on the current roster — ' +
+                   'usually a past assignment. They are listed below to connect by hand.']
+                : [],
+              parsed.nonGeodis
+                ? [parsed.nonGeodis + ' row(s) on the shared tabs belong to other clients and were left alone' +
+                   (others ? ' (' + others + ')' : '') + '.']
+                : [],
+              parsed.skipped.length ? ['Tabs not read: ' + parsed.skipped.join(', ') + '.'] : []
+            )
+          };
+          render();
+        }).catch(function (err) {
+          state.ptoImport = { failed: true, headline: 'Could not save the PTO requests: ' + err.message, warnings: [] };
+          render();
+        });
+      } catch (err) {
+        console.error(err);
+        state.ptoImport = { failed: true, headline: 'Could not read "' + file.name + '": ' + err.message, warnings: [] };
+        render();
+      }
+    };
+    reader.onerror = function () { alert('Failed to read "' + file.name + '".'); };
+    reader.readAsArrayBuffer(file);
+  }
+
   function timeoff() {
     if (!state.records) return needsRoster();
     if (!state.storesLoaded) return loadingPanel('time-off requests');
@@ -1852,6 +1956,7 @@
 
     var orphans = state.stores.timeOff.filter(function (t) { return !profile(t.badge); });
     return hero('PTO / VTO tracking', 'Approved time off is excused and carries no attendance points.', 'timeoff', 'New request') +
+      ptoImportPanel() +
       (orphans.length ? '<div class="warn-banner"><b>' + orphans.length + '</b> request' +
         (orphans.length === 1 ? '' : 's') + ' could not be matched to an associate on the roster — usually a ' +
         'name typed differently on the form. They are listed below and still need actioning.</div>' : '') +
@@ -2631,7 +2736,9 @@
     { key: 'rcBaseUrl', label: 'RC (Salesforce) base URL',
       hint: 'e.g. https://employbridge.lightning.force.com — a my.salesforce.com host works too. Blank shows no links.' },
     { key: 'rcAssignmentObject', label: 'RC assignment object API name',
-      hint: 'The object an assignment record lives on. TargetRecruit uses TR1__Closing_Report__c; its ids start "a58".' }
+      hint: 'The object an assignment record lives on. TargetRecruit uses TR1__Closing_Report__c; its ids start "a58".' },
+    { key: 'ilPtoTrackerUrl', label: 'Shared IL PTO tracker (SharePoint)',
+      hint: 'The workbook Chicago and St. Louis share. Adds an "Open the spreadsheet" link beside the PTO import.' }
   ];
   function appConfigPanel(admin) {
     var rows = state.admin.appConfig || [];
@@ -3877,6 +3984,9 @@
     }
     var book = e.target.closest('[data-shift-book]');
     if (book && book.files && book.files[0]) { readShiftWorkbook(book.files[0]); return; }
+
+    var ptoBook = e.target.closest('[data-pto-book]');
+    if (ptoBook && ptoBook.files && ptoBook.files[0]) { readPtoTracker(ptoBook.files[0]); return; }
 
     var reqFile = e.target.closest('[data-req-file]');
     if (reqFile && reqFile.files && reqFile.files[0]) { readReqExport(reqFile.files[0]); return; }

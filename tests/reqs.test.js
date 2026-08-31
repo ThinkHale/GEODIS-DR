@@ -402,6 +402,30 @@ t('no openings anywhere means no percentage at all',
 t('every hire is still counted, including on requests with no openings figure',
   mixed.summary.hired >= mixed.summary.hiredAgainstRequested);
 
+console.log('— the work-location number as a first-class field —');
+/* The header scopes by market, so within a view the SITE is what distinguishes one
+   request from another -- and several sites share a city (1502, 1517 and 1519 are
+   all Romeoville), so the number is the identifier and a name only qualifies it. */
+const siteBoard = Q.buildBoard({ sources: [B], locations: locList });
+const siteReq = siteBoard.reqs.find(r => r.id === 'R-1');
+t('the site number is parsed onto the request', siteReq.site === '4805');
+t('so is the city and state', siteReq.city === 'Auburn' && siteReq.state === 'WA');
+t('a request with no work location has no site rather than a bad one', (() => {
+  const noLoc = Q.parseExport([candAoa[0], ['R-9', 'Someone', 'J', '', 'Open', 'S1', '', 'N']], 'x');
+  return Q.buildBoard({ sources: [noLoc] }).reqs[0].site === '';
+})());
+t('learning a site picks up its city, which is what the site is called',
+  lessons.every(l => l.city) && lessons.find(l => l.code === '4805').city === 'Auburn');
+t('two sites in one city are still two sites', (() => {
+  const twoAoa = [candAoa[0],
+    ['R-7', 'A Person', 'J', '1502 - x,,Romeoville,IL,US', 'Open', 'AP1', '', 'N'],
+    ['R-8', 'B Person', 'J', '1517 - y,,Romeoville,IL,US', 'Open', 'BP1', '', 'N']];
+  const b = Q.buildBoard({ sources: [Q.parseExport(twoAoa, 'x')] });
+  const sites = b.reqs.map(r => r.site).sort();
+  return sites.length === 2 && sites[0] === '1502' && sites[1] === '1517' &&
+    b.reqs.every(r => r.city === 'Romeoville');
+})());
+
 console.log('— roster link —');
 const profiles = new Map([
   ['21774830', { badge: '21774830', name: 'Albarran, Maria', market: 'Seattle' }],

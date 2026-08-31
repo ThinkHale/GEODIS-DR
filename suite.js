@@ -55,7 +55,9 @@
     view: new URLSearchParams(location.search).get('view') || 'overview',
     profileBadge: null,
     query: '',
-    sort: { associates: { key: 'name', dir: 1 }, attendance: { key: 'date', dir: -1 } },
+    sort: { associates: { key: 'name', dir: 1 }, attendance: { key: 'date', dir: -1 },
+      // Most short-handed first: the order somebody actually works the list in.
+      requisitions: { key: 'short', dir: -1 } },
     market: (function () {
       try { return localStorage.getItem('badgeCrosscheck.market') || 'all'; } catch (e) { return 'all'; }
     })(),
@@ -74,6 +76,8 @@
     reqImport: null,         // last import result, for the report shown after
     reqExpanded: {},         // request id -> candidate list open
     reqHealth: 'all',
+    reqSite: 'all',          // work-location number, within the chosen market
+    reqWhen: 'all',          // start-date window
     connectFor: '', connectQuery: '', connectKind: 'timeoff',
     payroll: { periods: [], week: '', period: null, tab: 'discrepancies', loading: false },
     plx: { sync: null, busy: false, note: '' },   // the live workbook from SharePoint
@@ -106,6 +110,9 @@
   function setMarket(m, fromRecon) {
     if (state.market === m) return;
     state.market = m;
+    // A site belongs to a market, so a site chosen in the previous one would filter
+    // the new market to nothing and read as an empty tab.
+    state.reqSite = 'all';
     try { localStorage.setItem(MARKET_KEY, m); } catch (e) { /* private mode */ }
     if (!fromRecon) {
       document.dispatchEvent(new CustomEvent('geodis:market', { detail: { market: m, source: 'suite' } }));
@@ -2536,14 +2543,69 @@
         : '');
   }
 
+  /* Start-date windows. A request whose start date has passed and whose seats are
+     not filled is the one somebody is being asked about today, so that is its own
+     bucket rather than something to work out from a column of dates. */
+  var REQ_WHEN = [
+    ['all', 'Any start date'],
+    ['overdue', 'Started, still short'],
+    ['past', 'Start date passed'],
+    ['week', 'Starts within 7 days'],
+    ['month', 'Starts within 30 days'],
+    ['later', 'Starts later than 30 days'],
+    ['none', 'No start date']
+  ];
+  function reqWhenMatch(r, key, today) {
+    if (key === 'all') return true;
+    if (!r.startDate) return key === 'none';
+    if (key === 'none') return false;
+    var days = Math.round((new Date(r.startDate + 'T00:00:00') - today) / 86400000);
+    if (key === 'overdue') return days <= 0 && r.shortBy !== 0;
+    if (key === 'past') return days <= 0;
+    if (key === 'week') return days > 0 && days <= 7;
+    if (key === 'month') return days > 0 && days <= 30;
+    if (key === 'later') return days > 30;
+    return true;
+  }
+
   var REQ_HEALTH = [
     ['all', 'All requests'], ['short', 'Not yet filled'], ['empty', 'Nobody submitted'],
     ['submitted', 'Candidates in flight'], ['partial', 'Partly filled'], ['filled', 'Filled']
   ];
-  function reqFilters(rows) {
+  /* Sites offered are the ones present in the CHOSEN MARKET, not every site in the
+     file: a picker listing sites that cannot match anything is a picker that
+     filters to nothing and looks broken. */
+  function reqSiteOptions(inMarket) {
+    var counts = {};
+    inMarket.forEach(function (r) {
+      if (!r.site) return;
+      counts[r.site] = (counts[r.site] || 0) + 1;
+    });
+    return Object.keys(counts).sort().map(function (code) {
+      var row = inMarket.filter(function (r) { return r.site === code; })[0];
+      var name = siteName(code) || row.city || '';
+      return { code: code, label: code + (name ? ' · ' + name : ''), count: counts[code] };
+    });
+  }
+  function reqFilters(inMarket) {
+    var sites = reqSiteOptions(inMarket);
+    var noSite = inMarket.filter(function (r) { return !r.site; }).length;
     return '<div class="filter-row">' +
       '<input class="suite-input" id="suite-search" value="' + esc(state.query) +
-      '" placeholder="Search by request, job, manager, location, or candidate…">' +
+      '" placeholder="Search by request, job, manager, site, or candidate…">' +
+      (sites.length > 1 || noSite
+        ? '<select class="suite-select" id="req-site"><option value="all">All sites</option>' +
+          sites.map(function (o) {
+            return '<option value="' + esc(o.code) + '" ' + (state.reqSite === o.code ? 'selected' : '') + '>' +
+              esc(o.label) + ' (' + o.count + ')</option>';
+          }).join('') +
+          (noSite ? '<option value="none" ' + (state.reqSite === 'none' ? 'selected' : '') +
+            '>No site number (' + noSite + ')</option>' : '') +
+          '</select>'
+        : '') +
+      '<select class="suite-select" id="req-when">' + REQ_WHEN.map(function (o) {
+        return '<option value="' + o[0] + '" ' + (state.reqWhen === o[0] ? 'selected' : '') + '>' + esc(o[1]) + '</option>';
+      }).join('') + '</select>' +
       '<select class="suite-select" id="req-health">' + REQ_HEALTH.map(function (o) {
         return '<option value="' + o[0] + '" ' + (state.reqHealth === o[0] ? 'selected' : '') + '>' + esc(o[1]) + '</option>';
       }).join('') + '</select></div>';
@@ -2551,19 +2613,53 @@
   function reqMatches(r, q) {
     if (!q) return true;
     if ((r.id + ' ' + r.jobPosition + ' ' + r.hiringManager + ' ' + r.reportsTo + ' ' +
-      r.location + ' ' + r.market).toLowerCase().indexOf(q) !== -1) return true;
+      r.location + ' ' + r.market + ' ' + r.site + ' ' + siteName(r.site)).toLowerCase().indexOf(q) !== -1) return true;
     // Searching a candidate's name should find the request they are sitting on.
     return r.candidates.some(function (c) {
       return (c.name + ' ' + c.beelineId + ' ' + c.externalId).toLowerCase().indexOf(q) !== -1;
     });
   }
   function reqFilter(rows) {
-    var q = state.query.trim().toLowerCase(), h = state.reqHealth;
-    return rows.filter(function (r) {
+    var q = state.query.trim().toLowerCase(), h = state.reqHealth, site = state.reqSite;
+    // Local midnight, so "starts in 3 days" counts calendar days, not 72 hours.
+    var todayLocal = new Date(today() + 'T00:00:00');
+    var out = rows.filter(function (r) {
+      if (site === 'none') { if (r.site) return false; }
+      else if (site !== 'all' && r.site !== site) return false;
       if (h === 'short') { if (r.shortBy === 0) return false; }
       else if (h !== 'all' && r.health !== h) return false;
+      if (!reqWhenMatch(r, state.reqWhen, todayLocal)) return false;
       return reqMatches(r, q);
     });
+    return sortRows(out, 'requisitions', reqSortValue);
+  }
+
+  /* The sort keys the table header offers. 'short' is the default and deliberately
+     puts the most short-handed first, so a request nobody has filled outranks one
+     that is nearly done however the rest of the row reads. */
+  function reqSortValue(r, key) {
+    if (key === 'request') return r.jobPosition || '';
+    if (key === 'site') return r.site || '';
+    if (key === 'positions') return r.requested;
+    if (key === 'submitted') return r.candidateCount;
+    if (key === 'filled') return r.fillPct;
+    if (key === 'start') return r.startDate || '';
+    if (key === 'manager') return r.hiringManager || '';
+    if (key === 'short') return r.shortBy;
+    // sortRows breaks ties on 'name'.
+    return (r.jobPosition || '') + ' ' + r.id;
+  }
+
+  /* When the seat is wanted. A start date already past on a request still short is
+     the one somebody is being asked about, so it says how far past rather than
+     printing a date and leaving the arithmetic to the reader. */
+  function startCell(r) {
+    if (!r.startDate) return '<span class="score none">—</span>';
+    var days = Math.round((new Date(r.startDate + 'T00:00:00') - new Date(today() + 'T00:00:00')) / 86400000);
+    var when = days === 0 ? 'today' : days > 0 ? 'in ' + days + 'd' : Math.abs(days) + 'd ago';
+    var late = days <= 0 && r.shortBy !== 0;
+    return '<div class="name' + (late ? ' warn-text' : '') + '">' + esc(r.startDate) + '</div>' +
+      '<div class="sub' + (late ? ' warn-text' : '') + '">' + esc(when) + '</div>';
   }
 
   function reqHealthChip(r) {
@@ -2579,7 +2675,7 @@
      counts are then the only thing that knows who progressed. */
   function reqCandidateRows(r) {
     if (!r.candidateCount) {
-      return '<tr class="req-detail"><td colspan="7"><div class="req-none">Nobody has been submitted to this request yet.</div></td></tr>';
+      return '<tr class="req-detail"><td colspan="8"><div class="req-none">Nobody has been submitted to this request yet.</div></td></tr>';
     }
     var breakdown = Object.keys(r.statusCounts || {}).map(function (k) {
       return r.statusCounts[k] + ' ' + k.toLowerCase();
@@ -2587,7 +2683,7 @@
     var head = r.candidateCount + ' submitted' + (breakdown ? ' · ' + breakdown : '') +
       (r.hasCandidateStatus ? '' :
         ' <span class="req-note">This export does not say which candidate reached which stage.</span>');
-    return '<tr class="req-detail"><td colspan="7"><div class="req-cands">' +
+    return '<tr class="req-detail"><td colspan="8"><div class="req-cands">' +
       '<div class="req-cands-head">' + head + '</div>' +
       '<table class="suite-table"><thead><tr><th>Candidate</th><th>Status</th><th>Beeline ID</th>' +
       '<th>External ID</th><th>On roster</th></tr></thead><tbody>' +
@@ -2606,17 +2702,26 @@
 
   function beelineReqTable(rows) {
     return '<div class="suite-table-wrap"><table class="suite-table req-table"><thead><tr>' +
-      '<th></th><th>Request</th><th>Market / site</th><th>Positions</th><th>Submitted</th>' +
-      '<th>Filled</th><th>Hiring manager</th></tr></thead><tbody>' +
+      '<th></th>' + sortHead('requisitions', 'request', 'Request') +
+      sortHead('requisitions', 'start', 'Starts') +
+      sortHead('requisitions', 'site', 'Site / market') +
+      sortHead('requisitions', 'positions', 'Positions') +
+      sortHead('requisitions', 'submitted', 'Submitted') +
+      sortHead('requisitions', 'filled', 'Filled') +
+      sortHead('requisitions', 'manager', 'Hiring manager') +
+      '</tr></thead><tbody>' +
       rows.slice(0, MAX_ROWS).map(function (r) {
         var open = !!state.reqExpanded[r.id];
         return '<tr class="req-row ' + (open ? 'open' : '') + '" data-req-expand="' + esc(r.id) + '">' +
           '<td class="req-caret"><span>' + (open ? '▾' : '▸') + '</span></td>' +
           '<td><div class="name">' + esc(r.jobPosition || 'Beeline request') + '</div>' +
-          '<div class="sub">' + esc(r.id) + (r.startDate ? ' · starts ' + esc(r.startDate) : '') + '</div></td>' +
-          '<td><div class="name">' + esc(r.market || '—') +
-          (r.marketFrom === 'site' ? '<span class="cov-flag" title="Derived from the work-location number, not read off a profit centre.">from site</span>' : '') +
-          '</div><div class="sub">' + esc(reqSite(r)) + '</div></td>' +
+          '<div class="sub">' + esc(r.id) + '</div></td>' +
+          '<td>' + startCell(r) + '</td>' +
+          '<td><div class="name site-code">' + esc(r.site || '—') +
+          (siteLabel(r) ? ' <span class="site-name">' + esc(siteLabel(r)) + '</span>' : '') +
+          '</div><div class="sub">' + esc(r.market || 'No market') +
+          (r.marketFrom === 'site' ? ' <span class="cov-flag" title="Derived from the work-location number, not read off a profit centre.">from site</span>' : '') +
+          '</div></td>' +
           '<td>' + (r.requested == null ? '<span class="score none">—</span>' : r.requested) +
           (r.requestedFrom === 'workbook' ? '<div class="sub">from the workbook</div>' : '') +
           (r.openingsDiffer ? '<div class="sub warn-text">workbook says ' + r.workbookOpenings + '</div>' : '') +
@@ -2632,10 +2737,20 @@
           (open ? reqCandidateRows(r) : '');
       }).join('') + '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length);
   }
-  function reqSite(r) {
-    var loc = ReqsCore.parseLocation(r.location);
-    if (!loc.city && !loc.site) return '—';
-    return (loc.site ? loc.site + ' · ' : '') + loc.city + (loc.state ? ', ' + loc.state : '');
+  /* What a site is called. The Locations admin list wins, because somebody typed
+     it deliberately; otherwise the city the work location names. Several sites can
+     share a city -- 1502, 1517 and 1519 are all Romeoville -- so the number is the
+     identifier and the name only ever qualifies it. */
+  function siteName(code) {
+    if (!code) return '';
+    var row = (state.stores.locations || []).filter(function (l) {
+      return String(l.code) === String(code);
+    })[0];
+    return row && row.name ? row.name : '';
+  }
+  function siteLabel(r) {
+    var name = siteName(r.site) || r.city || '';
+    return name + (name && r.state ? ', ' + r.state : '');
   }
 
   function requisitions() {
@@ -2651,7 +2766,7 @@
       ? reqMetrics(summarizeVisible(inMarket)) +
         (board.warnings.length ? warnList(board.warnings) : '') +
         reqReconNote(board, inMarket) +
-        '<section class="suite-panel">' + reqFilters(rows) +
+        '<section class="suite-panel">' + reqFilters(inMarket) +
         (rows.length ? beelineReqTable(rows)
           : empty('No requests match those filters', 'Widen the search or the status filter.')) +
         '</section>'
@@ -3450,6 +3565,8 @@
     var reqFile = e.target.closest('[data-req-file]');
     if (reqFile && reqFile.files && reqFile.files[0]) { readReqExport(reqFile.files[0]); return; }
     if (e.target.id === 'req-health') { state.reqHealth = e.target.value; render(); return; }
+    if (e.target.id === 'req-site') { state.reqSite = e.target.value; render(); return; }
+    if (e.target.id === 'req-when') { state.reqWhen = e.target.value; render(); return; }
     if (e.target.id === 'task-kind') { state.tasks.kind = e.target.value; render(); }
     if (e.target.id === 'task-done') { state.tasks.showDone = e.target.checked; render(); }
     if (e.target.id === 'cov-status') { state.coverage.statusFilter = e.target.value; render(); }

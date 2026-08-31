@@ -126,12 +126,15 @@
       // Only a market read off the profit centre teaches anything; one already
       // derived from the site number would just be teaching itself.
       if (r.marketFrom === 'site') market = marketOf(r.profitCenter);
-      var site = parseLocation(r.location).site;
+      var loc = parseLocation(r.location);
+      var site = loc.site;
       if (!site || !market) return;
       var prior = byCode.get(site);
       // A site two rows disagree about is not a fact; leave it to a person.
       if (prior && prior.market !== market) { prior.conflict = true; return; }
-      if (!prior) byCode.set(site, { code: site, market: market });
+      // The city is what a site is called in conversation -- 1544 is Joliet -- so
+      // it travels with the pair and seeds the Locations list's name.
+      if (!prior) byCode.set(site, { code: site, market: market, city: loc.city, state: loc.state });
     });
     var out = [];
     byCode.forEach(function (v) { if (!v.conflict) out.push(v); });
@@ -448,6 +451,11 @@
   }
 
   function finish(r, siteIndex) {
+    var loc = parseLocation(r.location);
+    r.site = loc.site;
+    r.city = loc.city;
+    r.state = loc.state;
+
     // Both exports name a supervisor: the reqs file's "Reports To", filled on
     // only a couple of rows, and the candidate file's "Name", filled on all of
     // them. The explicit column wins where it exists.

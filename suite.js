@@ -2467,11 +2467,45 @@
           '</p><button class="suite-btn primary" data-req-sites="1">Add ' + lessons.length +
           ' site(s) to Locations</button></div>';
       })() +
-      (missing.length ? '<div class="import-report bad"><strong>Still missing ' + missing.length +
-        ' column(s) — add the other export, or save without them:</strong><ul>' +
-        missing.map(function (m) { return '<li><b>' + esc(m.label) + '</b> — ' + esc(m.why) + '</li>'; }).join('') +
-        '</ul></div>' : '') +
+      reqGapReport(missing) +
       (state.reqImport ? shiftImportReport(state.reqImport) : '') + '</section>';
+  }
+
+  /* What the loaded export leaves unanswered -- stated as what is still unknown,
+     not as which column is absent. Two of the columns the Beeline export cannot
+     carry are covered from elsewhere: the market from the work-location number via
+     the Locations list, and the openings count from the PLX workbook. Listing
+     those as "missing" while the tab is plainly showing markets and openings would
+     just teach people to ignore the panel. */
+  var COVERED_BY = {
+    profitCtr: 'Market comes from the work-location number instead, via Settings → Locations.',
+    requested: 'Openings come from the PLX workbook instead, where it lists the request.'
+  };
+  function reqGapReport(missing) {
+    if (!missing.length) return '';
+    var board = reqBoard();
+    var covered = [], unresolved = [];
+    missing.forEach(function (m) {
+      if (!COVERED_BY[m.key]) { unresolved.push(m); return; }
+      var short = m.key === 'profitCtr'
+        ? board.reqs.filter(function (r) { return !r.market; }).length
+        : board.reqs.length - board.summary.reqsWithOpenings;
+      covered.push({ label: m.label, note: COVERED_BY[m.key], short: short, total: board.reqs.length });
+    });
+    return (covered.length
+      ? '<div class="import-report"><strong>Covered from another source</strong><ul>' +
+        covered.map(function (c) {
+          return '<li><b>' + esc(c.label) + '</b> — ' + esc(c.note) +
+            (c.short ? ' <span class="warn-text">' + c.short + ' of ' + c.total +
+              ' request(s) still have none.</span>' : ' <span class="ok-text">All ' + c.total + ' covered.</span>') +
+            '</li>';
+        }).join('') + '</ul></div>'
+      : '') +
+      (unresolved.length
+        ? '<div class="import-report bad"><strong>Not reported by this export</strong><ul>' +
+          unresolved.map(function (m) { return '<li><b>' + esc(m.label) + '</b> — ' + esc(m.why) + '</li>'; }).join('') +
+          '</ul></div>'
+        : '');
   }
 
   function reqMetrics(s) {
@@ -2616,7 +2650,7 @@
     var body = board.reqs.length
       ? reqMetrics(summarizeVisible(inMarket)) +
         (board.warnings.length ? warnList(board.warnings) : '') +
-        reqReconNote(board) +
+        reqReconNote(board, inMarket) +
         '<section class="suite-panel">' + reqFilters(rows) +
         (rows.length ? beelineReqTable(rows)
           : empty('No requests match those filters', 'Widen the search or the status filter.')) +
@@ -2644,10 +2678,10 @@
   /* What the two sources disagree about. Shown above the table rather than buried
      on the rows it affects, because "the workbook has not caught up" is a thing to
      go and fix, not a per-row footnote. */
-  function reqReconNote(board) {
-    var s = board.summary, bits = [];
+  function reqReconNote(board, visible) {
+    var s = summarizeVisible(visible), bits = [];
     var unknown = {};
-    board.reqs.forEach(function (r) { if (r.marketUnknownSite) unknown[r.marketUnknownSite] = true; });
+    visible.forEach(function (r) { if (r.marketUnknownSite) unknown[r.marketUnknownSite] = true; });
     var sites = Object.keys(unknown);
     if (sites.length) {
       bits.push('<b>' + sites.length + '</b> work-location number(s) are not in the Locations list, so those ' +
@@ -2658,8 +2692,9 @@
       bits.push('<b>' + (s.reqs - s.reqsWithOpenings) + '</b> request(s) have no openings count from any source, ' +
         'so they show no fill figure. The PLX workbook supplies it where it lists the request.');
     }
-    if (s.openingsDiffer) {
-      bits.push('<b>' + s.openingsDiffer + '</b> request(s) where the workbook and Beeline disagree on how many are wanted.');
+    var differ = visible.filter(function (r) { return r.openingsDiffer; }).length;
+    if (differ) {
+      bits.push('<b>' + differ + '</b> request(s) where the workbook and Beeline disagree on how many are wanted.');
     }
     if (board.workbookOnly && board.workbookOnly.length) {
       bits.push('<b>' + board.workbookOnly.length + '</b> request(s) in the PLX workbook that Beeline does not have.');

@@ -3946,14 +3946,19 @@
       '<label class="suite-field"><span>Password</span>' +
       '<input name="password" type="password" autocomplete="current-password" minlength="6" required></label>' +
       '<div class="signin-actions">' +
-      '<button class="suite-btn primary" data-signin-do="in"' + (a.loading ? ' disabled' : '') + '>' +
+      /* All three are type="button". The form's own required/minlength only ever
+         ran for the submit one, so "Create account" -- the button a new person
+         reaches for -- was the one with no validation behind it. They are all
+         checked in guard() now, which is the same check for all three. */
+      '<button type="button" class="suite-btn primary" data-signin-do="in"' + (a.loading ? ' disabled' : '') + '>' +
       (a.loading ? 'Working…' : 'Sign in') + '</button>' +
       '<button type="button" class="suite-btn" data-signin-do="create">Create account</button>' +
       '<button type="button" class="suite-btn" data-signin-do="reset">Forgot password</button>' +
       '</div></form>' +
       (a.error ? '<div class="warn-banner">' + esc(a.error) + '</div>' : '') +
-      '<p class="gate-note">A new account starts as a <b>Colleague</b>, so the tool works as soon as ' +
-      'you are in. A manager or an administrator can change that from Settings.</p>');
+      '<p class="gate-note"><b>First time here?</b> Use <b>Create account</b>, not Sign in — ' +
+      'your work email does not have one until you make it. A new account starts as a ' +
+      '<b>Colleague</b>, so the tool works as soon as you are in.</p>');
   }
   function noAccessScreen() {
     var a = state.auth, acct = account();

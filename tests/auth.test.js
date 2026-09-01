@@ -110,6 +110,34 @@ t('refused for an unapproved domain', r.ok === false);
 t('with a message naming the domains', r.error.indexOf('geodis.com') !== -1 && r.error.indexOf('employbridge.com') !== -1);
 t('and no account is produced to clean up', r.user === undefined);
 
+/* What the sign-in card says before anything is sent. The domain message used to
+   answer for every one of these, so somebody who HAD a company address, clicking
+   Create account before filling the form in, was told their address was not
+   allowed -- the one thing it did not mean. */
+console.log('— telling somebody what is actually wrong —');
+const prob = (e, p, m) => A.credentialProblem(e, p, m);
+t('an empty box asks for the address, not the domain',
+  /Enter your work email/.test(prob('', '', 'create')));
+t('and never mentions the allowed domains', !/employbridge/.test(prob('', '', 'create')));
+t('a half-typed address says so', /not a complete email/.test(prob('iovanaortiz', 'secret1', 'create')));
+t('an address with no domain part is caught', !!prob('someone@', 'secret1', 'create'));
+t('a personal address names the domain it saw',
+  /gmail\.com/.test(prob('x@gmail.com', 'secret1', 'create')));
+t('and still names what IS allowed',
+  /employbridge\.com/.test(prob('x@gmail.com', 'secret1', 'create')));
+t('a company address with a good password is accepted',
+  prob('iovanaortiz@employbridge.com', 'goodpass', 'create') === '');
+t('a missing password on create asks for one, by length',
+  /at least 6/.test(prob('a@geodis.com', '', 'create')));
+t('a short one says how short it is',
+  /3 characters/.test(prob('a@geodis.com', 'abc', 'create')));
+t('signing in asks for the password differently -- length is not the point',
+  prob('a@geodis.com', '', 'in') === 'Enter your password.');
+t('a short password is fine to TRY signing in with -- the server decides',
+  prob('a@geodis.com', 'abc', 'in') === '');
+t('a reset needs no password at all', prob('a@geodis.com', '', 'reset') === '');
+t('but still needs a real address', !!prob('', '', 'reset'));
+
 console.log('— the domain list can be widened, never narrowed —');
 t('an outside domain is refused to begin with', !A.domainAllowed('x@acme.com'));
 A.setAllowedDomains('acme.com, @partner.io');

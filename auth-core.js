@@ -165,6 +165,43 @@
     return all.filter(function (m) { return u.markets.indexOf(m) !== -1; });
   }
 
+  /* What is wrong with these credentials, in words, before anything is sent.
+
+     This exists because the domain check was doing double duty. An empty box and
+     a personal address both came back "Only geodis.com and employbridge.com
+     addresses can be used here" -- and somebody who HAS an employbridge.com
+     address, reading that after clicking a button before filling the form in,
+     concludes their address was rejected. Which is the one thing it does not
+     mean.
+
+     `mode` is 'in' | 'create' | 'reset'; reset needs no password. Returns '' when
+     there is nothing to say. This is a courtesy for the person typing, never a
+     control: the server checks the domain again and decides. */
+  var MIN_PASSWORD = 6;
+  function credentialProblem(email, password, mode) {
+    var e = String(email == null ? '' : email).trim();
+    if (!e) return 'Enter your work email address.';
+    if (e.indexOf('@') === -1 || !emailDomain(e)) {
+      return '"' + e + '" is not a complete email address.';
+    }
+    if (!domainAllowed(e)) {
+      return 'That address is at ' + emailDomain(e) + '. This tool is open to ' +
+        allowedDomains.join(' and ') + ' addresses.';
+    }
+    if (mode === 'reset') return '';
+    var p = String(password == null ? '' : password);
+    if (!p) {
+      return mode === 'create'
+        ? 'Choose a password of at least ' + MIN_PASSWORD + ' characters.'
+        : 'Enter your password.';
+    }
+    if (mode === 'create' && p.length < MIN_PASSWORD) {
+      return 'That password is ' + p.length + ' character' + (p.length === 1 ? '' : 's') +
+        ' — it needs at least ' + MIN_PASSWORD + '.';
+    }
+    return '';
+  }
+
   /* Who may grant which role. You cannot promote anybody above yourself, and you
      cannot change an account that outranks you -- otherwise a manager could make
      themselves an admin by editing an admin's row, or by editing their own.
@@ -217,6 +254,8 @@
     domainAllowed: domainAllowed,
     setAllowedDomains: setAllowedDomains,
     allowedDomainList: allowedDomainList,
+    MIN_PASSWORD: MIN_PASSWORD,
+    credentialProblem: credentialProblem,
     roleMeta: roleMeta,
     normalizeUser: normalizeUser,
     can: can,

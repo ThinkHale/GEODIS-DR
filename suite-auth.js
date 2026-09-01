@@ -86,15 +86,17 @@
     });
   }
 
-  /* A first check, in the browser, so somebody typing a personal address is told
-     immediately rather than after a round trip. It is NOT the control: the same
-     check runs on the server against the same list, and that is the one that
-     decides. */
-  function guardDomain(email) {
-    if (root.AuthCore && !root.AuthCore.domainAllowed(email)) {
-      return 'Only ' + root.AuthCore.allowedDomainList().join(' and ') + ' addresses can be used here.';
-    }
-    return '';
+  /* A first check, in the browser, so somebody is told immediately rather than
+     after a round trip. It is NOT the control: the server checks the domain
+     again and that is the one that decides.
+
+     It has to cover the empty and half-typed cases as well as the domain, because
+     "Create account" is not a submit button -- the form's own required/minlength
+     never run for it -- so this is the only thing standing between a half-filled
+     form and a confusing error. See credentialProblem() in auth-core.js. */
+  function guard(email, password, mode) {
+    if (!root.AuthCore || !root.AuthCore.credentialProblem) return '';
+    return root.AuthCore.credentialProblem(email, password, mode);
   }
 
   function run(fn) {
@@ -118,7 +120,7 @@
   }
 
   function signIn(email, password) {
-    var bad = guardDomain(email);
+    var bad = guard(email, password, 'in');
     if (bad) { state.error = bad; notify(); return Promise.resolve(); }
     return run(function () {
       return sdk().then(function (auth) {
@@ -127,7 +129,7 @@
     });
   }
   function createAccount(email, password) {
-    var bad = guardDomain(email);
+    var bad = guard(email, password, 'create');
     if (bad) { state.error = bad; notify(); return Promise.resolve(); }
     return run(function () {
       return sdk().then(function (auth) {
@@ -136,7 +138,7 @@
     });
   }
   function resetPassword(email) {
-    var bad = guardDomain(email);
+    var bad = guard(email, '', 'reset');
     if (bad) { state.error = bad; notify(); return Promise.resolve(); }
     return run(function () {
       return sdk().then(function (auth) {

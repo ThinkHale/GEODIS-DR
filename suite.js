@@ -82,6 +82,10 @@
     updatedAt: null,
     profiles: new Map(),
     tasks: { kind: 'all', showDone: false },
+    /* Most of what the shared tracker imports is its processed tab, so completed
+       requests are the bulk of the collection and none of them are work. Hidden
+       until asked for. */
+    timeoff: { showCompleted: false },
     stores: { attendance: [], timeOff: [], requisitions: [], reqCandidates: [], performance: [], shifts: [], discrepancies: [], tasks: [], contacts: [],
       associatePto: [], locations: [], appConfig: [], timeclockLinks: [] },
     reqSources: [],          // export files loaded this session, merged before saving
@@ -1995,9 +1999,19 @@
     reader.readAsArrayBuffer(file);
   }
 
+  /* A completed request is a record of something finished, not something to work
+     on, and the tracker imports a whole processed tab of them. Left in the list
+     they bury every request still moving, so they are hidden until somebody asks
+     -- and the count of what is hidden sits on the checkbox rather than being
+     left to guess at. */
+  function isCompletedRequest(t) {
+    return TimeOffCore.normalizeStatus(t.status) === 'Completed';
+  }
+
   function timeoff() {
     if (!state.records) return needsRoster();
     if (!state.storesLoaded) return loadingPanel('time-off requests');
+    var showCompleted = state.timeoff.showCompleted;
     var q = state.query.trim().toLowerCase();
     var all = state.stores.timeOff.filter(function (t) {
       var p = profile(t.badge);
@@ -2008,17 +2022,27 @@
       return searchText(p, (p ? '' : t.name || '') + ' ' + t.badge + ' ' + t.type + ' ' +
         t.status + ' ' + (t.source || '')).toLowerCase().indexOf(q) !== -1;
     }).sort(function (a, b) { return String(b.start || '').localeCompare(String(a.start || '')); });
-    var rows = all.slice(0, MAX_ROWS);
+    // Counted after the market and the search, so the number on the checkbox is
+    // what ticking it would actually add to the list.
+    var completed = all.filter(isCompletedRequest).length;
+    var shown = showCompleted ? all : all.filter(function (t) { return !isCompletedRequest(t); });
+    var rows = shown.slice(0, MAX_ROWS);
 
     var orphans = state.stores.timeOff.filter(function (t) { return !profile(t.badge); });
+    // The banner says they are listed below, so it has to own up when they aren't.
+    var orphansHidden = showCompleted ? 0 : orphans.filter(isCompletedRequest).length;
     return hero('PTO / VTO tracking', 'Approved time off is excused and carries no attendance points.', 'timeoff', 'New request') +
       ptoImportPanel() +
       (orphans.length ? '<div class="warn-banner"><b>' + orphans.length + '</b> request' +
         (orphans.length === 1 ? '' : 's') + ' could not be matched to an associate on the roster — usually a ' +
-        'name typed differently on the form. They are listed below and still need actioning.</div>' : '') +
+        'name typed differently on the form. They are listed below and still need actioning.' +
+        (orphansHidden ? ' <b>' + orphansHidden + '</b> of them completed — tick "Show completed" to reach ' +
+          (orphansHidden === 1 ? 'it' : 'them') + '.' : '') + '</div>' : '') +
       '<section class="suite-panel">' +
       '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
-      '" placeholder="Search by EID, name, badge, type, or status…"></div>' +
+      '" placeholder="Search by EID, name, badge, type, or status…">' +
+      '<label class="cov-ctl"><input type="checkbox" id="timeoff-completed"' + (showCompleted ? ' checked' : '') +
+      '> <span>Show completed' + (completed ? ' (' + completed + ')' : '') + '</span></label></div>' +
       (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
         '<th>Associate</th><th>Type</th><th>Dates</th><th>Hours</th><th>Status</th><th>Attendance tie-in</th><th></th></tr></thead><tbody>' +
         rows.map(function (t) {
@@ -2036,8 +2060,12 @@
             '<td>' + tieIn(t) + '</td>' +
             '<td>' + (p ? '' : '<button class="suite-btn" data-connect="' + esc(t.id) + '">Connect…</button> ') +
             '<button class="suite-btn danger" data-del="timeoff|' + esc(t.id) + '">Remove</button></td></tr>';
-        }).join('') + '</tbody></table></div>' + rowCap(rows.length, all.length)
-        : empty('No time-off requests')) + '</section>';
+        }).join('') + '</tbody></table></div>' + rowCap(rows.length, shown.length)
+        : empty(completed && !showCompleted ? 'Nothing outstanding' : 'No time-off requests',
+            completed && !showCompleted
+              ? completed + ' completed request' + (completed === 1 ? ' is' : 's are') +
+                ' hidden — tick "Show completed" to see ' + (completed === 1 ? 'it' : 'them') + '.'
+              : undefined)) + '</section>';
   }
 
   /* A request moves through a pipeline rather than being approved or not, so the
@@ -4057,6 +4085,7 @@
     if (e.target.id === 'req-when') { state.reqWhen = e.target.value; render(); return; }
     if (e.target.id === 'task-kind') { state.tasks.kind = e.target.value; render(); }
     if (e.target.id === 'task-done') { state.tasks.showDone = e.target.checked; render(); }
+    if (e.target.id === 'timeoff-completed') { state.timeoff.showCompleted = e.target.checked; render(); }
     if (e.target.id === 'cov-status') { state.coverage.statusFilter = e.target.value; render(); }
     if (e.target.id === 'cov-loc') { state.coverage.location = e.target.value; render(); }
     if (e.target.id === 'cov-grace') {

@@ -19,7 +19,10 @@ let stores = {
     { id: 'FORM-2-0', badge: '', name: 'Luiz Grachan', type: 'PTO', start: '2026-09-10', end: '2026-09-10',
       hours: 8, status: 'Received', source: 'Form (Spanish)' },
     // Written before the pipeline existed.
-    { id: 'OLD-1', badge: '215002', name: '', type: 'PTO', start: '2026-08-01', end: '2026-08-01', hours: 8, status: 'Pending' }
+    { id: 'OLD-1', badge: '215002', name: '', type: 'PTO', start: '2026-08-01', end: '2026-08-01', hours: 8, status: 'Pending' },
+    // Off the tracker's processed tab: finished, and the bulk of what it imports.
+    { id: 'PTOIL-215002-2026-07-01', badge: '215002', name: 'Abel Munoz', type: 'PTO',
+      start: '2026-07-01', end: '2026-07-01', hours: 8, status: 'Completed', source: 'IL Shared PTO Tracker' }
   ]
 };
 
@@ -150,6 +153,30 @@ const rowFor = name => $$('.suite-table tbody tr').find(tr => tr.textContent.ind
   s3.dispatchEvent(new w.Event('change', { bubbles: true }));
   await settle(60);
   t('no write without an actor', posts.filter(p => p.url && p.url.indexOf('timeoff=1') !== -1).length === before);
+
+  console.log('— completed requests are out of the way by default —');
+  t('the finished request is not listed', !rowFor('2026-07-01'));
+  t('the ones still moving are', $$('.status-select').length === 3);
+  const done = $('#timeoff-completed');
+  t('a Show completed box is offered', !!done);
+  t('unticked to begin with', !done.checked);
+  t('and it says how many are hidden', done.closest('label').textContent.indexOf('(1)') !== -1);
+
+  console.log('— ticking it brings them back —');
+  done.checked = true;
+  done.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(20);
+  t('the finished request is listed', !!rowFor('2026-07-01'));
+  t('alongside the rest', $$('.status-select').length === 4);
+  t('showing where it stands', rowFor('2026-07-01').querySelector('.status-select').value === 'Completed');
+  t('the box stays ticked', $('#timeoff-completed').checked);
+
+  console.log('— and unticking hides them again —');
+  const done2 = $('#timeoff-completed');
+  done2.checked = false;
+  done2.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(20);
+  t('back out of the way', !rowFor('2026-07-01'));
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

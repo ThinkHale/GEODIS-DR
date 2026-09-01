@@ -56,6 +56,19 @@ t('the check happens before the workbook is even read',
 // A browser upload has no file timestamp and must always apply.
 t('with no modifiedAt it always applies', /if \(opts\.modifiedAt\)/.test(apply));
 
+console.log('— either shape Power Automate sends —')
+/* A binary action output is represented as {"$content-type":…,"$content":"<b64>"},
+   and whether an expression hands you the bytes or that envelope depends on the
+   connector and how the flow was written. base64() over the envelope yields base64
+   of JSON text, which decodes to something plainly not a workbook. */
+t('there is a decoder rather than one assumed shape', /function decodeWorkbookBody/.test(src));
+t('it unwraps the $content envelope', /envelope\.\$content/.test(src));
+t('and passes plain base64 straight through',
+  /head\.indexOf\('\$content'\) === -1/.test(src));
+t('a malformed envelope uses what arrived rather than throwing',
+  /catch \(err\) \{ \/\* not an envelope after all/.test(src));
+t('the endpoint decodes through it', /applyIlPtoWorkbook\(decodeWorkbookBody\(b64\)/.test(src));
+
 console.log('— a shortcut is not the workbook —');
 /* "Add shortcut to My files" on a single shared FILE makes a .url: a hundred-odd
    bytes of Internet Shortcut text. XLSX does not throw on it -- it reads the text

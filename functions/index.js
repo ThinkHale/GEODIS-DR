@@ -1222,6 +1222,28 @@ async function applyIlPtoWorkbook(buffer, opts) {
   return { ok: true, meta: meta };
 }
 
+/* Power Automate represents a binary action output as
+   {"$content-type":"…","$content":"<base64>"}, and whether an expression hands you
+   the bytes or that envelope depends on the connector and on how the flow was
+   written. base64() over the envelope yields base64 of the JSON text, which
+   decodes to something that is plainly not a workbook and sends whoever built the
+   flow hunting for the wrong thing.
+
+   Both forms are accepted instead, because which one a given flow produces is not
+   worth a debugging round trip. */
+function decodeWorkbookBody(b64) {
+  const buf = Buffer.from(b64, 'base64');
+  const head = buf.slice(0, 60).toString('utf8');
+  if (head.indexOf('$content') === -1) return buf;
+  try {
+    const envelope = JSON.parse(buf.toString('utf8'));
+    if (envelope && typeof envelope.$content === 'string') {
+      return Buffer.from(envelope.$content, 'base64');
+    }
+  } catch (err) { /* not an envelope after all; use what arrived */ }
+  return buf;
+}
+
 async function handleIlPto(req, res) {
   setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
@@ -1236,7 +1258,7 @@ async function handleIlPto(req, res) {
   const body = req.body || {};
   const b64 = String(body.fileBase64 || body.file || '');
   if (!b64) { res.status(400).json({ ok: false, error: 'Missing fileBase64' }); return; }
-  const applied = await applyIlPtoWorkbook(Buffer.from(b64, 'base64'), {
+  const applied = await applyIlPtoWorkbook(decodeWorkbookBody(b64), {
     fileName: body.fileName, modifiedAt: body.modifiedAt
   });
   if (!applied.ok) { res.status(applied.status || 400).json({ ok: false, error: applied.error }); return; }

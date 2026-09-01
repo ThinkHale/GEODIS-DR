@@ -15,6 +15,11 @@ const t = (n, c) => { if (c) pass++; else { fail++; console.log('  FAIL: ' + n);
 /* Run the shipped source against a fake bucket, the way collections.test.js and
    plx-sync.test.js do, so this tests the deployed file rather than a copy. */
 const src = fs.readFileSync(path.join(__dirname, '..', 'functions', 'index.js'), 'utf8');
+/* The browser-facing halves of these handlers sit behind requireUser() now.
+   The definition lives outside the slice each harness pulls, so the shared
+   stub is injected -- same shape, same status codes. See fn-auth.js. */
+const { makeAuth, reqGet } = require('./fn-auth.js');
+const auth = makeAuth();
 const consts = src.slice(src.indexOf('const RAW_PATH = {'), src.indexOf('const NOTES_ORIGIN'));
 const helpers = src.slice(src.indexOf('/* Power Automate represents a binary action output'), src.indexOf('/* ---------- shared, badge-keyed stores')) +
   src.slice(src.indexOf('async function readJsonFile('), src.indexOf('async function handleCollection('));
@@ -37,9 +42,9 @@ const NOTES_ORIGIN = 'https://geodis.ebtools.pro';
 const SYNC_KEY = { value: () => KEY };
 
 const built = new Function(
-  'bucket', 'NOTES_ORIGIN', 'SYNC_KEY', 'XLSX', 'ReqsCore', 'Buffer', 'console',
+  'bucket', 'NOTES_ORIGIN', 'SYNC_KEY', 'XLSX', 'ReqsCore', 'Buffer', 'console', 'requireUser',
   consts + '\n' + helpers + '\n' + handler + '\nreturn { handleReqSync, COLLECTIONS, REQ_META_PATH, REQ_RAW_PATH };'
-)(bucket, NOTES_ORIGIN, SYNC_KEY, XLSX, Q, Buffer, console);
+)(bucket, NOTES_ORIGIN, SYNC_KEY, XLSX, Q, Buffer, console, auth.requireUser);
 const { handleReqSync, COLLECTIONS, REQ_META_PATH } = built;
 
 const mkRes = () => {
@@ -52,7 +57,8 @@ const push = (aoa, fileName, key) => call({
   method: 'POST', query: {}, body: { fileBase64: book(aoa), fileName },
   get: h => (h === 'x-sync-key' ? (key === undefined ? KEY : key) : '')
 });
-const getSync = () => call({ method: 'GET', query: {}, get: () => '' });
+const getSync = (token) => call({ method: 'GET', query: {},
+  get: reqGet({ authorization: token === undefined ? 'Bearer test-token' : token }) });
 const stored = p => { try { return JSON.parse(files[p]); } catch (e) { return null; } };
 const reqs = () => stored(COLLECTIONS.requisitions.path) || [];
 const cands = () => stored(COLLECTIONS.reqCandidates.path) || [];
@@ -120,7 +126,8 @@ const candAoa = [
 
   console.log('— reading the sync state back —');
   r = await getSync();
-  t('GET needs no key, the way the tool reads it', r.code === 200);
+  t('GET needs an account, not the sync key -- this is how the tool reads it', r.code === 200);
+  t('and is refused with neither', (await getSync('')).code === 401);
   t('and returns the same record', r.body.sync.reqs === 2 && r.body.sync.candidates === 2);
 
   console.log('— a file that is not a requisition export —');
@@ -170,7 +177,44 @@ const candAoa = [
     get: h => (h === 'x-sync-key' ? KEY : '') });
   t('either body key is accepted', r.code === 200);
 
+  /* The reports actually arrive as .csv, not .xlsx -- quoted fields, CRLF line
+     endings, and a trailing empty column where "Reports To" is blank. Pinned
+     from a real 2026-09-01 attachment, because the flow's file-type filter was
+     written for the wrong extension and nothing here caught it. */
+  console.log('— the reports as they really arrive: CSV —');
+  const realCsv =
+    '"Hiring Manager","Start Date - Start","Request-ID","Request Status","Candidates Requested",' +
+    '"Candidates Submitted","Candidates Declined","Candidates Offered","Candidates Hired",' +
+    '"Bill To Profit Center Name","Reports To"\r\n' +
+    '"Adams, Katherine","09/04/2026","110581-1","Open","5","0","0","0","0","LLC;North East;Central PA;3902-18067",\r\n' +
+    '"Alva, Matthew","04/27/2026","105266-1","Open","2","1","0","1","1","LLC;West;Seattle;4805-60176",\r\n' +
+    '"Cotto, Millie","07/17/2026","108015-1","Open","10","6","0","6","4","LLC;South East;Coastal;1029-18062","millie cotto"\r\n';
+  files = {};
+  r = await call({ method: 'POST', query: {},
+    body: { fileBase64: Buffer.from(realCsv, 'utf8').toString('base64'),
+            fileName: 'GEODIS Open Reqs09-01-2026.csv' },
+    get: h => (h === 'x-sync-key' ? KEY : '') });
+  t('a CSV export is accepted', r.code === 200);
+  t('and still recognised by its columns', r.body.kind === 'reqs');
+  t('quoted fields parsed', reqs().length === 3);
+  t('the counts survive the quoting',
+    reqs().find(x => x.beelineReq === '105266-1').beelineOpenings === 2);
+  t('the date normalises', reqs().find(x => x.beelineReq === '105266-1').startDate === '2026-04-27');
+  t('the market comes off the profit centre',
+    reqs().find(x => x.beelineReq === '105266-1').market === 'Seattle');
+  t('a trailing empty column is not a parse failure',
+    reqs().find(x => x.beelineReq === '110581-1').supervisor === '');
+  t('and a row that does fill it keeps the value',
+    reqs().find(x => x.beelineReq === '108015-1').supervisor === 'millie cotto');
+
+  /* CSV text is not base64-shaped, so the double-base64 unwrap has to leave it
+     alone rather than trying to decode it a second time. */
+  t('the unwrap did not mangle it', r.body.sync.sources.reqs.rowCount === 3);
+
   console.log('— a re-send replaces, it does not duplicate —');
+  files = {};
+  await push(reqAoa, 'GEODIS Open Reqs 09-01.xlsx');
+  await push(candAoa, 'Candidate Status per Req 09-01.xlsx');
   r = await push(reqAoa, 'GEODIS Open Reqs 09-01 (2).xlsx');
   t('still two requests, not four', reqs().length === 2);
   t('and still two candidates', cands().length === 2);

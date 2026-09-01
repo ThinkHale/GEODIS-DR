@@ -16,22 +16,61 @@
 (function (root) {
   'use strict';
 
-  /* Anyone with an address at one of these may create an account. Anyone else is
-     refused at sign-up AND at sign-in -- checking only at sign-up would leave an
-     account working after a domain was removed from the list. */
+  /* Anyone with an address at one of these may create an account -- sign-up is
+     self-service, nobody has to be invited. Anyone else is refused at sign-up
+     AND at sign-in: checking only at sign-up would leave an account working
+     after a domain was removed from the list.
+
+     The list is a floor, not the whole story. An administrator can widen it from
+     Settings without a deploy (`allowedDomains`), which is what "anyone can
+     create an account" means in practice -- anyone the business recognises. It
+     is deliberately NOT open to the whole internet, because a new account can
+     read the floor from its first minute and that is the thing being protected. */
   var ALLOWED_DOMAINS = ['geodis.com', 'employbridge.com'];
 
-  /* Roles, least to most. `rank` exists so an admin cannot be demoted by someone
-     who is not at least their equal, and so the UI can offer only the roles the
-     signed-in person is allowed to grant. */
+  /* Roles, least to most.
+
+     `rank` exists so an admin cannot be demoted by someone who is not at least
+     their equal, and so the UI can offer only the roles the signed-in person is
+     allowed to grant. `can` is the whole permission model: an action is allowed
+     only if it is named here.
+
+       read-only   sees the day, changes nothing. NOT the default -- it is what
+                   somebody is put on deliberately, e.g. an account that only
+                   needs to read the floor, or one being wound down.
+       colleague   the working role, and what every new account starts as.
+                   Everything the tool does day to day -- status changes,
+                   documenting the floor, importing a report.
+       manager     a colleague who can also hand out roles, up to and including
+                   another manager. Not admin: promoting somebody to the role
+                   that controls settings is an administrator's decision.
+       admin       everything, plus the settings panel.
+
+     'roles' is separated from 'admin' on purpose. It is what lets a manager
+     staff their own team without also handing them the RC base URL, the domain
+     allowlist and the ability to disable an administrator. */
   var ROLES = [
     { key: 'pending', label: 'No access', rank: 0, can: [] },
-    { key: 'viewer', label: 'Viewer', rank: 1, can: ['view'] },
-    { key: 'manager', label: 'Manager', rank: 2, can: ['view', 'edit', 'import'] },
-    { key: 'admin', label: 'Administrator', rank: 3, can: ['view', 'edit', 'import', 'admin'] }
+    { key: 'viewer', label: 'Read-only', rank: 1, can: ['view'] },
+    { key: 'colleague', label: 'Colleague', rank: 2, can: ['view', 'edit', 'import'] },
+    { key: 'manager', label: 'Manager', rank: 3, can: ['view', 'edit', 'import', 'roles'] },
+    { key: 'admin', label: 'Administrator', rank: 4, can: ['view', 'edit', 'import', 'roles', 'admin'] }
   ];
-  // What a new account from an approved domain gets before an admin decides.
-  var DEFAULT_ROLE = 'viewer';
+  /* What a new account gets before anybody decides anything.
+
+     This leans on the domain gate above doing the real work: only somebody with
+     a geodis.com or employbridge.com address can create an account at all, and
+     everyone who has one is already trusted with the floor. Landing them on
+     Colleague means the tool works the moment they sign in, rather than needing
+     a second person before it does anything -- which is the friction that gets a
+     tool abandoned in its first week.
+
+     What it costs: the domain gate is now the ONLY thing between a new sign-up
+     and editing shared records. Anyone at either domain who signs up can change
+     time-off statuses and import reports without anybody approving them. The
+     answer if that stops being acceptable is to set this back to 'viewer', not
+     to add a second check somewhere else. */
+  var DEFAULT_ROLE = 'colleague';
 
   var BY_KEY = {};
   ROLES.forEach(function (r) { BY_KEY[r.key] = r; });
@@ -44,8 +83,22 @@
   function normalizeEmail(email) {
     return String(email == null ? '' : email).trim().toLowerCase();
   }
+  /* The list actually in force. Starts as the built-ins and can be WIDENED from
+     Settings, never narrowed: a mistyped domain field must not be able to lock
+     out every administrator, and there is no way back in from that state. Both
+     the browser and the Cloud Function call setAllowedDomains() once they have
+     read the app config, so the two agree. */
+  var allowedDomains = ALLOWED_DOMAINS.slice();
+  function setAllowedDomains(list) {
+    var extra = (Array.isArray(list) ? list : String(list || '').split(','))
+      .map(function (x) { return String(x).trim().toLowerCase().replace(/^@/, ''); })
+      .filter(function (x) { return x && ALLOWED_DOMAINS.indexOf(x) === -1; });
+    allowedDomains = ALLOWED_DOMAINS.concat(extra);
+    return allowedDomains.slice();
+  }
+  function allowedDomainList() { return allowedDomains.slice(); }
   function domainAllowed(email, domains) {
-    var list = domains && domains.length ? domains : ALLOWED_DOMAINS;
+    var list = domains && domains.length ? domains : allowedDomains;
     var d = emailDomain(email);
     if (!d) return false;
     return list.some(function (x) { return String(x).trim().toLowerCase() === d; });
@@ -94,6 +147,8 @@
   }
   function isAdmin(user) { return can(user, 'admin'); }
   function canEdit(user) { return can(user, 'edit'); }
+  function canView(user) { return can(user, 'view'); }
+  function canImport(user) { return can(user, 'import'); }
 
   /* Markets are a restriction. An empty list means the whole business, which is
      what most accounts want; a non-empty list means only those. */
@@ -112,17 +167,28 @@
 
   /* Who may grant which role. You cannot promote anybody above yourself, and you
      cannot change an account that outranks you -- otherwise a manager could make
-     themselves an admin by editing an admin's row. */
+     themselves an admin by editing an admin's row, or by editing their own.
+
+     A manager's ceiling is therefore Manager: they can staff colleagues and
+     other managers, and cannot create an administrator. */
+  function canAssignRoles(actor) { return can(actor, 'roles'); }
   function grantableRoles(actor) {
+    if (!canAssignRoles(actor)) return [];
     var mine = roleMeta(normalizeUser(actor).role).rank;
-    if (!isAdmin(actor)) return [];
     return ROLES.filter(function (r) { return r.rank <= mine; }).map(function (r) { return r.key; });
   }
   function canManage(actor, target) {
-    if (!isAdmin(actor)) return false;
+    if (!canAssignRoles(actor)) return false;
     var a = normalizeUser(actor), t = normalizeUser(target);
     if (a.email === t.email) return false;          // no editing your own access
     return roleMeta(a.role).rank >= roleMeta(t.role).rank;
+  }
+  /* Can the actor put this target ON this role? Both halves have to hold: the
+     role has to be one they may grant, and the account has to be one they may
+     touch. Checked server-side too -- a select element is not a permission. */
+  function canGrant(actor, target, role) {
+    if (!canManage(actor, target)) return false;
+    return grantableRoles(actor).indexOf(roleMeta(role).key) !== -1;
   }
 
   /* What a first sign-in produces. Refused outright when the domain is not
@@ -130,7 +196,7 @@
   function accountFor(email, name, now) {
     var e = normalizeEmail(email);
     if (!domainAllowed(e)) {
-      return { ok: false, error: 'Only ' + ALLOWED_DOMAINS.join(' and ') + ' addresses can be used here.' };
+      return { ok: false, error: 'Only ' + allowedDomains.join(' and ') + ' addresses can be used here.' };
     }
     return {
       ok: true,
@@ -149,15 +215,21 @@
     emailDomain: emailDomain,
     normalizeEmail: normalizeEmail,
     domainAllowed: domainAllowed,
+    setAllowedDomains: setAllowedDomains,
+    allowedDomainList: allowedDomainList,
     roleMeta: roleMeta,
     normalizeUser: normalizeUser,
     can: can,
     isAdmin: isAdmin,
     canEdit: canEdit,
+    canView: canView,
+    canImport: canImport,
     canSeeMarket: canSeeMarket,
     visibleMarkets: visibleMarkets,
+    canAssignRoles: canAssignRoles,
     grantableRoles: grantableRoles,
     canManage: canManage,
+    canGrant: canGrant,
     accountFor: accountFor
   };
   root.AuthCore = api;

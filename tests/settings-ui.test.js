@@ -10,6 +10,7 @@ let admin = {
   users: [
     { id: 'admin@geodis.com', email: 'admin@geodis.com', name: 'The Admin', role: 'admin', enabled: true, markets: [], lastSeenAt: '2026-08-26T10:00:00Z' },
     { id: 'mgr@geodis.com', email: 'mgr@geodis.com', name: 'A Manager', role: 'manager', enabled: true, markets: ['Chicago'] },
+    { id: 'col@geodis.com', email: 'col@geodis.com', name: 'A Colleague', role: 'colleague', enabled: true, markets: [] },
     { id: 'temp@employbridge.com', email: 'temp@employbridge.com', name: 'Agency', role: 'viewer', enabled: false, markets: [] }
   ],
   locations: [{ id: 'LOC1', code: '1519', name: 'Lego Main', market: 'Chicago', active: true }],
@@ -52,42 +53,56 @@ const d = w.document, $ = s => d.querySelector(s), $$ = s => Array.from(d.queryS
 const click = el => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
 const settle = ms => new Promise(r => setTimeout(r, ms));
 const rowFor = n => $$('.suite-table tbody tr').find(tr => tr.textContent.indexOf(n) !== -1);
-const signInAs = acct => w.__setAuth({ signedIn: true, email: acct.email, account: acct });
+const signInAs = acct => w.__setAuth({ ready: true, signedIn: true, email: acct.email, account: acct });
 
 (async () => {
   await settle(60);
   d.dispatchEvent(new w.CustomEvent('geodis:records', { detail: { records } }));
 
+  /* Signing in is the GATE now, not a panel inside Settings -- nothing renders
+     until there is an account. So the sign-in form is checked where it lives. */
+  console.log('— signed out, there is no app at all —');
+  w.__setAuth({ ready: true, signedIn: false, email: '', account: null });
+  await settle(20);
+  t('a sign-in card', !!$('.gate-card') && !!$('[data-signin]'));
+  t('with email and password', !!$('[name="email"]') && !!$('[name="password"]'));
+  t('create account is offered — anyone at the company can make one',
+    !!$('[data-signin-do="create"]'));
+  t('so is a password reset', !!$('[data-signin-do="reset"]'));
+  t('the approved domains are named',
+    d.body.textContent.indexOf('geodis.com') !== -1 && d.body.textContent.indexOf('employbridge.com') !== -1);
+  t('and it says a new account starts as a Colleague', /starts as a <b>Colleague<\/b>/.test(d.body.innerHTML));
+  t('no navigation to anywhere', $$('.suite-nav-btn').length === 0);
+  t('and none of the roster', d.body.textContent.indexOf('Luz Grachen') === -1);
+
+  console.log('— signed in but with no role yet —');
+  signInAs({ email: 'new@geodis.com', name: 'New Person', role: 'pending', enabled: true, markets: [] });
+  await settle(20);
+  t('still no app', $$('.suite-nav-btn').length === 0);
+  t('and it says what to ask for', /manager or an administrator/i.test(d.body.textContent));
+  t('sign out is the way back', !!$('[data-sign-out]'));
+
   console.log('— the page exists —');
+  signInAs({ email: 'admin@geodis.com', name: 'The Admin', role: 'admin', enabled: true, markets: [] });
+  await settle(20);
   t('Settings is in the sidebar', !!$('[data-nav="settings"]'));
   click($('[data-nav="settings"]'));
-  t('six sections', $$('[data-settings-tab]').length === 6);
+  t('six sections for an admin', $$('[data-settings-tab]').length === 6);
   t('including RC links', !!$('[data-settings-tab="links"]'));
   t('including Connections', !!$('[data-settings-tab="connections"]'));
   t('opens on Account', $('[data-settings-tab="account"]').className.indexOf('primary') !== -1);
 
-  console.log('— signed out —');
-  t('a sign-in form is offered', !!$('[data-signin]'));
-  t('with email and password', !!$('[name="email"]') && !!$('[name="password"]'));
-  t('create account is offered', !!$('[data-signin-do="create"]'));
-  t('so is a password reset', !!$('[data-signin-do="reset"]'));
-  t('the approved domains are named',
-    d.body.textContent.indexOf('geodis.com') !== -1 && d.body.textContent.indexOf('employbridge.com') !== -1);
-  t('and it says a new account starts as a viewer', d.body.textContent.indexOf('starts as a viewer') !== -1);
-
   console.log('— signed in as an admin —');
-  signInAs({ email: 'admin@geodis.com', name: 'The Admin', role: 'admin', enabled: true, markets: [] });
-  await settle(20);
   t('shows who you are', d.body.textContent.indexOf('admin@geodis.com') !== -1);
   t('and your role', d.body.textContent.indexOf('Administrator') !== -1);
   t('markets default to all', d.body.textContent.indexOf('All markets') !== -1);
   t('sign out is offered', !!$('[data-sign-out]'));
-  t('it is honest that sign-in is not enforced', d.body.textContent.indexOf('not enforced') !== -1);
+  t('and it spells out what the role can do', /change settings/i.test(d.body.textContent));
 
   console.log('— users —');
   click($('[data-settings-tab="users"]'));
   await settle(60);
-  t('all three accounts listed', $$('.suite-table tbody tr').length === 3);
+  t('every account listed', $$('.suite-table tbody tr').length === 4);
   t('the disabled one is shown as such', rowFor('temp@employbridge.com').textContent.indexOf('Disable') !== -1 ||
     rowFor('temp@employbridge.com').textContent.indexOf('Enable') !== -1);
   t('an admin can change a manager’s role', !!rowFor('mgr@geodis.com').querySelector('[data-user-role]'));
@@ -162,25 +177,41 @@ const signInAs = acct => w.__setAuth({ signedIn: true, email: acct.email, accoun
   t('under a stable id', post.body.id === 'CFG-rcBaseUrl');
   t('with the key', post.body.key === 'rcBaseUrl');
 
-  console.log('— a non-admin cannot change anything —');
+  /* A manager staffs their own team. That is the whole reason 'roles' is a
+     separate permission from 'admin': they can hand out roles without also
+     getting the RC base URL and the domain allowlist. */
+  console.log('— a manager can staff the team, and nothing else —');
   signInAs({ email: 'mgr@geodis.com', name: 'A Manager', role: 'manager', enabled: true, markets: [] });
   await settle(40);
+  t('Locations and Shifts are not even offered', !$('[data-settings-tab="locations"]') &&
+    !$('[data-settings-tab="shifts"]'));
+  t('nor RC links', !$('[data-settings-tab="links"]'));
+  t('Users is', !!$('[data-settings-tab="users"]'));
   click($('[data-settings-tab="users"]'));
   await settle(60);
-  t('no role dropdowns', $$('[data-user-role]').length === 0);
-  t('no enable/disable buttons', $$('[data-user-toggle]').length === 0);
-  click($('[data-settings-tab="locations"]'));
+  t('a colleague’s role can be changed', !!rowFor('col@geodis.com').querySelector('[data-user-role]'));
+  t('but not an admin’s', !rowFor('admin@geodis.com').querySelector('[data-user-role]'));
+  t('and not their own', !rowFor('mgr@geodis.com').querySelector('[data-user-role]'));
+  const mgrRoles = Array.from(rowFor('col@geodis.com')
+    .querySelector('[data-user-role]').options).filter(o => !o.disabled).map(o => o.value);
+  t('the roles offered stop at Manager', mgrRoles.indexOf('admin') === -1);
+  t('and include Colleague and Manager',
+    mgrRoles.indexOf('colleague') !== -1 && mgrRoles.indexOf('manager') !== -1);
+  t('the ceiling is stated in words', /up to <b>Manager<\/b>/.test(d.body.innerHTML));
+
+  console.log('— a colleague cannot reach any of it —');
+  signInAs({ email: 'col@geodis.com', name: 'A Colleague', role: 'colleague', enabled: true, markets: [] });
   await settle(40);
-  t('no add button', !$('[data-list-add="locations"]'));
-  t('no editable fields', $$('[data-list-field]').length === 0);
-  t('and it explains why', d.body.textContent.indexOf('needs an administrator') !== -1);
+  t('Users is not offered', !$('[data-settings-tab="users"]'));
+  t('nor Locations', !$('[data-settings-tab="locations"]'));
+  t('Connections still is — that is day-to-day work', !!$('[data-settings-tab="connections"]'));
+  t('and it explains why', /needs a manager or an administrator/i.test(d.body.textContent));
 
   console.log('— a disabled admin is not an admin —');
   signInAs({ email: 'admin@geodis.com', name: 'The Admin', role: 'admin', enabled: false, markets: [] });
   await settle(40);
-  click($('[data-settings-tab="users"]'));
-  await settle(60);
-  t('no controls for a disabled admin', $$('[data-user-role]').length === 0);
+  t('and does not get into the app at all', $$('.suite-nav-btn').length === 0);
+  t('being told the account was switched off', /disabled/i.test(d.body.textContent));
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

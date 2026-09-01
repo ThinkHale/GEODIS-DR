@@ -54,7 +54,16 @@
     scheduled:   { label: 'Scheduled',      severity: 'info', onShift: false, desc: 'Scheduled later today.' },
     complete:    { label: 'Shift complete', severity: 'ok',   onShift: false, desc: 'Shift is over and they have left.' },
     lingering:   { label: 'Still on site',  severity: 'warn', onShift: false, desc: 'Shift is over but they are still on premise -- overtime or a missed punch out.' },
-    unscheduled: { label: 'Unscheduled',    severity: 'bad',  onShift: false, desc: 'On premise with no shift covering right now.' },
+    /* On the clock with nothing scheduled to cover them. severity stays 'bad' on
+       purpose: this is the state that MUST stay in front of a supervisor, and
+       'bad' is what keeps it inside the default "Exceptions only" filter. It is
+       not an accusation -- the ordinary cause is voluntary overtime, and the
+       next most common is a shift that never got entered. Either way somebody
+       is on the floor being paid for hours nothing planned for, so it is worth
+       a look and never worth hiding. onShift is false because they were not
+       expected, so coverage is not measured against them. */
+    unscheduled: { label: 'Unscheduled',    severity: 'bad',  onShift: false,
+      desc: 'On premise with no shift covering right now -- usually voluntary overtime, sometimes a shift nobody entered.' },
     off:         { label: 'Off',            severity: 'ok',   onShift: false, desc: 'Not scheduled and not on premise.' },
     /* Approved time off covering today. onShift is false deliberately: they are
        scheduled, but their absence is authorised, so counting them in the
@@ -613,6 +622,12 @@
     });
     // Of the people who should be on the floor right now, how many are?
     s.coverage = s.onShift > 0 ? Math.round(s.byStatus.working / s.onShift * 100) : null;
+    /* On the floor, but not because anything said they should be. Counted
+       separately from coverage -- they are not part of the denominator -- and
+       surfaced on its own so the number is never lost behind another tile. */
+    s.onClockUnscheduled = rows.filter(function (r) {
+      return r.present && r.status === 'unscheduled';
+    }).length;
     return s;
   }
 

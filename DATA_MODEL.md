@@ -427,21 +427,25 @@ someone's data is worse than an oddity — and never excuses an absence.
 
 ### Who changed it, and when
 
-There is no authentication yet, so the actor is a display name the user sets once
-in their browser (`geodis.actorName`). Every write goes through `applyStatus()` or
-`applyConnection()`, which stamp an actor and append to `statusHistory`:
+The actor is the signed-in account. Nothing in the suite renders without one, so
+`currentActor()` has exactly one answer and no fallback. Every write goes through
+`applyStatus()` or `applyConnection()`, which stamp an actor and append to
+`statusHistory`:
 
 ```text
 { status, at, by, byId, source, note? }
 ```
 
-`source` is `local` today, `import` for the seeded first entry. The log is capped
-at 40 entries, shaped server-side rather than trusted, and seeded with where the
-request started so a first change does not look like it arrived in that state.
+`source` is `account` for anything a person did, `import` for the seeded first
+entry. The log is capped at 40 entries, shaped server-side rather than trusted,
+and seeded with where the request started so a first change does not look like it
+arrived in that state.
 
-**When sign-in arrives, only `currentActor()` in `suite.js` changes.** The record
-shape, the change log, and every reader of it stay exactly as they are — which is
-the reason for building it before the auth exists.
+This shape was built before sign-in existed, on the bet that only
+`currentActor()` would have to change when it arrived. That held: the record
+shape, the change log and every reader of it are untouched. What did change is
+what `byId` is worth — it used to be a browser-local id nobody could resolve, and
+it is now an email address that names a person.
 
 ### Connecting an unmatched request
 
@@ -861,13 +865,72 @@ point is a disciplinary record that quietly went missing.
 
 ## Security
 
-There is no per-user auth: the tool is unauthenticated and internal. Reads are
-public; writes are gated by CORS plus an `Origin` check against
-`https://geodis.ebtools.pro`, plus the per-field limits above. That is
-acceptable for internal, low-sensitivity operational data and **not** acceptable
-if this ever holds anything that needs an audit trail of who changed what.
+Every browser-facing read and write requires a signed-in account. Sign-in is
+email and password through Firebase Auth; the browser sends its ID token as
+`Authorization: Bearer …`, and `requireUser()` in `functions/index.js` verifies
+it, pairs it with the stored account, and checks the permission the endpoint
+needs. `auth-core.js` holds the rules and is shared byte-for-byte between the
+browser and the function, so the two can never disagree about what a role means.
 
-Attendance points and time-off approvals are closer to HR records than the
-reconciliation notes this pattern was built for. Adding Firebase Auth, so writes
-carry an identity, is the natural next hardening step — the collection handler
-already isolates every write behind one function.
+### The roles
+
+| Role | `can` | What it is for |
+|---|---|---|
+| `viewer` — Read-only | `view` | Sees the day, changes nothing. Set deliberately; not a default. |
+| `colleague` — Colleague | `view edit import` | The working role, and what every new account starts as. |
+| `manager` — Manager | `view edit import roles` | A colleague who can also staff the team. |
+| `admin` — Administrator | `view edit import roles admin` | Everything, plus the settings panel. |
+
+Two rules do the heavy lifting, both in `can()`:
+
+- **An unknown role grants nothing.** A typo in a stored role is treated as
+  `pending` — no permissions — and the stored value is kept visible rather than
+  coerced, so whoever has to work out what happened can see it.
+- **Disabled beats everything.** A disabled admin is not an admin.
+
+`roles` is a separate permission from `admin` on purpose: it lets a manager give
+colleagues and other managers a role without also handing them the RC base URL,
+the domain allowlist, and the ability to disable an administrator. A manager's
+ceiling is Manager — `grantableRoles()` returns only roles at or below the
+actor's own rank, and `canManage()` refuses an account that outranks them **and
+their own**, so nobody can promote themselves.
+
+Role changes are checked twice. The browser offers only what makes sense; the
+server re-checks the specific change with `canGrant()`, because the role arrives
+as a string in a POST body and a `<select>` is not a permission. The bulk-replace
+path is closed for `users` entirely, since it would rewrite the whole list in one
+write and walk past every per-record check.
+
+### Who may create an account
+
+Anyone at an approved domain, self-service — `geodis.com` and `employbridge.com`,
+plus whatever an administrator adds under Settings → App settings. A new account
+lands on `DEFAULT_ROLE`, which is **Colleague**: the domain check is what stands
+in for an approval, so the tool works the moment somebody signs in rather than
+needing a second person before it does anything. The cost is that the domain
+gate is then the only thing between a new sign-up and editing shared records —
+which is why widening the domain list and lowering `DEFAULT_ROLE` are decisions
+that belong together. That setting
+can only ever **widen** the list: clearing it falls back to the built-ins rather
+than to nothing, so a mistyped field cannot lock every administrator out of a
+tool with no other way in.
+
+The domain is checked at sign-up **and** on every permission check, so removing a
+domain takes effect for accounts that already exist.
+
+### Reads, not just writes
+
+Read gating is the part that is easy to skip and the part that matters most here.
+The reconciliation snapshot is the whole roster — names, badges, employee ids —
+and it used to be served straight from a public Cloud Storage URL. Locking the
+writes while that stayed open would have been a locked door beside an open
+window. It is served from `?snapshot=1` behind the same check as everything else,
+and the Storage rule that made it public must be turned off; see SETUP.md.
+
+### What is still gated by a shared secret
+
+The Power Automate flows. They are server-to-server, have no browser origin and
+no account, and authenticate with `x-sync-key` exactly as before. The `Origin`
+check remains on browser writes, but it is not a security control and never was —
+anything that is not a browser sends whatever origin it likes, and it says
+nothing about *who* is asking. The token does both.

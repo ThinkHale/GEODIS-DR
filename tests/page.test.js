@@ -20,7 +20,10 @@ w.fetch=(url,opt)=>{
   const u=String(url);
   if(opt&&opt.method==='POST'){ posted.push({url:u,body:JSON.parse(opt.body)});
     return Promise.resolve({ok:true,json:()=>Promise.resolve({ok:true,count:1})}); }
-  if(u.includes('snapshots')) return Promise.resolve({ok:true,json:()=>Promise.resolve(snapshot)});
+  /* The roster comes through the Cloud Function now, behind the same account
+     check as everything else -- it used to be a public Storage URL that anybody
+     with the link could read without signing in. */
+  if(u.includes('snapshot=1')) return Promise.resolve({ok:true,json:()=>Promise.resolve(snapshot)});
   if(u.includes('notes=1'))     return Promise.resolve({ok:true,json:()=>Promise.resolve({notes:{'1003':{note:'Waiting on I-9'}}})});
   if(u.includes('overrides=1')) return Promise.resolve({ok:true,json:()=>Promise.resolve({overrides:{'1003':{action:'matched'}}})});
   const k=u.match(/\?(\w+)=1/); const map={attendance:'attendance',timeoff:'timeOff',requisitions:'requisitions',performance:'performance',shifts:'shifts',discrepancies:'discrepancies'};
@@ -69,26 +72,64 @@ const wb=$$('a[href*="sharepoint.com"]');
 t('linking out to the sheet that owns them', wb.length>0);
 t('opening in its own tab', wb[0].target==='_blank' && /noopener/.test(wb[0].rel));
 
-console.log('— writes go to the shared server store —');
+/* Time off is raised on the shared IL PTO tracker, not here -- a request typed
+   into this tool would be approved here and still leave the person marked absent
+   by the sheet that gets paid from. So the page links out instead of offering a
+   form, and the shared-write property is proved with a task, which this tool
+   really does own. */
+console.log('— time off is raised on the sheet that owns it —');
 click($('[data-nav="timeoff"]'));
-click($('[data-add="timeoff"]'));
+t('no form for a new request', !$('[data-add="timeoff"]'));
+const ptoLink=$$('a[href*="sharepoint.com"]').filter(a=>/PTO spreadsheet/i.test(a.textContent));
+t('the hero links to the tracker instead', ptoLink.length===1);
+t('opening in its own tab', ptoLink[0].target==='_blank' && /noopener/.test(ptoLink[0].rel));
+
+console.log('— writes go to the shared server store —');
+click($('[data-add-task]'));
 t('modal opened', !!$('#suite-modal'));
-const form=$('[data-form="timeoff"]');
+const form=$('[data-form="task"]');
+form.querySelector('[name="title"]').value='End this assignment';
 form.querySelector('[name="badge"]').value='1001';
-form.querySelector('[name="start"]').value='2026-08-24';
-form.querySelector('[name="end"]').value='2026-08-24';
-form.querySelector('[name="hours"]').value='8';
+form.querySelector('[name="detail"]').value='Left on Friday.';
 form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
 setTimeout(()=>{
-  const p=posted.filter(x=>x.url&&x.url.includes('timeoff=1'));
+  const p=posted.filter(x=>x.url&&x.url.includes('tasks=1'));
   t('one POST issued', p.length===1);
   t('POST carries the badge, not a fake associate id', p[0].body.badge==='1001');
   t('POST carries a stable id', typeof p[0].body.id==='string'&&p[0].body.id.length>0);
   t('nothing written to localStorage', w.localStorage.length===0);
-  t('it landed on the profile', w.GEODISSuite.profile('1001').timeOff.length===1);
-  t('with the hours it was saved with', w.GEODISSuite.profile('1001').timeOff[0].hours===8);
+  t('it landed in the shared task list', (w.GEODISSuite.state.stores.tasks||[]).length===1);
+  t('with the detail it was saved with', w.GEODISSuite.state.stores.tasks[0].detail==='Left on Friday.');
 
-  console.log('— one market across both views —');
+  /* The reconciliation table is rendered by this page's own script, not by the
+   suite, so it does not know about roles on its own. Both of its editable things
+   have to refuse a read-only account -- and refuse BEFORE moving local state, or
+   the change sits on screen for the rest of the session and nowhere else. */
+console.log('— reconciliation is read-only for a read-only account —');
+click($('[data-nav="reconciliation"]'));
+w.__setRole('viewer');
+t('the page is marked read-only', d.body.classList.contains('suite-readonly'));
+t('and the suite answers for it', w.GEODISSuite.can('view') && !w.GEODISSuite.can('edit'));
+const note = $('#tbody .note-input');
+t('the note box is still there to read', !!note);
+const roWrites = () => posted.filter(x=>x.url&&/notes=1|overrides=1/.test(x.url)).length;
+const before2 = roWrites();
+note.value = 'should not stick';
+note.dispatchEvent(new w.Event('change', {bubbles:true}));
+t('typing in it writes nothing', roWrites() === before2);
+t('and it does not linger on screen as if it had',
+  !$$('#tbody .note-input').some(n => n.value === 'should not stick'));
+w.__setRole('colleague');
+t('a colleague clears the mark', !d.body.classList.contains('suite-readonly'));
+const note2 = $('#tbody .note-input');
+note2.value = 'a real note';
+note2.dispatchEvent(new w.Event('change', {bubbles:true}));
+/* A refusal re-renders the table and the typed text disappears. Text that
+   survives the dispatch means the guard let it through -- checked this way
+   rather than on the POST, which is a tick away and this block is not async. */
+t('and can write a note again', $('#tbody .note-input').value === 'a real note');
+
+console.log('— one market across both views —');
   click($('[data-nav="overview"]'));
   const mp=$('#market-picker');
   t('header picker offers the snapshot markets', mp.textContent.indexOf('Atlanta')!==-1);

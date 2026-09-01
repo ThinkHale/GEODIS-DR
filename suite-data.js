@@ -362,18 +362,58 @@
     return Math.round(total / parts.length);
   }
 
-  /* ---------- shared collection I/O ---------- */
+  /* ---------- shared collection I/O ----------
+     Every request carries the signed-in account's Firebase ID token. The server
+     decides what that account may read and write; nothing here is trusted to
+     make that call, and nothing here is reachable without it.
+
+     One request shape, one place the header is attached. A fetch that went
+     round this would be an unauthenticated request that silently fails, which
+     is the hardest kind of bug to see. */
   function url(name) { return API + '?' + name + '=1'; }
 
+  function authHeaders(base) {
+    var headers = Object.assign({}, base || {});
+    var auth = root.SuiteAuth;
+    if (!auth || !auth.idToken) return Promise.resolve(headers);
+    return auth.idToken().then(function (token) {
+      if (token) headers.Authorization = 'Bearer ' + token;
+      return headers;
+    }).catch(function () { return headers; });
+  }
+  function authedFetch(u, opts) {
+    opts = opts || {};
+    return authHeaders(opts.headers).then(function (headers) {
+      return fetch(u, Object.assign({}, opts, { headers: headers }));
+    });
+  }
+
+  /* A 401 or a 403 is not "the network was flaky". It means this browser is no
+     longer allowed to see what it is asking for -- signed out in another tab,
+     or a role changed under them. Announced so the shell can put the gate back
+     up, rather than left to degrade into a page of empty tables that looks like
+     the data was lost. */
+  function announceDenied(status) {
+    if (typeof document === 'undefined' || !document.dispatchEvent) return;
+    document.dispatchEvent(new CustomEvent('geodis:denied', { detail: { status: status } }));
+  }
+  function checked(res) {
+    if (res.status === 401 || res.status === 403) {
+      announceDenied(res.status);
+      var err = new Error(res.status === 401 ? 'Not signed in.' : 'Not allowed.');
+      err.denied = res.status;
+      throw err;
+    }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.json();
+  }
+
   function loadCollection(name) {
-    return fetch(url(name), { cache: 'no-store' })
-      .then(function (res) {
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return res.json();
-      })
+    return authedFetch(url(name), { cache: 'no-store' })
+      .then(checked)
       .then(function (data) { return data[COLLECTIONS[name]] || []; })
       .catch(function (err) {
-        console.warn('Could not load the shared "' + name + '" collection.', err);
+        if (!err.denied) console.warn('Could not load the shared "' + name + '" collection.', err);
         return [];
       });
   }
@@ -381,11 +421,22 @@
   // `name` is either a collection name or a ready-made query string.
   function post(name, body) {
     var u = name.indexOf('=') === -1 ? url(name) : API + '?' + name;
-    return fetch(u, {
+    return authedFetch(u, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     }).then(function (res) {
+      if (res.status === 401 || res.status === 403) {
+        announceDenied(res.status);
+        /* The server's own words, not a status code. It knows which role the
+           account has and what it was reaching for; "HTTP 403" tells the person
+           at the keyboard nothing they can act on. */
+        return res.json().catch(function () { return {}; }).then(function (d) {
+          var err = new Error(d.error || 'That is not something this account can do.');
+          err.denied = res.status;
+          throw err;
+        });
+      }
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return res.json();
     });
@@ -412,11 +463,12 @@
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
   }
   function getJson(u) {
-    return fetch(u, { cache: 'no-store' }).then(function (res) {
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return res.json();
-    });
+    return authedFetch(u, { cache: 'no-store' }).then(checked);
   }
+  /* The reconciliation snapshot -- the roster. Fetched through the function so
+     it is behind the same account gate as everything else, rather than straight
+     off a public Storage URL that needed no sign-in at all. */
+  function loadSnapshot() { return getJson(API + '?snapshot=1'); }
   function loadSchedule(period) {
     return getJson(API + '?schedule=1&period=' + encodeURIComponent(period))
       .then(function (d) { return d.schedule && d.schedule.people ? d.schedule : null; })
@@ -524,6 +576,8 @@
     bandFor: bandFor,
     scoreOf: scoreOf,
     loadCollection: loadCollection,
+    loadSnapshot: loadSnapshot,
+    authedFetch: authedFetch,
     loadAll: loadAll,
     saveRecord: saveRecord,
     deleteRecord: deleteRecord,

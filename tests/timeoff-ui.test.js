@@ -89,17 +89,23 @@ const rowFor = name => $$('.suite-table tbody tr').find(tr => tr.textContent.ind
   sel.value = 'Sent for Client Approval';
   sel.dispatchEvent(new w.Event('change', { bubbles: true }));
   await settle(60);
-  t('it asked who is making the change', posts.some(p => p.prompt && p.prompt.indexOf('Your name') !== -1));
+  /* Nobody is asked for their name any more. The suite does not render without a
+     signed-in account, so the account IS the actor -- a name typed into a browser
+     prompt was never evidence of who did anything. */
+  t('nothing asked who is making the change', !posts.some(p => p.prompt));
   let post = posts.filter(p => p.url && p.url.indexOf('timeoff=1') !== -1).pop();
   t('the change was saved', !!post);
   t('with the new status', post.body.status === 'Sent for Client Approval');
-  t('attributed', post.body.statusUpdatedBy === 'Cody Hale');
+  t('attributed to the signed-in account', post.body.statusUpdatedBy === 'Tester');
   t('and timestamped', !!post.body.statusUpdatedAt);
   t('a change log is written', Array.isArray(post.body.statusHistory));
   t('seeded with where it started', post.body.statusHistory[0].status === 'Received');
   t('then the change', post.body.statusHistory[1].status === 'Sent for Client Approval');
-  t('the actor id is stored for when sign-in exists', 'byId' in post.body.statusHistory[1]);
-  t('the name is only asked once', posts.filter(p => p.prompt).length === 1);
+  t('the actor id is the account, not a browser-local one',
+    post.body.statusHistory[1].byId === 'tester@geodis.com');
+  t('and the change says it came from an account',
+    post.body.statusHistory[1].source === 'account');
+  t('no prompt, ever', posts.filter(p => p.prompt).length === 0);
 
   const sel2 = rowFor('Luz Grachen').querySelector('.status-select');
   sel2.value = 'Approved';
@@ -108,7 +114,7 @@ const rowFor = name => $$('.suite-table tbody tr').find(tr => tr.textContent.ind
   post = posts.filter(p => p.url && p.url.indexOf('timeoff=1') !== -1).pop();
   t('the trail accumulates', post.body.statusHistory.length === 3);
   t('now excused', rowFor('Luz Grachen').textContent.indexOf('Excused · 0 points') !== -1);
-  t('who and when shown on the row', rowFor('Luz Grachen').textContent.indexOf('Cody Hale') !== -1);
+  t('who and when shown on the row', rowFor('Luz Grachen').textContent.indexOf('Tester') !== -1);
 
   console.log('— an unmatched request —');
   const orphanRow = rowFor('Luiz Grachan');
@@ -137,22 +143,35 @@ const rowFor = name => $$('.suite-table tbody tr').find(tr => tr.textContent.ind
   t('the picker closed', !$('#connect-search'));
   post = posts.filter(p => p.url && p.url.indexOf('timeoff=1') !== -1).pop();
   t('the badge was saved', post.body.badge === '215001');
-  t('who linked it', post.body.connectedBy === 'Cody Hale');
+  t('who linked it', post.body.connectedBy === 'Tester');
   t('and when', !!post.body.connectedAt);
   t('the link is in the change log', post.body.statusHistory.some(e => (e.note || '').indexOf('Linked to badge 215001') !== -1));
   t('the status was not altered by linking', post.body.status === undefined);
   t('the row now resolves to the associate', !rowFor('Luiz Grachan'));
   t('and the banner is gone', d.body.textContent.indexOf('could not be matched to an associate') === -1);
 
-  console.log('— cancelling the name prompt changes nothing —');
-  promptReply = null;
-  try { w.localStorage.removeItem('geodis.actorName'); } catch (e) {}
-  const before = posts.filter(p => p.url && p.url.indexOf('timeoff=1') !== -1).length;
-  const s3 = rowFor('Abel Munoz').querySelector('.status-select');
-  s3.value = 'Denied';
-  s3.dispatchEvent(new w.Event('change', { bubbles: true }));
-  await settle(60);
-  t('no write without an actor', posts.filter(p => p.url && p.url.indexOf('timeoff=1') !== -1).length === before);
+  /* A read-only account sees the same page and can change nothing on it. The
+     status control is not a disabled select somebody might keep clicking -- it
+     is the status, as a fact. */
+  console.log('— what a read-only account sees —');
+  const beforeRO = posts.filter(p => p.url && p.url.indexOf('timeoff=1') !== -1).length;
+  w.__setRole('viewer');
+  await settle(40);
+  t('the requests are still listed', !!rowFor('Luz Grachen'));
+  t('but no status can be changed', $$('.status-select').length === 0);
+  /* The status is still there, as a chip rather than a control. One per row --
+     the same count the selects had -- so nothing was dropped along with the
+     ability to change it. */
+  t('every status is still readable', $$('.suite-table tbody tr .cov-status').length ===
+    $$('.suite-table tbody tr').length);
+  t('and reads as the status, not as a control',
+    $$('.cov-status').some(c => c.textContent.trim() === 'Approved'));
+  t('nothing offers to remove a request', $$('[data-del]').length === 0);
+  t('and the page says why', d.body.textContent.indexOf('nothing here can be changed') !== -1);
+  t('no write was issued', posts.filter(p => p.url && p.url.indexOf('timeoff=1') !== -1).length === beforeRO);
+  w.__setRole('colleague');
+  await settle(40);
+  t('a colleague gets the controls back', $$('.status-select').length > 0);
 
   console.log('— completed requests are out of the way by default —');
   t('the finished request is not listed', !rowFor('2026-07-01'));

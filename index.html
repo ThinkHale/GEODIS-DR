@@ -814,12 +814,17 @@ document.querySelectorAll('thead th').forEach(th=>th.addEventListener('click', (
 document.getElementById('btn-action').addEventListener('click', exportActionList);
 document.getElementById('btn-full').addEventListener('click', exportFull);
 
-/* ---------- automated sync (Firebase snapshot) ---------- */
-// Fill this in once the Cloud Function + Storage bucket are deployed, e.g.
-// 'https://storage.googleapis.com/YOUR_BUCKET/snapshots/latest.json'
-// Left blank, the tool just behaves as a manual-upload tool (today's behavior).
-// Firebase Storage download endpoint (honors the 'allow read: if true' rule on snapshots/).
-const SNAPSHOT_URL = 'https://firebasestorage.googleapis.com/v0/b/geodis-dr.firebasestorage.app/o/snapshots%2Flatest.json?alt=media';
+/* ---------- automated sync (Firebase snapshot) ----------
+   The snapshot is the roster: every active assignment, with names, badges and
+   employee ids. It used to be fetched straight from a public Storage download
+   URL, which meant anyone holding the link had the whole roster without signing
+   in -- the front door locked and the window open.
+
+   It comes through the Cloud Function now, behind the same account check as
+   every other read (see handleSnapshot in functions/index.js). The Storage rule
+   for `snapshots/` must be `allow read: if false` for that to be worth
+   anything; see SETUP.md. */
+const SNAPSHOT_URL = 'https://syncreport-eusvh7xq5q-uc.a.run.app/?snapshot=1';
 // Shared notes API (badge -> note), served by the Cloud Function.
 const NOTES_URL = 'https://syncreport-eusvh7xq5q-uc.a.run.app/?notes=1';
 // Shared status-override API (badge -> action), persistent until corrected.
@@ -827,10 +832,36 @@ const OVERRIDES_URL = 'https://syncreport-eusvh7xq5q-uc.a.run.app/?overrides=1';
 
 let syncedSnapshot = null;
 
+/* Every call here carries the signed-in account's token, same as the suite. The
+   suite owns the session; this reaches into it rather than starting a second
+   one, so the two can never disagree about who is looking. */
+/* What this account may do. The suite owns the session and the roles; this
+   asks it rather than keeping a second opinion. Defaults to allowed when the
+   suite has not booted, because the server refuses anyway -- the point of the
+   check here is a clear message, not the enforcement. */
+function mayEdit(){
+  return !window.GEODISSuite || !window.GEODISSuite.can || window.GEODISSuite.can('edit');
+}
+function refuseReadOnly(what){
+  alert('That was not saved.\n\nYour account can see the day but not change it, so ' + what +
+    ' is read-only. A manager or an administrator can give you the Colleague role under Settings.');
+}
+function authedGet(url){
+  return (window.SuiteData && window.SuiteData.authedFetch)
+    ? window.SuiteData.authedFetch(url, {cache:'no-store'})
+    : fetch(url, {cache:'no-store'});
+}
+function authedPost(url, body){
+  const opts = {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)};
+  return (window.SuiteData && window.SuiteData.authedFetch)
+    ? window.SuiteData.authedFetch(url, opts)
+    : fetch(url, opts);
+}
+
 /* ---------- shared notes ---------- */
 async function loadNotes(){
   try{
-    const res = await fetch(NOTES_URL, {cache:'no-store'});
+    const res = await authedGet(NOTES_URL);
     if(!res.ok) throw new Error('HTTP '+res.status);
     const data = await res.json();
     S.notes = (data && data.notes) ? data.notes : {};
@@ -841,10 +872,13 @@ async function loadNotes(){
   publishRecords();
 }
 async function saveNote(badge, note){
+  // Checked BEFORE the local state moves. Applying it first and failing after
+  // leaves the note on screen for the rest of the session and nowhere else.
+  if(!mayEdit()){ refuseReadOnly('a note'); renderTable(); return; }
   if(note.trim()==='') delete S.notes[badge];
   else S.notes[badge] = { note:note, updatedAt:new Date().toISOString() };
   try{
-    const res = await fetch(NOTES_URL, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({badge:badge, note:note})});
+    const res = await authedPost(NOTES_URL, {badge:badge, note:note});
     if(!res.ok) throw new Error('HTTP '+res.status);
   }catch(err){
     console.warn('Could not save note for badge '+badge, err);
@@ -888,7 +922,7 @@ function publishRecords(){
 }
 async function loadOverrides(){
   try{
-    const res=await fetch(OVERRIDES_URL,{cache:'no-store'});
+    const res=await authedGet(OVERRIDES_URL);
     if(!res.ok) throw new Error('HTTP '+res.status);
     const data=await res.json();
     S.overrides=(data && data.overrides)?data.overrides:{};
@@ -897,12 +931,13 @@ async function loadOverrides(){
   populateFilterOptions(); renderStats(); renderTable();
 }
 async function saveOverride(badge, action){
+  if(!mayEdit()){ refuseReadOnly('a status change'); renderTable(); return; }
   if(action==='') delete S.overrides[badge];
   else S.overrides[badge]={ action:action, updatedAt:new Date().toISOString() };
   applyOverrides();
   populateFilterOptions(); renderStats(); renderTable();
   try{
-    const res=await fetch(OVERRIDES_URL,{method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({badge:badge, action:action})});
+    const res=await authedPost(OVERRIDES_URL, {badge:badge, action:action});
     if(!res.ok) throw new Error('HTTP '+res.status);
   }catch(err){ console.warn('Could not save status override for '+badge, err); alert('That status change could not be saved (network or permission issue).'); }
 }
@@ -924,7 +959,7 @@ document.getElementById('tbody').addEventListener('change', e=>{
 async function loadSyncedSnapshot(){
   if(!SNAPSHOT_URL){ showUploadSection(); return; }
   try{
-    const res = await fetch(SNAPSHOT_URL, {cache:'no-store'});
+    const res = await authedGet(SNAPSHOT_URL);
     if(!res.ok) throw new Error('HTTP '+res.status);
     const data = await res.json();
     if(!data || !Array.isArray(data.records)) throw new Error('Unexpected snapshot format');

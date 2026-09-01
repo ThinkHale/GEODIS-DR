@@ -1,37 +1,48 @@
 /* GEODIS Management Suite -- sign-in.
  *
  * Email and password via Firebase Auth, open to the approved company domains in
- * auth-core.js. The SDK is loaded lazily from the CDN the first time somebody
- * actually signs in, so the tool keeps working -- and loading fast -- for anyone
- * who has not signed in yet.
+ * auth-core.js. Anyone at one of those domains can create their own account; it
+ * starts read-only, and a manager or an administrator gives it a role.
  *
- * Deliberately NOT enforced. Nothing here blocks the app: an unauthenticated
- * visitor gets exactly what they got before. What signing in changes today is
- * that actions are attributed to a real account rather than a name typed into a
- * browser, and that an admin can see and manage the account list. Enforcement is
- * a separate decision, taken once everyone has an account.
+ * ENFORCED. Nothing in the suite renders, and no request to the server is
+ * answered, until there is a signed-in account with a role that allows it. The
+ * server is the authority -- every read and write is checked there -- and this
+ * is the front door that makes that legible rather than a wall of failures.
+ *
+ * `ready` is the state that matters for the shell. Restoring a session is
+ * asynchronous, so between load and the first onAuthStateChanged callback the
+ * honest answer is "not known yet", not "signed out". Rendering the sign-in form
+ * during that gap flashes it at somebody who is already signed in, and worse,
+ * invites them to type a password they did not need.
  */
 (function (root) {
   'use strict';
 
   var SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
   var API = 'https://syncreport-eusvh7xq5q-uc.a.run.app/';
-  var state = { app: null, auth: null, user: null, account: null, loading: false, error: '' };
+  var state = { app: null, auth: null, user: null, account: null, loading: false, error: '',
+    ready: false, denied: '' };
   var listeners = [];
 
   function notify() { listeners.forEach(function (fn) { try { fn(snapshot()); } catch (e) { console.warn(e); } }); }
   function onChange(fn) { listeners.push(fn); fn(snapshot()); }
   function snapshot() {
     return {
+      ready: state.ready,
       signedIn: !!state.user,
       email: state.user ? state.user.email : '',
       account: state.account,
       loading: state.loading,
-      error: state.error
+      error: state.error,
+      denied: state.denied
     };
   }
+  // The server said no to something. Kept on the snapshot so the shell can say
+  // which account was refused rather than showing an empty page.
+  function noteDenied(message) { state.denied = message || ''; notify(); }
 
-  // Loaded on demand: most page loads never need it.
+  // Pulled from the CDN on load. Every page needs it now: there is no page
+  // without an account.
   function sdk() {
     if (state.app) return Promise.resolve(state.auth);
     return Promise.all([
@@ -44,7 +55,10 @@
       state.authMod = authMod;
       authMod.onAuthStateChanged(state.auth, function (u) {
         state.user = u;
-        if (!u) { state.account = null; notify(); return; }
+        // Whatever the answer, it is now known. Set before notifying so the
+        // first render after this sees a settled state.
+        state.ready = true;
+        if (!u) { state.account = null; state.denied = ''; notify(); return; }
         register().then(notify);
       });
       return state.auth;
@@ -72,9 +86,13 @@
     });
   }
 
+  /* A first check, in the browser, so somebody typing a personal address is told
+     immediately rather than after a round trip. It is NOT the control: the same
+     check runs on the server against the same list, and that is the one that
+     decides. */
   function guardDomain(email) {
     if (root.AuthCore && !root.AuthCore.domainAllowed(email)) {
-      return 'Only ' + root.AuthCore.ALLOWED_DOMAINS.join(' and ') + ' addresses can be used here.';
+      return 'Only ' + root.AuthCore.allowedDomainList().join(' and ') + ' addresses can be used here.';
     }
     return '';
   }
@@ -133,20 +151,20 @@
       return sdk().then(function (auth) { return state.authMod.signOut(auth); });
     });
   }
-  // Restores a session on load without pulling the SDK for visitors who never
-  // sign in: only worth it if this browser has signed in before.
+  /* Loads the SDK on every visit now, not only for browsers that have signed in
+     before. There is nothing to see without an account, so there is no visitor
+     to save the download for -- and skipping it left anybody whose local flag
+     had been cleared staring at a sign-in form while their session was still
+     valid. */
   function resume() {
-    var seen = false;
-    try { seen = !!localStorage.getItem('geodis.signedInBefore'); } catch (e) {}
-    if (seen) sdk();
+    sdk().catch(function (err) {
+      state.ready = true;
+      state.error = 'The sign-in service could not be reached: ' + err.message;
+      notify();
+    });
   }
-  onChange(function (s) {
-    if (!s.signedIn) return;
-    try { localStorage.setItem('geodis.signedInBefore', '1'); } catch (e) {}
-  });
-
   root.SuiteAuth = {
-    onChange: onChange, snapshot: snapshot, resume: resume,
+    onChange: onChange, snapshot: snapshot, resume: resume, noteDenied: noteDenied,
     signIn: signIn, createAccount: createAccount, resetPassword: resetPassword, signOut: signOut,
     idToken: function () { return state.user ? state.user.getIdToken() : Promise.resolve(''); }
   };

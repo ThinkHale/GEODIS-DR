@@ -102,8 +102,17 @@ t('unknown person has no schedule', SC.scheduleFor(stored, ['b:NOPE']) === null)
 /* ---------- the Cloud Function handlers, run against a fake bucket ---------- */
 console.log('— stored documents (functions/index.js) —');
 const src = fs.readFileSync(path.join(__dirname, '..', 'functions', 'index.js'), 'utf8');
+/* The browser-facing halves of these handlers sit behind requireUser() now.
+   The definition lives outside the slice each harness pulls, so the shared
+   stub is injected -- same shape, same status codes. See fn-auth.js. */
+const { makeAuth, reqGet } = require('./fn-auth.js');
+const auth = makeAuth();
 const consts = src.slice(src.indexOf('const SCHEDULE_DIR'), src.indexOf('const NOTES_ORIGIN'));
-const handlers = src.slice(src.indexOf('function dateKeyOf'), src.indexOf('function parseToState'));
+/* Sliced up to the auth section, not to the end of the file: past this point
+   the source defines the REAL requireUser, which would shadow the injected stub
+   and then need the Admin SDK and the whole COLLECTIONS map to run. The real
+   one is exercised by collections.test.js, which pulls it in on purpose. */
+const handlers = src.slice(src.indexOf('function dateKeyOf'), src.indexOf('/* ---------- who is calling ----------'));
 
 let files = {};
 const bucket = {
@@ -114,14 +123,21 @@ const NOTES_ORIGIN = 'https://geodis.ebtools.pro';
 async function readJsonFile(p) { return files[p] ? JSON.parse(files[p]) : {}; }
 function setKvCors() {}
 const { handleSchedule, handleCoverage, dateKeyOf } = new Function(
-  'bucket', 'NOTES_ORIGIN', 'readJsonFile', 'setKvCors', 'console',
+  'bucket', 'NOTES_ORIGIN', 'readJsonFile', 'setKvCors', 'console', 'requireUser',
   consts + handlers + '\nreturn {handleSchedule,handleCoverage,dateKeyOf};'
-)(bucket, NOTES_ORIGIN, readJsonFile, setKvCors, console);
+)(bucket, NOTES_ORIGIN, readJsonFile, setKvCors, console, auth.requireUser);
 
 const mkRes = () => { const r = { code: null, body: null, set() { return r }, status(c) { r.code = c; return r }, json(b) { r.body = b; return r }, send() { return r } }; return r; };
-const call = async (h, method, query, body, origin) => {
+/* `get` answers each header by name now. It used to answer every header with the
+   origin, which was harmless until the handlers started reading a second one --
+   an Authorization of "https://geodis.ebtools.pro" is not a token. */
+const call = async (h, method, query, body, origin, token) => {
   const res = mkRes();
-  await h({ method, query: query || {}, body: body || {}, get: () => origin === undefined ? NOTES_ORIGIN : origin }, res);
+  const headers = {
+    origin: origin === undefined ? NOTES_ORIGIN : origin,
+    authorization: token === undefined ? 'Bearer test-token' : token
+  };
+  await h({ method, query: query || {}, body: body || {}, get: reqGet(headers) }, res);
   return res;
 };
 

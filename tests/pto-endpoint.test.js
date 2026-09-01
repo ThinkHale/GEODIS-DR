@@ -12,7 +12,11 @@ const t = (n, c) => { if (c) pass++; else { fail++; console.log('  FAIL: ' + n);
 
 const src = fs.readFileSync(path.join(__dirname, '..', 'functions', 'index.js'), 'utf8');
 const consts = src.slice(src.indexOf('const COLLECTIONS = {'), src.indexOf('const NOTES_ORIGIN'));
-const handler = src.slice(src.indexOf('async function rosterProfiles'), src.indexOf('function parseToState'));
+/* Sliced up to the auth section, not to the end of the file: past this point
+   the source defines the REAL requireUser, which would shadow the injected stub
+   and then need the Admin SDK and the whole COLLECTIONS map to run. The real
+   one is exercised by collections.test.js, which pulls it in on purpose. */
+const handler = src.slice(src.indexOf('async function rosterProfiles'), src.indexOf('/* ---------- who is calling ----------'));
 // readJsonArray .. handleCollection also contains sanitizeRecord.
 const helpers = src.slice(src.indexOf('async function readJsonArray'), src.indexOf('async function handleCollection'));
 

@@ -11,6 +11,16 @@ const records = [
 ];
 let stores = {
   attendance: [], timeOff: [], requisitions: [], performance: [], shifts: [],
+  /* Raised from the + button rather than off the discrepancy form. It used to
+     appear on Tasks and nowhere else, so somebody who logged a payroll issue
+     here came back to this page and found no sign of it. */
+  tasks: [
+    { id: 'TK-1', kind: 'payroll', title: 'Chase the missing OT run', detail: 'Redbull, week of the 30th.',
+      badge: '215002', name: 'Abel Munoz', market: 'Chicago', status: 'Open',
+      createdAt: '2026-09-01T08:00:00Z', updatedAt: '2026-09-01T08:00:00Z' },
+    { id: 'TK-2', kind: 'note', title: 'Not a payroll thing', detail: '', status: 'Open',
+      createdAt: '2026-09-01T08:00:00Z', updatedAt: '2026-09-01T08:00:00Z' }
+  ],
   discrepancies: [
     { id: 'PDF-900', badge: '215001', name: 'Luz Grachen', location: 'LEGO', date: '2026-08-25',
       weekEnding: '2026-08-30', details: 'Missing 4 hours Tuesday', status: 'Received',
@@ -42,7 +52,9 @@ const dom = new JSDOM(`<!doctype html><html><body class="suite-active">
   { runScripts: 'outside-only', url: 'https://geodis.ebtools.pro/' });
 const w = dom.window;
 w.alert = m => posts.push({ alert: m }); w.confirm = () => true; w.scrollTo = () => {};
-w.prompt = () => 'Cody Hale';
+// Nothing prompts for a name any more; the signed-in account is the actor. A
+// prompt firing at all is now a failure, so it is recorded rather than answered.
+w.prompt = m => { posts.push({ prompt: m }); return null; };
 w.XLSX = { read: () => ({ SheetNames: [], Sheets: {} }), utils: { sheet_to_json: x => x } };
 w.fetch = (url, opt) => {
   const u = String(url);
@@ -66,7 +78,7 @@ w.fetch = (url, opt) => {
   if (/schedule=1|coverage=1/.test(u)) return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
   const k = u.match(/\?(\w+)=1/)[1];
   const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions',
-    performance: 'performance', shifts: 'shifts', discrepancies: 'discrepancies' };
+    performance: 'performance', shifts: 'shifts', discrepancies: 'discrepancies', tasks: 'tasks' };
   return Promise.resolve({ ok: true, json: () => Promise.resolve({ [map[k]]: stores[map[k]] }) });
 };
 ['auth-core.js', 'tests/suite-auth-stub.js', 'suite-data.js', 'schedule-core.js', 'shift-key.js', 'pipeline-core.js', 'timeoff-core.js', 'payroll-core.js', 'tasks-core.js', 'contacts-core.js', 'reqs-core.js', 'pto-tracker-core.js', 'suite.js']
@@ -90,13 +102,33 @@ const rowFor = n => $$('.suite-table tbody tr').find(tr => tr.textContent.indexO
   t('discrepancies open first', $('[data-payroll-tab="discrepancies"]').className.indexOf('primary') !== -1);
 
   console.log('— discrepancies —');
-  t('both listed', $$('.suite-table tbody tr').length === 2);
+  // Scoped to the discrepancy table by a column only it has: the payroll page
+  // now carries a second table, and counting every row on the page would make
+  // this assertion fail for a reason that has nothing to do with discrepancies.
+  const dscTable = () => $$('.suite-table').filter(x => /Week ending/.test(x.querySelector('thead').textContent))[0];
+  t('both listed', dscTable().querySelectorAll('tbody tr').length === 2);
   t('details shown', d.body.textContent.indexOf('Missing 4 hours Tuesday') !== -1);
   t('location shown', d.body.textContent.indexOf('LEGO') !== -1);
   t('week ending shown', d.body.textContent.indexOf('2026-08-30') !== -1);
-  t('open count', $$('.metric-value')[0].textContent.trim() === '2');
-  t('unmatched counted', $$('.metric-value')[2].textContent.trim() === '1');
+  const tile = label => {
+    const m = $$('.metric').filter(x => x.querySelector('.metric-label').textContent.trim() === label)[0];
+    return m ? m.querySelector('.metric-value').textContent.trim() : null;
+  };
+  t('open count', tile('Open discrepancies') === '2');
+  t('unmatched counted', tile('Unmatched') === '1');
   t('and bannered', d.body.textContent.indexOf('could not be matched to an associate') !== -1);
+
+  /* A payroll issue raised by hand is a payroll issue. It stays its own record
+     -- a discrepancy is a claim about one week's hours and has its own pipeline
+     -- but it is on the page somebody went looking for it on. */
+  t('a payroll task raised by hand is on the payroll page',
+    d.body.textContent.indexOf('Chase the missing OT run') !== -1);
+  t('and counted', tile('Payroll tasks') === '1');
+  t('a task of another kind is not dragged in',
+    d.body.textContent.indexOf('Not a payroll thing') === -1);
+  t('it can be completed from here', $$('[data-task-done]').length === 1);
+  t('with a way through to the whole queue',
+    $$('[data-nav="tasks"]').some(b => /All tasks/.test(b.textContent)));
 
   console.log('— its own pipeline, not time off’s —');
   const sel = rowFor('Luz Grachen').querySelector('.status-select');
@@ -114,7 +146,8 @@ const rowFor = n => $$('.suite-table tbody tr').find(tr => tr.textContent.indexO
   let post = posts.filter(p => p.url && p.url.indexOf('discrepancies=1') !== -1).pop();
   t('the change is saved to the discrepancies collection', !!post);
   t('with the new status', post.body.status === 'Researching');
-  t('attributed', post.body.statusUpdatedBy === 'Cody Hale');
+  t('attributed to the signed-in account', post.body.statusUpdatedBy === 'Tester');
+  t('and nothing asked for a name', !posts.some(p => p.prompt));
   t('and logged', Array.isArray(post.body.statusHistory) && post.body.statusHistory.length === 2);
 
   console.log('— connecting an unmatched discrepancy —');
@@ -129,7 +162,7 @@ const rowFor = n => $$('.suite-table tbody tr').find(tr => tr.textContent.indexO
   await settle(60);
   post = posts.filter(p => p.url && p.url.indexOf('discrepancies=1') !== -1).pop();
   t('linked in the discrepancies collection', post.body.badge === '215001');
-  t('who linked it', post.body.connectedBy === 'Cody Hale');
+  t('who linked it', post.body.connectedBy === 'Tester');
   t('the banner clears', d.body.textContent.indexOf('could not be matched to an associate') === -1);
 
   console.log('— Beeline hours —');

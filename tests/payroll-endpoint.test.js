@@ -12,10 +12,19 @@ let pass = 0, fail = 0;
 const t = (n, c) => { if (c) pass++; else { fail++; console.log('  FAIL: ' + n); } };
 
 const src = fs.readFileSync(path.join(__dirname, '..', 'functions', 'index.js'), 'utf8');
+/* The browser-facing halves of these handlers sit behind requireUser() now.
+   The definition lives outside the slice each harness pulls, so the shared
+   stub is injected -- same shape, same status codes. See fn-auth.js. */
+const { makeAuth, reqGet } = require('./fn-auth.js');
+const auth = makeAuth();
 const consts = src.slice(src.indexOf('const COLLECTIONS = {'), src.indexOf('const NOTES_ORIGIN'));
 const helpers = src.slice(src.indexOf('async function readJsonArray'), src.indexOf('async function handleCollection'));
 const dated = src.slice(src.indexOf('function dateKeyOf'), src.indexOf('/* GET  ?schedule=1'));
-const handlers = src.slice(src.indexOf('async function rosterProfiles'), src.indexOf('function parseToState'));
+/* Sliced up to the auth section, not to the end of the file: past this point
+   the source defines the REAL requireUser, which would shadow the injected stub
+   and then need the Admin SDK and the whole COLLECTIONS map to run. The real
+   one is exercised by collections.test.js, which pulls it in on purpose. */
+const handlers = src.slice(src.indexOf('async function rosterProfiles'), src.indexOf('/* ---------- who is calling ----------'));
 
 const SNAPSHOT_PATH = 'snapshots/latest.json';
 const NOTES_ORIGIN = 'https://geodis.ebtools.pro';
@@ -34,19 +43,21 @@ const SYNC_KEY = { value: () => KEY };
 
 const built = new Function(
   'bucket', 'readJsonFile', 'setKvCors', 'SYNC_KEY', 'SNAPSHOT_PATH', 'NOTES_ORIGIN',
-  'Sched', 'Intake', 'TimeOff', 'Payroll', 'console',
+  'Sched', 'Intake', 'TimeOff', 'Payroll', 'console', 'requireUser',
   consts + helpers + dated + handlers +
   '\nreturn {handleDiscrepancyIntake, handlePayroll, COLLECTIONS, PAYROLL_DIR};'
-)(bucket, readJsonFile, setKvCors, SYNC_KEY, SNAPSHOT_PATH, NOTES_ORIGIN, Sched, Intake, TimeOff, Payroll, console);
+)(bucket, readJsonFile, setKvCors, SYNC_KEY, SNAPSHOT_PATH, NOTES_ORIGIN, Sched, Intake, TimeOff, Payroll, console, auth.requireUser);
 const { handleDiscrepancyIntake, handlePayroll, COLLECTIONS, PAYROLL_DIR } = built;
 
 const mkRes = () => { const r = { code: null, body: null, set() { return r }, status(c) { r.code = c; return r }, json(b) { r.body = b; return r }, send() { return r } }; return r; };
 const call = async (h, req) => { const res = mkRes(); await h(req, res); return res; };
 const intake = (body, key) => call(handleDiscrepancyIntake,
   { method: 'POST', body, get: hh => (hh === 'x-sync-key' ? (key === undefined ? KEY : key) : '') });
+/* A signed-in browser, unless a test says otherwise. Automation posts its hours
+   with the sync key and no token, which is a different door and still open. */
 const payroll = (method, query, body, hdrs) => call(handlePayroll, {
   method, query: query || {}, body: body || {},
-  get: hh => (hdrs || {})[hh] || ''
+  get: reqGet(Object.assign({ authorization: 'Bearer test-token' }, hdrs || {}))
 });
 const discrepancies = () => { try { return JSON.parse(files[COLLECTIONS.discrepancies.path]); } catch (e) { return []; } };
 const period = w => { try { return JSON.parse(files[PAYROLL_DIR + '/' + w + '.json']); } catch (e) { return {}; } };
@@ -96,7 +107,9 @@ files[SNAPSHOT_PATH] = JSON.stringify({
 
   console.log('— hours: posting a pull —');
   const W = '2026-08-30';
-  t('GET index is public', (await payroll('GET', {})).code === 200);
+  t('GET index needs an account', (await payroll('GET', {})).code === 200);
+  t('and is refused without one',
+    (await call(handlePayroll, { method: 'GET', query: {}, body: {}, get: reqGet({}) })).code === 401);
   t('writing hours needs the sync key',
     (await payroll('POST', { week: W }, { rows: [] }, {})).code === 401);
   r = await payroll('POST', { week: W },

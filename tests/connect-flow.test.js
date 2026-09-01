@@ -1,13 +1,15 @@
 /* Making a connection from the Settings → Connections list.
 
-   Three ways this silently did nothing, all of which look identical to the person
+   Ways this silently did nothing, all of which look identical to the person
    clicking:
-     - signed in, but the account RECORD had not loaded, so it fell through to a
-       browser prompt;
-     - the prompt dismissed (or suppressed by the browser), returning null and
-       taking a quiet `return`;
      - the save succeeding but the list never refreshing, so the person stayed on
-       screen exactly as if nothing had happened. */
+       screen exactly as if nothing had happened;
+     - an account that may not do it being shown the control anyway, and the
+       refusal arriving as a status code nobody sees.
+
+   The two prompt-related failures this file used to cover are gone with the
+   prompt: there is no browser-name fallback any more, because the suite does not
+   render at all without a signed-in account. */
 const { JSDOM } = require('jsdom');
 const fs = require('fs');
 const R = require('path').join(__dirname, '..') + '/';
@@ -25,7 +27,8 @@ function harness(opts) {
   w.alert = m => alerts.push(m);
   w.confirm = () => true;
   w.scrollTo = () => {};
-  w.prompt = m => { prompts.push(m); return opts.promptAnswer === undefined ? 'Typed Name' : opts.promptAnswer; };
+  // A prompt firing at all is a failure now, so it is recorded, never answered.
+  w.prompt = m => { prompts.push(m); return null; };
   w.XLSX = { read: () => ({ SheetNames: [], Sheets: {} }), utils: { sheet_to_json: x => x } };
   w.fetch = (u, o) => {
     const s = String(u);
@@ -82,35 +85,54 @@ async function openAndPick(h) {
 }
 
 (async () => {
-  console.log('— signed in, before the account record has loaded —');
+  /* An account with no stored record has no role, so it has no permissions --
+     not even to look. The page it gets says which account it is and what to ask
+     for, rather than an empty Settings tab. */
+  console.log('— signed in, but the account carries no role —');
   {
     const h = harness();
     await new Promise(r => setTimeout(r, 60));
     seed(h);
     await new Promise(r => setTimeout(r, 40));
-    // Signed in, but state.auth.account is null: the users list is admin-only and
-    // may not have arrived. This used to fall through to the browser prompt.
-    h.w.__setAuth({ signedIn: true, email: 'cody@geodis.com', account: null });
+    h.w.__setAuth({ ready: true, signedIn: true, email: 'cody@geodis.com', account: null });
     await new Promise(r => setTimeout(r, 30));
     const r = await openAndPick(h);
-    t('the row offers a search', r.review && r.hit);
-    t('no name prompt is shown to somebody already signed in', h.prompts.length === 0);
-    t('the connection is saved', h.links().length === 1);
-    t('and attributed to the signed-in address', h.links()[0].linkedBy === 'cody@geodis.com');
+    t('there is no connection list to reach', !r.review);
+    t('the gate is up instead', !!h.$('.gate-card'));
+    t('naming the account', h.d.body.textContent.indexOf('cody@geodis.com') !== -1);
+    t('and saying who can fix it', /manager or an administrator/i.test(h.d.body.textContent));
+    t('nothing was saved', h.links().length === 0);
+    t('and no name prompt was shown', h.prompts.length === 0);
   }
 
-  console.log('— the name prompt dismissed —');
+  console.log('— signed out —');
   {
-    const h = harness({ promptAnswer: null });
+    const h = harness();
     await new Promise(r => setTimeout(r, 60));
     seed(h);
     await new Promise(r => setTimeout(r, 40));
-    await openAndPick(h);
-    t('nothing is saved without somebody to attribute it to', h.links().length === 0);
-    // The actual defect: this used to be a bare `return`.
-    t('and it says so rather than doing nothing', h.alerts.length === 1);
-    t('naming what went wrong', /not saved/i.test(h.alerts[0]) && /name/i.test(h.alerts[0]));
-    t('and how to fix it', /sign in/i.test(h.alerts[0]));
+    h.w.__setAuth({ ready: true, signedIn: false, email: '', account: null });
+    await new Promise(r => setTimeout(r, 30));
+    h.w.GEODISSuite.go('settings');
+    await new Promise(r => setTimeout(r, 40));
+    t('a sign-in card, not the suite', !!h.$('[data-signin]'));
+    t('no navigation to anywhere else', h.$$('.suite-nav-btn').length === 0);
+    t('and none of the roster on screen',
+      h.d.body.textContent.indexOf('Someone Else Entirely') === -1);
+  }
+
+  console.log('— a read-only account —');
+  {
+    const h = harness();
+    await new Promise(r => setTimeout(r, 60));
+    seed(h);
+    await new Promise(r => setTimeout(r, 40));
+    h.w.__setRole('viewer');
+    await new Promise(r => setTimeout(r, 30));
+    const r = await openAndPick(h);
+    t('Connections is not offered at all', !r.review);
+    t('but the page is', !h.$('.gate-card') && !!h.$('.suite-nav-btn'));
+    t('and nothing was written', h.links().length === 0);
   }
 
   console.log('— a saved connection leaves the list —');
@@ -119,7 +141,8 @@ async function openAndPick(h) {
     await new Promise(r => setTimeout(r, 60));
     seed(h);
     await new Promise(r => setTimeout(r, 40));
-    h.w.__setAuth({ signedIn: true, email: 'cody@geodis.com', account: { email: 'cody@geodis.com', name: 'Cody Hale', role: 'admin', enabled: true, markets: [] } });
+    h.w.__setAuth({ ready: true, signedIn: true, email: 'cody@geodis.com',
+      account: { email: 'cody@geodis.com', name: 'Cody Hale', role: 'admin', enabled: true, markets: [] } });
     await new Promise(r => setTimeout(r, 30));
     h.w.GEODISSuite.go('settings');
     await new Promise(r => setTimeout(r, 40));

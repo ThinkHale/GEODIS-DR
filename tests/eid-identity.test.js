@@ -59,7 +59,14 @@ w.fetch = (url, opt) => {
 const d = w.document, $ = s => d.querySelector(s), $$ = s => Array.from(d.querySelectorAll(s));
 const click = el => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
 const settle = ms => new Promise(r => setTimeout(r, ms));
-const search = v => { const i = $('#suite-search'); i.value = v; i.dispatchEvent(new w.Event('input', { bubbles: true })); };
+// Searching is debounced now -- the whole page re-renders, and doing that per
+// keystroke could not keep up with a fast typist.
+const search = async v => {
+  const i = $('#suite-search');
+  i.value = v;
+  i.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await settle(200);   // longer than SEARCH_DELAY_MS
+};
 const names = () => $$('tbody tr').map(r => r.textContent);
 
 (async () => {
@@ -77,20 +84,20 @@ const names = () => $$('tbody tr').map(r => r.textContent);
       .querySelector('.warn-text'));
 
   console.log('— searching by EID —');
-  search('20750899');
+  await search('20750899');
   await settle(40);
   t('finds exactly that person', names().length === 1 && names()[0].indexOf('Ada Away') !== -1);
-  search('215005');
+  await search('215005');
   await settle(40);
   t('the badge still works, so an old habit is not punished',
     names().length === 1 && names()[0].indexOf('Ada Away') !== -1);
-  search('80-AAWAY1');
+  await search('80-AAWAY1');
   await settle(40);
   t('and so does the timeclock id', names().length === 1 && names()[0].indexOf('Ada Away') !== -1);
-  search('21100616');
+  await search('21100616');
   await settle(40);
   t('another EID finds the other person', names()[0].indexOf('Gus Gone') !== -1);
-  search('');
+  await search('');
   await settle(40);
 
   console.log('— the profile names all three, and keeps them apart —');
@@ -145,11 +152,11 @@ const names = () => $$('tbody tr').map(r => r.textContent);
   t('marked former', former.former === true);
   t('and ended', former.status === 'Ended');
   t('their note survived', former.note === 'Owed four hours from the final week');
-  search('999111');
+  await search('999111');
   await settle(40);
   t('and they can be found', names().length === 1);
   t('shown as Former, not as active', names()[0].indexOf('Former') !== -1);
-  search('');
+  await search('');
   await settle(40);
 
   console.log('— and can still be worked with —');

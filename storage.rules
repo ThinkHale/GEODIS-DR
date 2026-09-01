@@ -1,0 +1,29 @@
+rules_version = '2';
+
+/* GEODIS Management Suite — Cloud Storage rules.
+ *
+ * Nothing here is publicly readable, and nothing is writable from a browser.
+ *
+ * That reads as heavy-handed until you look at what is in the bucket: the
+ * reconciliation snapshot is every active assignment with names, badges and
+ * employee ids; `attendance/` is a disciplinary record; `admin/users.json` is
+ * the account list. `snapshots/latest.json` used to carry `allow read: if true`
+ * so the page could fetch it directly, which meant anyone holding that URL had
+ * the entire roster without signing in — a locked front door beside an open
+ * window.
+ *
+ * These rules do NOT apply to the Cloud Function. It uses Admin SDK credentials
+ * and bypasses them entirely, which is the point: every read the browser makes
+ * now goes through the function, where requireUser() checks the signed-in
+ * account first. See handleSnapshot() in functions/index.js.
+ *
+ * If something in the tool starts returning empty lists after deploying this,
+ * the thing to check is that it is asking the FUNCTION, not the bucket.
+ */
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

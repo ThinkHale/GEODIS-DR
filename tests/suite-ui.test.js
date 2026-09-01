@@ -39,7 +39,7 @@ w.eval(fs.readFileSync(R+'suite.js','utf8'));
 const d=w.document, $=s=>d.querySelector(s), $$=s=>Array.from(d.querySelectorAll(s));
 const click=el=>el.dispatchEvent(new w.MouseEvent('click',{bubbles:true}));
 
-setTimeout(()=>{
+setTimeout(async ()=>{
 console.log('— boot before the roster arrives —');
 t('shell renders', !!$('.suite-nav'));
 t('all ten nav items present', $$('.suite-nav-btn').length===10);
@@ -74,9 +74,19 @@ t('and back to everyone', d.body.textContent.includes('Ben Ortiz'));
 t('exception label shown on the row', d.body.textContent.includes('End in RC'));
 
 console.log('— search —');
+// Debounced: the whole page re-renders, so it waits for the typing to stop.
 const inp=$('#suite-search'); inp.value='cleo'; inp.dispatchEvent(new w.Event('input',{bubbles:true}));
+t('the list does not thrash on every keystroke', $$('.suite-table tbody tr').length>1);
+await new Promise(r=>setTimeout(r,200));
 t('search narrows the roster', $$('.suite-table tbody tr').length===1);
 t('search keeps focus', d.activeElement.id==='suite-search');
+/* The caret used to be slammed to the end of the box after every keystroke, so
+   correcting a typo in the middle of a query was impossible. */
+const inp2=$('#suite-search');
+inp2.value='cleo'; inp2.setSelectionRange(2,2);
+inp2.dispatchEvent(new w.Event('input',{bubbles:true}));
+await new Promise(r=>setTimeout(r,200));
+t('and the caret stays where it was', $('#suite-search').selectionStart===2);
 
 console.log('— profile detail: the combined view —');
 click($('[data-nav="associates"]'));

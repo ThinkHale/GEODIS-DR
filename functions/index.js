@@ -161,6 +161,26 @@ const COLLECTIONS = {
                   fields: { badge: 'str', period: 'str', quality: 'num', productivity: 'num', safety: 'num',
                             units: 'num', hours: 'num', notes: 'str' } }
 };
+// Each entry knows its own key, so a handler can look up its write permission
+// without the router having to pass the name alongside the spec.
+Object.keys(COLLECTIONS).forEach(k => { COLLECTIONS[k].name = k; });
+
+/* What a caller must be able to do to write each collection. Reading any of
+   them needs 'view', which is the whole point of the gate: the roster, the
+   floor and everybody's attendance are the thing being protected.
+
+   Anything not named here is ordinary day-to-day work and needs 'edit'. The
+   ones named are the ones that change what OTHER people can do or see, so they
+   are held higher:
+     users       'roles'  -- a manager staffs their team; the specific change is
+                            checked again against canGrant() below, because the
+                            permission only says they may open the door.
+     appConfig   'admin'  -- the RC base URL and the domain allowlist.
+     locations   'admin'
+     shiftTypes  'admin' */
+const COLLECTION_WRITE = {
+  users: 'roles', appConfig: 'admin', locations: 'admin', shiftTypes: 'admin'
+};
 const MAX_COLLECTION_RECORDS = 20000;
 const MAX_LOG_ENTRIES = 40;
 
@@ -256,10 +276,10 @@ async function readRawFile(type) {
 }
 
 /* ---------- shared, badge-keyed stores (notes + status overrides) ----------
-   Read from the browser (public), written from the browser. There is no per-user
-   auth (the whole tool is unauthenticated), so writes are gated only by CORS +
-   an Origin check + payload limits. Fine for internal, low-sensitivity data;
-   harden with Firebase Auth if that ever changes. */
+   Read and written from the browser, both behind requireUser(): a note against a
+   badge is about a named person, and a status override changes what the whole
+   team sees. Reading needs 'view', writing needs 'edit'. The Origin check and
+   the payload limits stay, but neither is the control -- the account is. */
 async function readJsonFile(path) {
   try {
     const [buf] = await bucket.file(path).download();
@@ -272,7 +292,10 @@ function setKvCors(res) {
   res.set('Access-Control-Allow-Origin', NOTES_ORIGIN);
   res.set('Vary', 'Origin');
   res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  // Authorization carries the Firebase ID token. Without it here every
+  // authenticated request dies at the preflight, which reads as "the server is
+  // down" rather than "the browser was never allowed to ask".
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.set('Access-Control-Max-Age', '3600');
 }
 // Generic badge -> { <field>, updatedAt } store. Empty value deletes the entry.
@@ -281,12 +304,14 @@ async function handleKv(req, res, opts) {
   setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
   if (req.method === 'GET') {
+    if (!await requireUser(req, res, 'view')) return;
     res.set('Cache-Control', 'no-cache, max-age=0');
     res.status(200).json({ ok: true, [opts.responseKey]: await readJsonFile(opts.path) });
     return;
   }
   if (req.method === 'POST') {
     if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
+    if (!await requireUser(req, res, 'edit')) return;
     const badge = req.body && req.body.badge != null ? String(req.body.badge).trim() : '';
     let value = req.body && req.body[opts.field] != null ? String(req.body[opts.field]) : '';
     if (!badge || badge.length > 64) { res.status(400).json({ ok: false, error: 'Missing/invalid badge' }); return; }
@@ -353,12 +378,33 @@ async function handleCollection(req, res, opts) {
   setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
   if (req.method === 'GET') {
+    if (!await requireUser(req, res, 'view')) return;
     res.set('Cache-Control', 'no-cache, max-age=0');
-    res.status(200).json({ ok: true, [opts.responseKey]: await readJsonArray(opts.path) });
+    let rows = await readJsonArray(opts.path);
+    /* An address in ADMIN_EMAILS is raised to admin on EVERY sign-in. Changing
+       its role from Settings therefore appears to work and then quietly reverts
+       the next time they sign in -- the worst kind of failure, because the
+       person who made the change has already moved on believing it took.
+
+       So the account list says which rows are pinned, and the UI refuses to
+       offer a control that cannot hold. The flag is computed on read rather
+       than stored: it is a property of how the function is deployed today, not
+       of the account, and storing it would leave it wrong the moment the
+       variable changed. */
+    if (opts.name === 'users') {
+      const pinned = bootstrapAdmins();
+      if (pinned.length) {
+        rows = rows.map(u => pinned.indexOf(Auth.normalizeEmail(u && u.email)) === -1
+          ? u : Object.assign({}, u, { pinnedRole: 'admin' }));
+      }
+    }
+    res.status(200).json({ ok: true, [opts.responseKey]: rows });
     return;
   }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
   if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
+  const actor = await requireUser(req, res, COLLECTION_WRITE[opts.name] || 'edit');
+  if (!actor) return;
 
   const body = req.body || {};
   const now = new Date().toISOString();
@@ -366,7 +412,14 @@ async function handleCollection(req, res, opts) {
   let associatePto;
 
   if (Array.isArray(body.records)) {
-    // Bulk replace, used by report imports.
+    // Bulk replace, used by report imports. Not available for accounts: it would
+    // replace the whole list in one write and walk straight past the per-record
+    // canManage/canGrant checks below.
+    if (opts.name === 'users') {
+      res.status(403).json({ ok: false, forbidden: true,
+        error: 'Accounts are changed one at a time, so each change can be checked.' });
+      return;
+    }
     if (body.records.length > MAX_COLLECTION_RECORDS) {
       res.status(400).json({ ok: false, error: 'Too many records' }); return;
     }
@@ -383,6 +436,11 @@ async function handleCollection(req, res, opts) {
     const idx = list.findIndex(x => x && x.id === id);
     if (body._delete) {
       if (idx === -1) { res.status(200).json({ ok: true, deleted: false }); return; }
+      if (opts.name === 'users' && !Auth.canManage(actor, Auth.normalizeUser(list[idx]))) {
+        res.status(403).json({ ok: false, forbidden: true,
+          error: 'That account is not one you can remove.' });
+        return;
+      }
       if (opts.responseKey === 'timeOff') {
         associatePto = await readJsonArray(COLLECTIONS.associatePto.path);
         TransitionPto.release(list[idx], associatePto, now);
@@ -396,6 +454,41 @@ async function handleCollection(req, res, opts) {
       rec.id = id;
       rec.updatedAt = now;
       const merged = idx === -1 ? rec : Object.assign({}, list[idx], rec);
+      /* Changing an account is the one write where the permission is not the
+         whole answer. 'roles' says a manager may open this door; WHICH change
+         they may make depends on the account in front of them and the role they
+         are reaching for -- a manager may set a colleague to manager and must
+         never be able to set anybody, including themselves, to admin.
+
+         Checked here rather than trusted from the client, because the role
+         arrives as a string in a POST body and a <select> is not a permission. */
+      if (opts.name === 'users') {
+        const target = Auth.normalizeUser(idx === -1 ? merged : list[idx]);
+        if (!Auth.canManage(actor, target)) {
+          res.status(403).json({ ok: false, forbidden: true,
+            error: target.email === Auth.normalizeEmail(actor.email)
+              ? 'You cannot change your own access.'
+              : 'That account is above your own, so you cannot change it.' });
+          return;
+        }
+        if (body.role !== undefined && bootstrapAdmins().indexOf(target.email) !== -1) {
+          res.status(409).json({ ok: false, forbidden: true,
+            error: 'That account is pinned to Administrator by the deployment (ADMIN_EMAILS), ' +
+              'so a role set here would be undone at its next sign-in.' });
+          return;
+        }
+        if (body.role !== undefined && !Auth.canGrant(actor, target, body.role)) {
+          res.status(403).json({ ok: false, forbidden: true,
+            error: 'The ' + Auth.roleMeta(actor.role).label + ' role cannot grant ' +
+              Auth.roleMeta(body.role).label + '.' });
+          return;
+        }
+        // The uid and the sign-in stamps belong to sign-in, not to whoever is
+        // editing the row. Never let an edit rewrite them.
+        merged.uid = list[idx] ? list[idx].uid || '' : merged.uid || '';
+        merged.createdAt = list[idx] ? list[idx].createdAt || now : merged.createdAt || now;
+        merged.lastSeenAt = list[idx] ? list[idx].lastSeenAt || '' : '';
+      }
       if (opts.responseKey === 'timeOff') {
         associatePto = await readJsonArray(COLLECTIONS.associatePto.path);
         TransitionPto.apply(idx === -1 ? null : list[idx], merged, associatePto, now);
@@ -447,6 +540,9 @@ async function listDateKeys(dir) {
 async function handleSchedule(req, res) {
   setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  // The week's plan is roster data: reading it needs an account, writing one
+  // needs somebody trusted with imports.
+  if (!await requireUser(req, res, req.method === 'GET' ? 'view' : 'import')) return;
   const period = dateKeyOf(req.query.period);
 
   if (req.method === 'GET') {
@@ -511,6 +607,9 @@ async function handleSchedule(req, res) {
 async function handleCoverage(req, res) {
   setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  // Who was on the floor, and what a supervisor wrote about the people who were
+  // not. Reading needs an account; documenting somebody's day needs 'edit'.
+  if (!await requireUser(req, res, req.method === 'GET' ? 'view' : 'edit')) return;
   const date = dateKeyOf(req.query.date);
 
   if (req.method === 'GET') {
@@ -741,6 +840,7 @@ async function handleReqSync(req, res) {
   setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
   if (req.method === 'GET') {
+    if (!await requireUser(req, res, 'view')) return;
     res.set('Cache-Control', 'no-cache, max-age=0');
     res.status(200).json({ ok: true, sync: await readJsonFile(REQ_META_PATH) });
     return;
@@ -1016,6 +1116,8 @@ async function handlePayroll(req, res) {
   const week = dateKeyOf(req.query.week);
 
   if (req.method === 'GET') {
+    // Everyone's hours for a pay period. Read only by an account.
+    if (!await requireUser(req, res, 'view')) return;
     res.set('Cache-Control', 'no-cache, max-age=0');
     if (!week) { res.status(200).json({ ok: true, periods: await listDateKeys(PAYROLL_DIR) }); return; }
     res.status(200).json({ ok: true, period: await readJsonFile(PAYROLL_DIR + '/' + week + '.json') });
@@ -1038,6 +1140,7 @@ async function handlePayroll(req, res) {
   if (body.closesAt !== undefined) {
     // A person setting the cutoff, from the browser.
     if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
+    if (!await requireUser(req, res, 'edit')) return;
     period.closesAt = String(body.closesAt || '').slice(0, 40);
   } else if (Array.isArray(body.rows)) {
     // An automation posting a pull of the hours report.
@@ -1255,6 +1358,7 @@ async function handlePlx(req, res) {
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
 
   if (req.method === 'GET') {
+    if (!await requireUser(req, res, 'view')) return;
     res.set('Cache-Control', 'no-cache, max-age=0');
     const meta = await readJsonFile(PLX_META_PATH);
     const conf = await readJsonFile(PLX_CONFIG_PATH);
@@ -1444,6 +1548,7 @@ async function handleIlPto(req, res) {
   setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
   if (req.method === 'GET') {
+    if (!await requireUser(req, res, 'view')) return;
     res.set('Cache-Control', 'no-cache, max-age=0');
     res.status(200).json({ ok: true, sync: await readJsonFile(ILPTO_META_PATH) });
     return;
@@ -1474,6 +1579,7 @@ async function handlePlxUpload(req, res) {
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
   if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
+  if (!await requireUser(req, res, 'import')) return;
 
   const body = req.body || {};
   if (!body.fileBase64) { res.status(400).json({ ok: false, error: 'Missing fileBase64' }); return; }
@@ -1522,6 +1628,7 @@ async function handlePlxRefresh(req, res) {
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
   if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
+  if (!await requireUser(req, res, 'import')) return;
 
   const cfg = await readJsonFile(PLX_CONFIG_PATH);
   const url = String((cfg && cfg.flowUrl) || '');
@@ -1552,10 +1659,35 @@ async function handlePlxRefresh(req, res) {
    as `Authorization: Bearer <token>`; this verifies it and pairs it with the
    stored account, which is where the role and market restrictions live.
 
-   NOT enforced yet. Every write is still gated by the CORS origin check exactly
-   as before, because turning enforcement on before everyone has an account would
-   lock the team out of a tool they use every morning. This exists so that switch
-   is a one-line change rather than a rewrite -- see identityOf() callers. */
+   ENFORCED. Every browser-facing read and write goes through requireUser()
+   below. The origin check stays, but it was never a security control -- it is
+   trivially forged by anything that is not a browser, and it says nothing about
+   WHO is asking. The token does both. */
+
+/* The domains in force, refreshed from the app config. Cached for the lifetime
+   of a warm instance: it is read on nearly every request and changes about once
+   a year. Config can only ever WIDEN the built-in list (see auth-core.js), so a
+   stale cache cannot lock anybody out, only briefly delay letting somebody new
+   in. */
+let domainCache = { at: 0, list: null };
+const DOMAIN_TTL_MS = 60 * 1000;
+async function refreshAllowedDomains() {
+  if (domainCache.list && Date.now() - domainCache.at < DOMAIN_TTL_MS) {
+    Auth.setAllowedDomains(domainCache.list);
+    return;
+  }
+  let extra = '';
+  try {
+    const cfg = await readJsonArray(COLLECTIONS.appConfig.path);
+    const row = cfg.filter(r => r && r.key === 'allowedDomains')[0];
+    extra = row ? String(row.value || '') : '';
+  } catch (err) {
+    extra = '';                        // unreadable config falls back to built-ins
+  }
+  domainCache = { at: Date.now(), list: extra };
+  Auth.setAllowedDomains(extra);
+}
+
 async function identityOf(req) {
   const header = String(req.get('authorization') || '');
   const m = header.match(/^Bearer\s+(.+)$/i);
@@ -1566,17 +1698,73 @@ async function identityOf(req) {
   } catch (err) {
     return null;                       // an invalid token is an anonymous caller
   }
+  await refreshAllowedDomains();
   const email = Auth.normalizeEmail(decoded.email);
   // A verified token from outside the approved domains is still nobody here.
   if (!email || !Auth.domainAllowed(email)) return null;
   const users = await readJsonArray(COLLECTIONS.users.path);
   const rec = users.filter(u => u && Auth.normalizeEmail(u.email) === email)[0];
-  return Auth.normalizeUser(Object.assign({ email: email, uid: decoded.uid, name: decoded.name || '' }, rec || {}));
+  /* The STORED record decides. A token proves who somebody is; only the record
+     says what they may do, so an account that has never signed in -- and
+     therefore has no record -- gets the empty role rather than the default one.
+     Otherwise the sign-in endpoint would not be the only place accounts are
+     created, and a disabled account could resurrect itself by calling anything
+     else first. */
+  if (!rec) return null;
+  return Auth.normalizeUser(Object.assign({ email: email, uid: decoded.uid, name: decoded.name || '' }, rec));
+}
+
+/* The gate. Returns the account, or null having ALREADY answered the request.
+   Callers must return immediately on null.
+
+   401 and 403 are kept apart deliberately: 401 means "sign in", which the
+   browser can act on by prompting; 403 means "you are signed in and this is not
+   yours", which it must not retry. */
+async function requireUser(req, res, action) {
+  const user = await identityOf(req);
+  if (!user) {
+    res.status(401).json({ ok: false, error: 'Sign in to use this.', signIn: true });
+    return null;
+  }
+  if (!Auth.can(user, action)) {
+    const role = Auth.roleMeta(user.role);
+    res.status(403).json({ ok: false, forbidden: true, role: role.key,
+      error: !user.enabled ? 'This account has been disabled.'
+        : role.rank === 0 ? 'This account has no access yet. An administrator or manager can grant it a role.'
+        : 'The ' + role.label + ' role cannot do that.' });
+    return null;
+  }
+  return user;
+}
+
+/* ---------- the first administrator ----------
+   Somebody has to be able to grant the first role, and nobody can grant a role
+   until an administrator exists. Two ways out of that, both narrow:
+
+     1. ADMIN_EMAILS, an environment variable. Any address listed is raised to
+        admin on sign-in, every time. This is the one to use on an existing
+        deployment, where accounts already exist and none of them is an admin.
+     2. An empty account list. The very first person to sign in on a fresh
+        deployment becomes the administrator, because otherwise the tool would
+        install itself into a state no one can get out of.
+
+   Rule 2 checks the list is EMPTY, not that the user is first alphabetically or
+   anything else -- once one account exists the door is shut, so it cannot be
+   walked through later by deleting somebody. */
+function bootstrapAdmins() {
+  return String(process.env.ADMIN_EMAILS || '')
+    .split(',').map(x => Auth.normalizeEmail(x)).filter(Boolean);
+}
+function bootstrapRoleFor(email, users) {
+  if (bootstrapAdmins().indexOf(Auth.normalizeEmail(email)) !== -1) return 'admin';
+  if (!users.length) return 'admin';
+  return '';
 }
 
 /* First sign-in from an approved domain creates the account, so an admin does
-   not have to add everybody by hand. It starts as a viewer -- signing in is not
-   the same as being trusted with the data. */
+   not have to add everybody by hand. It starts on DEFAULT_ROLE -- Colleague --
+   because the domain check has already done the vetting: nobody outside
+   geodis.com or employbridge.com can get this far. See auth-core.js. */
 async function handleSignIn(req, res) {
   setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
@@ -1592,25 +1780,34 @@ async function handleSignIn(req, res) {
   } catch (err) {
     res.status(401).json({ ok: false, error: 'Invalid token' }); return;
   }
+  await refreshAllowedDomains();
   const email = Auth.normalizeEmail(decoded.email);
   if (!Auth.domainAllowed(email)) {
-    res.status(403).json({ ok: false, error: 'Only ' + Auth.ALLOWED_DOMAINS.join(' and ') + ' addresses can be used here.' });
+    res.status(403).json({ ok: false, error: 'Only ' + Auth.allowedDomainList().join(' and ') + ' addresses can be used here.' });
     return;
   }
 
   const users = await readJsonArray(COLLECTIONS.users.path);
   const now = new Date().toISOString();
   const i = users.findIndex(u => u && Auth.normalizeEmail(u.email) === email);
+  const seeded = bootstrapRoleFor(email, users);
   let rec;
   if (i === -1) {
     const made = Auth.accountFor(email, decoded.name || req.body && req.body.name || '');
     rec = Object.assign({}, made.user, { uid: decoded.uid, lastSeenAt: now });
+    if (seeded) rec.role = seeded;
     users.push(sanitizeRecord(Object.assign({ id: email }, rec), COLLECTIONS.users.fields));
     users[users.length - 1].id = email;
   } else {
-    // Never resurrect a disabled account or re-grant a role on sign-in.
+    // Never resurrect a disabled account or re-grant a role on sign-in -- with
+    // one exception, ADMIN_EMAILS, which exists precisely to reach in and fix a
+    // deployment that has locked itself out. It cannot enable a disabled
+    // account: taking somebody's access away has to stay final.
     rec = Auth.normalizeUser(users[i]);
-    users[i] = Object.assign({}, users[i], { uid: decoded.uid, lastSeenAt: now, id: email });
+    const forced = bootstrapAdmins().indexOf(email) !== -1 && rec.enabled;
+    users[i] = Object.assign({}, users[i], { uid: decoded.uid, lastSeenAt: now, id: email },
+      forced ? { role: 'admin' } : {});
+    if (forced) rec.role = 'admin';
     rec.uid = decoded.uid;
     rec.lastSeenAt = now;
   }
@@ -1618,6 +1815,34 @@ async function handleSignIn(req, res) {
     contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
   });
   res.status(200).json({ ok: true, user: Auth.normalizeUser(rec) });
+}
+
+/* ---------- the reconciliation snapshot ----------
+   The roster: every active assignment, with names, badges and employee ids. It
+   used to be fetched straight from a public Storage URL, which meant the front
+   door could be locked and the window left open -- anybody with the link had the
+   whole roster without signing in.
+
+   It is served from here now, behind the same gate as everything else. The
+   Storage rule for `snapshots/` must be flipped to `allow read: if false` for
+   this to be worth anything; see SETUP.md. */
+async function handleSnapshot(req, res) {
+  setKvCors(res);
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (req.method !== 'GET') { res.status(405).json({ ok: false, error: 'GET only' }); return; }
+  if (!await requireUser(req, res, 'view')) return;
+  res.set('Cache-Control', 'no-cache, max-age=0');
+  try {
+    const [buf] = await bucket.file(SNAPSHOT_PATH).download();
+    res.status(200).type('application/json').send(buf.toString());
+  } catch (err) {
+    if (err && err.code === 404) {
+      // No snapshot yet is a normal state on a new deployment, not a failure.
+      res.status(200).json({ ok: true, updatedAt: null, counts: {}, records: [] });
+      return;
+    }
+    res.status(500).json({ ok: false, error: String((err && err.message) || err) });
+  }
 }
 
 function parseToState(buffer, side) {
@@ -1645,6 +1870,7 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
     if (req.query.discrepancyIntake !== undefined) { await handleDiscrepancyIntake(req, res); return; }
     if (req.query.payroll !== undefined) { await handlePayroll(req, res); return; }
     if (req.query.signIn !== undefined) { await handleSignIn(req, res); return; }
+    if (req.query.snapshot !== undefined) { await handleSnapshot(req, res); return; }
     if (req.query.plxUpload !== undefined) { await handlePlxUpload(req, res); return; }
     if (req.query.plx !== undefined) { await handlePlx(req, res); return; }
     if (req.query.plxRefresh !== undefined) { await handlePlxRefresh(req, res); return; }

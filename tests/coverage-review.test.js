@@ -138,12 +138,18 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   pick('#cov-loc', 'all');
   t('back to all locations', bodyRows() === 3);
 
-  const box = $('#suite-search');
-  box.value = 'cleo'; box.dispatchEvent(new w.Event('input', { bubbles: true }));
+  /* Searching is debounced -- it re-renders the whole page, and doing that per
+     keystroke could not keep up with a fast typist. `typed` waits it out. */
+  const typed = async (v) => {
+    const i = $('#suite-search');
+    i.value = v;
+    i.dispatchEvent(new w.Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));   // longer than SEARCH_DELAY_MS
+  };
+  await typed('cleo');
   t('search narrows', bodyRows() === 1);
   t('search keeps focus', d.activeElement.id === 'suite-search');
-  const box2 = $('#suite-search');
-  box2.value = ''; box2.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await typed('');
   t('clearing search restores', bodyRows() === 3);
 
   const mp = $('#market-picker');
@@ -153,13 +159,11 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   t('the unrostered row is not hidden by a market', d.body.textContent.indexOf('Extra, Eli') !== -1);
   mp.value = 'all'; mp.dispatchEvent(new w.Event('change', { bubbles: true }));
 
-  const box3 = $('#suite-search');
-  box3.value = 'zzzznobody'; box3.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await typed('zzzznobody');
   t('a filtered-to-nothing table says so', d.body.textContent.indexOf('Nothing matches those filters') !== -1);
   t('and does not claim the check had no exceptions',
     d.body.textContent.indexOf('No exceptions in this check') === -1);
-  const box4 = $('#suite-search');
-  box4.value = ''; box4.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await typed('');
   t('restored', bodyRows() === 3);
 
   console.log('— documenting while reviewing writes to that day —');

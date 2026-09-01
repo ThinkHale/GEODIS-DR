@@ -9,6 +9,9 @@
   'use strict';
 
   var MAX_ROWS = 250;   // cap rendered rows; the roster runs to the hundreds
+  /* Long enough that a fast typist is not re-rendering the page per keystroke,
+     short enough that the list feels live. */
+  var SEARCH_DELAY_MS = 120;
 
   /* GEODIS policy: PTO is 0, an absence is 1, a no-call/no-show is 2, and a late
      or early-out is half an absence.
@@ -28,13 +31,24 @@
   var PLX_ATTENDANCE_URL = 'https://geodis.sharepoint.com/:x:/r/sites/chicago-campus-operations/' +
     '_layouts/15/Doc.aspx?sourcedoc=%7B22D6D56E-60DC-4966-8143-0DA8DEF03515%7D' +
     '&file=PLX%20-%20Geodis%20Spreadsheet.xlsx&action=default&mobileredirect=true';
-  var TIME_OFF_TYPES = ['PTO', 'VTO', 'Sick', 'Personal', 'LOA'];
+  /* The shared IL PTO tracker. Requests are RAISED on this sheet, not here: it
+     is what Chicago and St. Louis both work from and what the automated pull
+     reads back. A "+ New request" button on this page wrote a record that
+     existed nowhere else, so somebody filing PTO here would have it approved
+     here and still be marked absent by the sheet that actually gets paid from.
+     The button is a link to the sheet instead.
+
+     Settings -> RC links can override this (`ilPtoTrackerUrl`); the constant is
+     the default so the link works on a fresh deployment. */
+  var IL_PTO_TRACKER_URL = 'https://empb-my.sharepoint.com/:x:/g/personal/rachelkasinski_employbridge_com/' +
+    'ETtHT_ffXhxBt2RmRtTfWzMBLAitwPYA_Qebdzbh0cO8JA?e=N440c1' +
+    '&CID=8CB9B2AA-BA18-4A2D-84BC-1090A41547F5&wdLOR=c3FF2EFE6-72AC-4C98-A6C5-89FC20E465A2';
   /* How a documented absence is characterised. "Badge / system issue" matters
      most: it is the way to record that the person WAS here and the reader missed
      them, so a hardware gap never turns into a disciplinary record. */
-  var DISPOSITIONS = ['', ScheduleCore.PRESENT_DISPOSITION, 'Called in', 'No call / no show',
-    'Approved time off', 'Late arrival', 'Left early', 'Reassigned', 'Terminated',
-    'Badge / system issue', 'Other'];
+  var DISPOSITIONS = ['', ScheduleCore.PRESENT_DISPOSITION, 'Voluntary OT', 'Called in',
+    'No call / no show', 'Approved time off', 'Late arrival', 'Left early', 'Reassigned',
+    'Terminated', 'Badge / system issue', 'Other'];
   /* Disposition -> what the workbook should end up carrying for that day. It is
      shown, never written: whoever documents the floor here still logs the
      occurrence on the sheet, and knowing what the day is worth before they get
@@ -43,6 +57,12 @@
   var DISPOSITION_OCCURRENCE = {
     // They were here -- the reader saw a punch out, or missed the punch in.
     'Present': null,
+    /* On the clock with no shift covering them, and that is fine: they picked up
+       voluntary overtime. Worth nothing on the attendance scale -- being at work
+       is not an occurrence -- but recorded, so the row stops reading as an
+       unexplained exception and the next person to walk the floor knows it was
+       already looked at. */
+    'Voluntary OT': null,
     'Called in': { type: 'Absent', points: TYPE_POINTS['Absent'] },
     'No call / no show': { type: 'No Call / No Show', points: TYPE_POINTS['No Call / No Show'] },
     'Approved time off': null,
@@ -81,7 +101,7 @@
     notes: {},              // shared badge -> note, published with the roster
     updatedAt: null,
     profiles: new Map(),
-    tasks: { kind: 'all', showDone: false },
+    tasks: { kind: 'all', showDone: false, status: 'all', urgency: 'all', source: 'all' },
     /* Most of what the shared tracker imports is its processed tab, so completed
        requests are the bulk of the collection and none of them are work. Hidden
        until asked for. */
@@ -143,46 +163,29 @@
     setMarket(e.detail.market, true);
   });
 
-  /* Until there is sign-in, the person making a change is a name they type once
-     into this browser. Every status change records it, so when real identity
-     arrives only this function changes -- the stored shape and every reader of
-     it stay put. See timeoff-core.js. */
-  var ACTOR_KEY = 'geodis.actorName';
-  function currentActor(promptIfMissing) {
-    /* Once somebody is signed in, that IS the actor. This is the single place
-       the switch happens, which is why the change log was built to carry an id
-       and a source from the start. */
-    /* Being signed in is enough. The account RECORD may not have loaded -- it
-       comes from the admin users list, which only an administrator can read -- and
-       falling through to the browser prompt because of that asked a signed-in
-       person to type the name they had just signed in with, and silently did
-       nothing when they dismissed it. */
+  /* Who is making this change. There is exactly one answer now: the signed-in
+     account. Nothing renders without one, so the browser-name prompt this used
+     to fall back to is gone -- a name typed into a box was never evidence of
+     anything, and it is the reason the change log was built to carry an id and a
+     source from the start.
+
+     The account RECORD may not have arrived yet (it comes back from the sign-in
+     call), so the email is used until it does rather than refusing the write. */
+  function currentActor(requireIt) {
     if (state.auth.signedIn && (state.auth.account || state.auth.email)) {
       var acct = state.auth.account || {};
       var who = acct.name || acct.email || state.auth.email;
       return PipelineCore.actorOf(who, acct.email || state.auth.email, 'account');
     }
-    var name = '';
-    try { name = localStorage.getItem(ACTOR_KEY) || ''; } catch (e) { /* private mode */ }
-    if (!name && promptIfMissing) {
-      name = (window.prompt('Your name, so status changes can be attributed.\n\n' +
-        'This is stored in this browser only, until sign-in is added.', '') || '').trim();
-      /* Every caller of currentActor(true) is about to write something and cannot
-         without a name. Returning null quietly meant the click just did nothing --
-         no save, no message, nothing to tell you the difference between "it failed"
-         and "it worked but the list has not caught up". Say it out loud instead;
-         a browser that has been told to suppress dialogs will not show the prompt
-         at all, and this is the only sign you would get. */
-      if (!name) {
-        alert('That was not saved, because it records who made the change and no name was given.\n\n' +
-          'Sign in under Settings, or answer the name prompt, and try again.');
-        return null;
-      }
-      try { localStorage.setItem(ACTOR_KEY, name); } catch (e) { /* ignore */ }
+    /* Unreachable behind the gate, and left loud rather than silent: a write
+       that lands with nobody attached to it is worse than one that does not
+       land, because there is no way to work out afterwards who did it. */
+    if (requireIt) {
+      alert('That was not saved, because nothing could say who made the change.\n\n' +
+        'Your session may have ended — reload the page and sign in again.');
+      return null;
     }
-    var id = '';
-    try { id = localStorage.getItem('geodisSuite.localUserId') || ''; } catch (e) { /* ignore */ }
-    return TimeOffCore.actorOf(name, id, 'local');
+    return PipelineCore.actorOf('', '', 'unknown');
   }
 
   var root = document.getElementById('suite-root');
@@ -407,11 +410,20 @@
        noticed -- on the floor, mid-check, reading a form. The count is what is
        urgent, not what is open: a badge showing 40 is wallpaper. */
     var urgent = TasksCore.summarize(openTasks(), new Date()).urgent;
-    var add = '<button class="suite-add" data-add-task title="Raise a task">' +
-      '<span class="suite-add-plus">+</span><span class="suite-add-label">Task</span>' +
-      (urgent ? '<span class="suite-add-count">' + urgent + '</span>' : '') + '</button>';
+    var add = mayEdit()
+      ? '<button class="suite-add" data-add-task title="Raise a task">' +
+        '<span class="suite-add-plus">+</span><span class="suite-add-label">Task</span>' +
+        (urgent ? '<span class="suite-add-count">' + urgent + '</span>' : '') + '</button>'
+      : '';
+    var acct = account();
+    var role = AuthCore.roleMeta(acct && acct.role);
+    var who = (acct && (acct.name || acct.email)) || state.auth.email || 'Operations';
     return '<header class="suite-top"><div class="suite-heading"><h1>' + esc(x[0]) + '</h1><p>' + esc(x[1]) + '</p></div>' +
-      picker + add + '<div class="suite-user"><span><b>Operations</b></span><div class="suite-avatar">OP</div></div></header>';
+      picker + add +
+      '<div class="suite-user" title="' + esc(who + ' · ' + role.label) + '">' +
+      '<span><b>' + esc(who) + '</b><small>' + esc(role.label) + '</small></span>' +
+      '<div class="suite-avatar">' + esc(SuiteData.initialsOf(who)) + '</div>' +
+      '<button class="suite-btn tiny" data-sign-out>Sign out</button></div></header>';
   }
 
   /* ---------- small building blocks ---------- */
@@ -424,6 +436,19 @@
   function empty(label, sub) {
     return '<div class="empty-module"><strong>' + esc(label) + '</strong>' + esc(sub || 'Import a report or add a record to begin tracking.') + '</div>';
   }
+  /* Free text in a row of otherwise short, non-wrapping cells. The text goes in
+     a block of its own rather than straight into the <td>: a table cell under
+     `table-layout:auto` treats width as a suggestion and grows to fit, so only
+     an inner box with a max-width actually makes the words wrap instead of
+     running under the columns beside them. Long details are clamped to a few
+     lines, with the whole thing on hover. */
+  function detailText(text, cls) {
+    var t = String(text == null ? '' : text);
+    if (!t.trim()) return '';
+    var long = t.length > 220;
+    return '<div class="detail-text' + (long ? ' clamp' : '') + (cls ? ' ' + cls : '') + '"' +
+      (long ? ' title="' + esc(t) + '"' : '') + '>' + esc(t) + '</div>';
+  }
   function hero(title, sub, action, label) {
     return '<div class="module-hero"><div><h2>' + esc(title) + '</h2><p>' + esc(sub) + '</p></div>' +
       (action ? '<button class="suite-btn primary" data-add="' + action + '">+ ' + esc(label) + '</button>' : '') + '</div>';
@@ -433,6 +458,15 @@
   function heroLink(title, sub, href, label) {
     return '<div class="module-hero"><div><h2>' + esc(title) + '</h2><p>' + esc(sub) + '</p></div>' +
       extLink(href, label, 'suite-btn primary') + '</div>';
+  }
+  /* "<b>a</b>, <b>b</b> and <b>c</b>". Each item is escaped on its OWN, then
+     joined -- escaping the joined string turns the separators into visible
+     `</b> and <b>` on the page, which is exactly what the sign-in card used to
+     show anybody reading it. */
+  function boldList(items) {
+    var list = (items || []).map(function (x) { return '<b>' + esc(x) + '</b>'; });
+    if (list.length < 2) return list.join('');
+    return list.slice(0, -1).join(', ') + ' and ' + list[list.length - 1];
   }
   function extLink(href, label, cls) {
     return '<a class="' + cls + '" href="' + esc(href) + '" target="_blank" rel="noopener">' +
@@ -450,6 +484,10 @@
   /* A shift tag is what the person works, not what they were scheduled for this
      week. It comes from the PLX workbook and is editable per associate. */
   function shiftChip(p) {
+    if (!mayEdit()) {
+      return p.shift ? '<span class="shift-chip">' + esc(p.shift) + '</span>'
+        : '<span class="shift-chip none">No shift tag</span>';
+    }
     if (!p.shift) return '<span class="shift-chip none" data-set-shift="' + esc(p.badge) + '">Set shift</span>';
     return '<span class="shift-chip" data-set-shift="' + esc(p.badge) + '"' +
       (p.shiftHours ? ' title="' + esc(p.shiftHours) + (p.shiftBuilding ? ' · building ' + esc(p.shiftBuilding) : '') + '"' : '') +
@@ -547,6 +585,7 @@
       id: id, eid: '', nameKey: ScheduleCore.rosterKey(p.name), name: p.name,
       shift: next, building: p.shiftBuilding || '', badge: p.badge, source: 'Set in the suite'
     };
+    if (!guard('edit', 'change a shift tag')) return;
     var write = next ? SuiteData.saveRecord('shifts', rec) : SuiteData.deleteRecord('shifts', id);
     write.then(function () {
       return SuiteData.loadCollection('shifts');
@@ -873,7 +912,7 @@
 
       '</div><div class="suite-stack">' +
       '<section class="suite-panel"><div class="suite-panel-head"><h2>Time off</h2>' +
-      '<div class="suite-actions"><button class="suite-btn primary" data-add="timeoff" data-badge="' + esc(p.badge) + '">+ Request</button></div></div>' +
+      '<div class="suite-actions">' + extLink(ptoTrackerLink(), 'Raise on the tracker', 'suite-btn') + '</div></div>' +
       (p.timeOff.length ? p.timeOff.map(activityRow).join('') : empty('No time-off records')) + '</section>' +
 
       schedulePanel(p) +
@@ -1157,6 +1196,16 @@
       '</div></section>';
   }
 
+  /* Somebody on the clock that nothing scheduled. Named on the row rather than
+     left to be inferred from "Unscheduled", because the reading a supervisor
+     needs is "is this voluntary OT, or a shift nobody entered" -- and the wrong
+     first guess is that it is an absence problem, which it never is: they are
+     standing on the floor. */
+  function unscheduledNote(r) {
+    if (r.status !== 'unscheduled' || !r.present) return '';
+    return '<div class="sub">On the clock with no shift — voluntary OT?</div>';
+  }
+
   /* What the PTO record says, on the row it explains.
 
      The second case is the one worth calling out: somebody with approved time
@@ -1194,6 +1243,7 @@
     opts = opts || {};
     if (!p || !p.badge) return '<span class="sub">—</span>';
     if (!p.phone) {
+      if (!mayEdit()) return '<span class="sub">No number on file</span>';
       return '<button class="suite-btn tiny" data-phone-edit="' + esc(p.badge) + '">Add number</button>';
     }
     var byName = /name/i.test(p.phoneSource || '') || (p.phoneSource || '').indexOf('workbook') === 0;
@@ -1202,7 +1252,7 @@
       esc(ContactsCore.format(p.phone)) + '</a>' +
       '<button class="suite-btn tiny" data-phone-copy="' + esc(ContactsCore.format(p.phone)) +
       '" title="Copy for TextUs or Vonage">Copy</button>' +
-      (opts.edit ? '<button class="suite-btn tiny" data-phone-edit="' + esc(p.badge) + '">Edit</button>' : '') +
+      (opts.edit && mayEdit() ? '<button class="suite-btn tiny" data-phone-edit="' + esc(p.badge) + '">Edit</button>' : '') +
       (p.phoneSource ? '<div class="sub">' + esc(p.phoneSource) + '</div>' : '') +
       '</div>';
   }
@@ -1244,18 +1294,27 @@
     return out;
   }
 
+  /* The strip used to hold exactly four tiles, so the fourth had to be shared:
+     Not-in-timeclock, then On-PTO, then Unscheduled, whichever came first. On an
+     ordinary day one of the first two is non-zero, which meant the count of
+     people ON THE CLOCK WITH NO SHIFT was the one that never got shown -- the
+     one worth the most, because it is somebody being paid for hours nothing
+     planned. It has a tile of its own now, always, and the strip grows to fit
+     the rest. */
   function covMetrics(s) {
     var cov = s.coverage == null ? '—' : s.coverage + '%';
+    var unsched = s.onClockUnscheduled != null ? s.onClockUnscheduled : (s.byStatus.unscheduled || 0);
     return '<div class="metric-strip">' +
       metric('Coverage now', cov, s.byStatus.working + ' of ' + s.onShift + ' on-shift associates present',
         s.coverage == null ? '' : s.coverage >= 90 ? 'green' : 'orange') +
       metric('Working', s.byStatus.working, 'On shift and on premise', 'green') +
       metric('Not clocked in', s.byStatus.missing, 'On shift, not on premise', s.byStatus.missing ? 'orange' : 'green') +
+      metric('On the clock, unscheduled', unsched, 'No shift covering them — check for voluntary OT',
+        unsched ? 'orange' : 'green') +
       (s.byStatus.notInReport
         ? metric('Not in timeclock', s.byStatus.notInReport, 'Scheduled, but absent from the report entirely', 'orange')
-        : s.onPto ? metric('On PTO', s.onPto, 'Approved time off, so not counted against coverage')
-        : metric('Unscheduled', s.byStatus.unscheduled, 'On premise with no shift covering now',
-                 s.byStatus.unscheduled ? 'orange' : 'green')) +
+        : '') +
+      (s.onPto ? metric('On PTO', s.onPto, 'Approved time off, so not counted against coverage') : '') +
       '</div>';
   }
 
@@ -1332,7 +1391,12 @@
     var c = state.coverage;
     var locs = {};
     res.rows.forEach(function (r) { var l = locLeaf(r.location); if (l) locs[l] = (locs[l] || 0) + 1; });
-    var opts = [['exceptions', 'Exceptions only'], ['onshift', 'On shift now'], ['all', 'Everyone']]
+    /* "On shift now" is who was EXPECTED; "On the clock now" is who is actually
+       here, which includes anybody working voluntary OT that no shift covers.
+       Both questions get asked on a floor walk and they have different answers,
+       so both are offered rather than one standing in for the other. */
+    var opts = [['exceptions', 'Exceptions only'], ['onclock', 'On the clock now'],
+        ['onshift', 'On shift now'], ['all', 'Everyone']]
       .concat(ScheduleCore.STATUS_ORDER.map(function (k) {
         return [k, ScheduleCore.STATUS[k].label + ' (' + res.summary.byStatus[k] + ')'];
       }));
@@ -1356,7 +1420,11 @@
       // whose whole job is surfacing people who are not where they should be.
       if (state.market !== 'all' && r.market && r.market !== state.market) return false;
       if (c.location !== 'all' && locLeaf(r.location) !== c.location) return false;
+      /* Exceptions keeps every 'bad' and 'warn', which is what puts somebody on
+         the clock with no shift in front of a supervisor without them having to
+         go looking -- see STATUS.unscheduled in schedule-core.js. */
       if (c.statusFilter === 'exceptions') { if (r.severity !== 'bad' && r.severity !== 'warn') return false; }
+      else if (c.statusFilter === 'onclock') { if (!r.present) return false; }
       else if (c.statusFilter === 'onshift') { if (!ScheduleCore.STATUS[r.status].onShift) return false; }
       else if (c.statusFilter !== 'all' && r.status !== c.statusFilter) return false;
       if (!q) return true;
@@ -1387,6 +1455,7 @@
        system gap on somebody's attendance record. What is offered instead is
        the thing that actually needs doing. */
     if (r.status === 'notInReport') {
+      if (!mayEdit()) return '<span class="sub">Needs adding to the timeclock</span>';
       return '<button class="suite-btn tiny" data-add-clock="' + esc(r.badge || '') +
         '" data-add-clock-name="' + esc(r.rosterName || r.name) + '">Raise a task</button>';
     }
@@ -1397,6 +1466,19 @@
     var r = { name: name, badge: badge };
     var doc = documentedFor(key);
     var occ = doc && doc.disposition ? DISPOSITION_OCCURRENCE[doc.disposition] : undefined;
+    /* Read-only sees what was written, not a form to write it. This is the one
+       column where the difference matters most: a disposition decides whether a
+       day costs somebody an attendance point. */
+    if (!mayEdit()) {
+      if (!doc || (!doc.disposition && !doc.reason)) return '<span class="sub">Not documented</span>';
+      return '<div class="cov-doc">' +
+        '<span class="cov-status">' + esc(doc.disposition || 'Documented') + '</span>' +
+        (doc.reason ? '<div class="sub">' + esc(doc.reason) + '</div>' : '') +
+        (occ ? '<span class="cov-occ">' + esc(occ.type) + ' · ' + esc(occ.points) + ' pt' +
+          (occ.points === 1 ? '' : 's') + ' on the workbook</span>' : '') +
+        (occ === null ? '<span class="cov-excused">Excused · no points</span>' : '') +
+        '</div>';
+    }
     return '<div class="cov-doc">' +
       '<select class="suite-select cov-disp" data-doc-key="' + esc(key) + '" data-doc-name="' + esc(r.name) +
       '" data-doc-badge="' + esc(r.badge || '') + '">' +
@@ -1543,7 +1625,8 @@
   }
   function covReviewFilter(rows) {
     var c = state.coverage, q = state.query.trim().toLowerCase();
-    var wantStatus = c.statusFilter === 'exceptions' || c.statusFilter === 'onshift' ? 'all' : c.statusFilter;
+    var wantStatus = c.statusFilter === 'exceptions' || c.statusFilter === 'onshift' ||
+      c.statusFilter === 'onclock' ? 'all' : c.statusFilter;
     return rows.filter(function (r) {
       if (state.market !== 'all') {
         // A stored exception carries no market of its own; take it from the
@@ -1638,7 +1721,8 @@
         return '<tr class="cov-row ' + r.severity + '">' +
           '<td><div class="' + nameCls + '"' + open + '>' + esc(r.name) + '</div><div class="sub">' + sub +
           (r.inSchedule ? '' : ' · no schedule row') + (r.ambiguous ? ' · duplicate name' : '') + '</div></td>' +
-          '<td><span class="cov-status ' + r.severity + '">' + esc(r.statusLabel) + '</span>' + ptoNote(r) + '</td>' +
+          '<td><span class="cov-status ' + r.severity + '">' + esc(r.statusLabel) + '</span>' +
+          unscheduledNote(r) + ptoNote(r) + '</td>' +
           '<td>' + (r.present ? '<span class="cov-dot on">Yes</span>' : '<span class="cov-dot off">No</span>') + '</td>' +
           /* Only where somebody is not where they should be. A number against
              every row would be a column of noise on a normal day. */
@@ -1856,7 +1940,8 @@
   function ptoTrackerLink() {
     var rows = state.stores.appConfig || state.admin.appConfig || [];
     var r = rows.filter(function (x) { return x.key === 'ilPtoTrackerUrl'; })[0];
-    return r ? String(r.value || '').trim() : '';
+    var set = r ? String(r.value || '').trim() : '';
+    return set || IL_PTO_TRACKER_URL;
   }
 
   // EID (the RC Legacy Contact ID the tracker writes) -> badge.
@@ -1874,15 +1959,13 @@
     var link = ptoTrackerLink();
     return '<section class="suite-panel pto-import"><div class="suite-panel-head">' +
       '<h2>Shared IL PTO tracker</h2><div class="suite-actions">' +
-      (link ? '<a class="suite-btn" href="' + esc(link) + '" target="_blank" rel="noopener">Open the spreadsheet</a> ' : '') +
+      extLink(link, 'Open the spreadsheet', 'suite-btn') + ' ' +
       '<label class="suite-btn cov-pick primary">Import tracker' +
       '<input type="file" accept=".xlsx,.xls" data-pto-book></label></div></div>' +
       '<p class="perf-note">The workbook Chicago and St. Louis share. GEODIS PTO is read from the ' +
       '<b>30080</b>, <b>GEODIS - 20062</b> and <b>20062 Geodis Processed</b> tabs; rows on 30080 for other ' +
       'clients are counted and left alone. An import replaces what this tracker last said and does not ' +
-      'touch requests from any other source.' +
-      (link ? '' : ' <span class="warn-text">No spreadsheet link is set — add one under Settings → RC links.</span>') +
-      '</p>' +
+      'touch requests from any other source.</p>' +
       ptoSyncNote() +
       (imp ? shiftImportReport(imp) : '') + '</section>';
   }
@@ -2032,7 +2115,9 @@
     var orphans = state.stores.timeOff.filter(function (t) { return !profile(t.badge); });
     // The banner says they are listed below, so it has to own up when they aren't.
     var orphansHidden = showCompleted ? 0 : orphans.filter(isCompletedRequest).length;
-    return hero('PTO / VTO tracking', 'Approved time off is excused and carries no attendance points.', 'timeoff', 'New request') +
+    return heroLink('PTO / VTO tracking',
+        'Approved time off is excused and carries no attendance points. Requests are raised on the shared tracker.',
+        ptoTrackerLink(), 'Open the PTO spreadsheet') +
       ptoImportPanel() +
       (orphans.length ? '<div class="warn-banner"><b>' + orphans.length + '</b> request' +
         (orphans.length === 1 ? '' : 's') + ' could not be matched to an associate on the roster — usually a ' +
@@ -2059,8 +2144,10 @@
               esc(t.transitionHours) + ' transition · ' + esc(t.accrualHours || 0) + ' accrual</div>' : '') + '</td>' +
             '<td>' + statusSelect(t) + '</td>' +
             '<td>' + tieIn(t) + '</td>' +
-            '<td>' + (p ? '' : '<button class="suite-btn" data-connect="' + esc(t.id) + '">Connect…</button> ') +
-            '<button class="suite-btn danger" data-del="timeoff|' + esc(t.id) + '">Remove</button></td></tr>';
+            '<td>' + (mayEdit()
+              ? (p ? '' : '<button class="suite-btn" data-connect="' + esc(t.id) + '">Connect…</button> ') +
+                '<button class="suite-btn danger" data-del="timeoff|' + esc(t.id) + '">Remove</button>'
+              : '<span class="sub">&mdash;</span>') + '</td></tr>';
         }).join('') + '</tbody></table></div>' + rowCap(rows.length, shown.length)
         : empty(completed && !showCompleted ? 'Nothing outstanding' : 'No time-off requests',
             completed && !showCompleted
@@ -2080,6 +2167,7 @@
 
   function statusSelect(t) {
     var meta = TimeOffCore.statusMeta(t.status);
+    if (!mayEdit()) return readOnlyStatus(meta, TimeOffCore.lastChange(t), changeTitle(t));
     var keys = TimeOffCore.STATUS_KEYS.slice();
     if (meta.unknown) keys.unshift(meta.key);
     var last = TimeOffCore.lastChange(t);
@@ -2219,13 +2307,23 @@
       statusLabelOf: function (r) { return PayrollCore.pipeline.statusMeta(r.status).label; }
     }));
   }
-  // Every task, stored and derived, with the market filter applied.
+  /* Every task, stored and derived, with the market filter applied.
+
+     Cached for the length of one render. The header's urgent badge asks for this
+     on EVERY page, and the Tasks and Payroll pages ask again -- three passes
+     over the whole time-off and discrepancy collections to draw one screen, and
+     it is all derived from data that cannot change between them. The cache is
+     dropped at the top of render(), so nothing can go stale across a write. */
+  var taskCache = null;
+  function invalidateTasks() { taskCache = null; }
   function allTasks() {
-    return storedTasks().concat(derivedTasks()).filter(function (t) {
+    if (taskCache) return taskCache;
+    taskCache = storedTasks().concat(derivedTasks()).filter(function (t) {
       // A task with no market is never hidden: it is usually the ones with no
       // profile attached that most need chasing.
       return state.market === 'all' || !t.market || t.market === state.market;
     });
+    return taskCache;
   }
   function openTasks() { return allTasks().filter(TasksCore.isOpen); }
 
@@ -2238,20 +2336,103 @@
       (u === TasksCore.URGENT ? 'Urgent · ' : '') + esc(label) + '</span>';
   }
 
+  /* ---------- narrowing the queue ----------
+     The list is long by design: it is every outstanding thing in the business,
+     and the whole point is that nothing falls off it. That makes it congested to
+     work from, so each axis somebody actually triages by gets a filter -- what
+     it is about, how it is going, how late it is, and where it came from.
+
+     Each is a plain predicate over one task, kept separate so the option counts
+     below can be worked out by asking "what would this list look like with only
+     THIS filter changed" -- a count that moved with the other filters would send
+     people down empty paths. */
+  var TASK_URGENCY = [
+    ['urgent', 'Urgent', TasksCore.URGENT],
+    ['due', 'Due soon', TasksCore.DUE],
+    ['ok', 'On track', TasksCore.OK]
+  ];
+  var TASK_SOURCES = [
+    ['hand', 'Raised by hand'],
+    ['timeoff', 'From Time Off'],
+    ['discrepancies', 'From Payroll']
+  ];
+  function taskSourceOf(t) { return t.derived ? (t.sourceKind || 'derived') : 'hand'; }
+
+  function taskTests(now) {
+    var f = state.tasks, q = state.query.trim().toLowerCase();
+    return {
+      done: function (t) { return f.showDone || TasksCore.isOpen(t); },
+      kind: function (t) { return f.kind === 'all' || TasksCore.kindMeta(t.kind).key === f.kind; },
+      status: function (t) { return f.status === 'all' || TasksCore.pipeline.statusMeta(t.status).key === f.status; },
+      urgency: function (t) { return f.urgency === 'all' || TasksCore.urgencyOf(t, now) === f.urgency; },
+      source: function (t) { return f.source === 'all' || taskSourceOf(t) === f.source; },
+      query: function (t) {
+        if (!q) return true;
+        return searchText(t.badge ? profile(t.badge) : null,
+          t.title + ' ' + t.detail + ' ' + t.name + ' ' + t.badge).toLowerCase().indexOf(q) !== -1;
+      }
+    };
+  }
+  // Everything the filters agree on, optionally ignoring one of them.
+  function taskFilter(tasks, tests, except) {
+    return tasks.filter(function (t) {
+      return Object.keys(tests).every(function (k) { return k === except || tests[k](t); });
+    });
+  }
+  /* How many rows an option would show if it were the one selected. Counted with
+     that filter lifted, so "Payroll issue (3)" means three would appear, not
+     three exist somewhere behind two other filters. */
+  function taskCounts(tasks, tests, axis, keyOf) {
+    var pool = taskFilter(tasks, tests, axis), out = {};
+    pool.forEach(function (t) {
+      var k = keyOf(t);
+      out[k] = (out[k] || 0) + 1;
+    });
+    out.all = pool.length;
+    return out;
+  }
+  function taskSelect(id, allLabel, options, selected, counts) {
+    return '<select class="suite-select" id="' + id + '">' +
+      '<option value="all"' + (selected === 'all' ? ' selected' : '') + '>' +
+      esc(allLabel) + ' (' + (counts.all || 0) + ')</option>' +
+      options.map(function (o) {
+        return '<option value="' + esc(o[0]) + '"' + (selected === o[0] ? ' selected' : '') + '>' +
+          esc(o[1]) + ' (' + (counts[o[0]] || 0) + ')</option>';
+      }).join('') + '</select>';
+  }
+
+  function taskFilters(every, now) {
+    var f = state.tasks, tests = taskTests(now);
+    var active = (f.kind !== 'all') + (f.status !== 'all') + (f.urgency !== 'all') +
+      (f.source !== 'all') + (state.query.trim() ? 1 : 0);
+    return '<div class="filter-row task-filters">' +
+      '<input class="suite-input" id="suite-search" value="' + esc(state.query) +
+      '" placeholder="Search by EID, title, detail, or name…">' +
+      taskSelect('task-kind', 'All kinds',
+        TasksCore.KINDS.map(function (k) { return [k.key, k.label]; }), f.kind,
+        taskCounts(every, tests, 'kind', function (t) { return TasksCore.kindMeta(t.kind).key; })) +
+      taskSelect('task-status', 'Any status',
+        TasksCore.STATUSES.map(function (x) { return [x.key, x.label]; }), f.status,
+        taskCounts(every, tests, 'status', function (t) { return TasksCore.pipeline.statusMeta(t.status).key; })) +
+      taskSelect('task-urgency', 'Any age',
+        TASK_URGENCY.map(function (u) { return [u[2], u[1]]; }), f.urgency,
+        taskCounts(every, tests, 'urgency', function (t) { return TasksCore.urgencyOf(t, now); })) +
+      taskSelect('task-source', 'From anywhere', TASK_SOURCES, f.source,
+        taskCounts(every, tests, 'source', taskSourceOf)) +
+      '<label class="cov-ctl"><input type="checkbox" id="task-done"' + (f.showDone ? ' checked' : '') +
+      '> <span>Show completed</span></label>' +
+      (active ? '<button class="suite-btn" data-task-clear="1">Clear ' + active + ' filter' +
+        (active === 1 ? '' : 's') + '</button>' : '') +
+      '</div>';
+  }
+
   function tasksView() {
     if (!state.storesLoaded) return loadingPanel('tasks');
     var now = new Date();
     var every = allTasks();
     var sum = TasksCore.summarize(every, now);
-    var showDone = state.tasks.showDone;
-    var q = state.query.trim().toLowerCase();
-    var rows = TasksCore.sort(every.filter(function (t) {
-      if (!showDone && !TasksCore.isOpen(t)) return false;
-      if (state.tasks.kind !== 'all' && TasksCore.kindMeta(t.kind).key !== state.tasks.kind) return false;
-      if (!q) return true;
-      return searchText(t.badge ? profile(t.badge) : null,
-        t.title + ' ' + t.detail + ' ' + t.name + ' ' + t.badge).toLowerCase().indexOf(q) !== -1;
-    }), now);
+    var tests = taskTests(now);
+    var rows = TasksCore.sort(taskFilter(every, tests, null), now);
 
     return hero('Tasks', 'Everything outstanding, from wherever it was raised. A task stays until somebody marks it complete.') +
       '<div class="metric-strip">' +
@@ -2264,22 +2445,13 @@
         (sum.urgent === 1 ? ' has' : 's have') + ' gone past the window. Payroll issues escalate after ' +
         TasksCore.kindMeta('payroll').hours + ' hours, everything else after ' +
         TasksCore.kindMeta('note').hours + '.</div>' : '') +
-      '<section class="suite-panel">' +
-      '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
-      '" placeholder="Search by EID, title, detail, or name…">' +
-      '<select class="suite-select" id="task-kind"><option value="all">All kinds</option>' +
-      TasksCore.KINDS.map(function (k) {
-        return '<option value="' + esc(k.key) + '" ' + (state.tasks.kind === k.key ? 'selected' : '') +
-          '>' + esc(k.label) + ' (' + (sum.byKind[k.key] || 0) + ')</option>';
-      }).join('') + '</select>' +
-      '<label class="cov-ctl"><input type="checkbox" id="task-done"' + (showDone ? ' checked' : '') +
-      '> <span>Show completed</span></label></div>' +
+      '<section class="suite-panel">' + taskFilters(every, now) +
       (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
         '<th>Task</th><th>Kind</th><th>Associate</th><th>Raised</th><th>Age</th><th>Status</th><th></th>' +
         '</tr></thead><tbody>' +
         rows.slice(0, MAX_ROWS).map(function (t) { return taskRow(t, now); }).join('') +
         '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length)
-        : empty(showDone ? 'Nothing matches those filters' : 'Nothing outstanding',
+        : empty(state.tasks.showDone ? 'Nothing matches those filters' : 'Nothing outstanding',
             'Raise one with the + button in the top bar, or widen the filters.')) +
       '</section>';
   }
@@ -2289,8 +2461,8 @@
     var p = t.badge ? profile(t.badge) : null;
     var kind = TasksCore.kindMeta(t.kind);
     return '<tr class="' + (u === TasksCore.URGENT ? 'cov-row bad' : u === TasksCore.DUE ? 'cov-row warn' : '') + '">' +
-      '<td class="detail-cell"><div class="name">' + esc(t.title) + '</div>' +
-      (t.detail ? '<div class="sub">' + esc(t.detail) + '</div>' : '') + '</td>' +
+      '<td class="detail-cell"><div class="name detail-text">' + esc(t.title) + '</div>' +
+      detailText(t.detail, 'sub') + '</td>' +
       '<td><span class="task-kind">' + esc(kind.label) + '</span>' +
       (kind.unknown ? '<div class="sub warn-text">not a kind this build knows</div>' : '') + '</td>' +
       '<td>' + (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div>' +
@@ -2308,9 +2480,11 @@
         : pipelineSelect(t, TasksCore.pipeline, 'tasks')) + '</td>' +
       '<td>' + (t.derived
         ? '<button class="suite-btn" data-nav="' + esc(kind.panel) + '">Open ›</button>'
-        : '<button class="suite-btn" data-task-done="' + esc(t.id) + '"' +
-          (TasksCore.isOpen(t) ? '' : ' disabled') + '>Complete</button> ' +
-          '<button class="suite-btn danger" data-del="tasks|' + esc(t.id) + '">Remove</button>') +
+        : mayEdit()
+          ? '<button class="suite-btn" data-task-done="' + esc(t.id) + '"' +
+            (TasksCore.isOpen(t) ? '' : ' disabled') + '>Complete</button> ' +
+            '<button class="suite-btn danger" data-del="tasks|' + esc(t.id) + '">Remove</button>'
+          : '<span class="sub">&mdash;</span>') +
       '</td></tr>';
   }
 
@@ -2329,6 +2503,56 @@
       (pr.tab === 'hours' ? payrollHours() : payrollDiscrepancies());
   }
 
+  /* Payroll issues arrive two ways and used to be visible in only one place
+     each. A discrepancy comes off the GEODIS form and lands on this page; a
+     payroll task is raised by hand from the + button and landed only on Tasks.
+     Somebody who raised one here went looking for it here and found nothing.
+
+     They are NOT merged into one list. A discrepancy is a claim about a specific
+     week's hours with its own pipeline; a task is a job somebody took on. Both
+     belong on the payroll page, as themselves. */
+  function payrollTasks() {
+    return allTasks().filter(function (t) {
+      // Stored only: a derived payroll task IS a discrepancy, and it is already
+      // in the table below this panel.
+      return !t.derived && TasksCore.kindMeta(t.kind).key === 'payroll';
+    });
+  }
+  function payrollTaskPanel() {
+    var now = new Date();
+    var all = TasksCore.sort(payrollTasks(), now);
+    var open = all.filter(TasksCore.isOpen);
+    if (!all.length) return '';
+    var rows = open.length ? open : all;
+    return '<section class="suite-panel"><div class="suite-panel-head">' +
+      '<h2>Payroll tasks</h2><div class="suite-actions">' +
+      '<button class="suite-btn" data-nav="tasks">All tasks &rsaquo;</button></div></div>' +
+      '<p class="perf-note">Raised by hand from the <b>+ Task</b> button rather than off the ' +
+      'discrepancy form. They escalate after ' + TasksCore.kindMeta('payroll').hours +
+      ' hours, and are the same records as the payroll ones on the Tasks page.' +
+      (open.length ? '' : ' Nothing outstanding — the ' + all.length + ' below are complete.') + '</p>' +
+      '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
+      '<th>Task</th><th>Associate</th><th>Raised</th><th>Age</th><th>Status</th><th></th>' +
+      '</tr></thead><tbody>' +
+      rows.slice(0, MAX_ROWS).map(function (t) {
+        var pr = t.badge ? profile(t.badge) : null;
+        return '<tr class="' + (TasksCore.urgencyOf(t, now) === TasksCore.URGENT ? 'cov-row bad'
+          : TasksCore.urgencyOf(t, now) === TasksCore.DUE ? 'cov-row warn' : '') + '">' +
+          '<td class="detail-cell"><div class="name detail-text">' + esc(t.title) + '</div>' +
+          detailText(t.detail, 'sub') + '</td>' +
+          '<td>' + (pr ? '<div class="name link" data-profile="' + esc(pr.badge) + '">' + esc(pr.name) +
+              '</div><div class="sub">' + idLine(pr) + '</div>'
+            : t.name ? '<div class="name">' + esc(t.name) + '</div><div class="sub warn-text">no profile</div>'
+            : '<span class="sub">&mdash;</span>') + '</td>' +
+          '<td>' + esc(shortWhen(t.createdAt) || '—') + '</td>' +
+          '<td>' + urgencyChip(t, now) + '</td>' +
+          '<td>' + pipelineSelect(t, TasksCore.pipeline, 'tasks') + '</td>' +
+          '<td><button class="suite-btn" data-task-done="' + esc(t.id) + '"' +
+          (TasksCore.isOpen(t) ? '' : ' disabled') + '>Complete</button></td></tr>';
+      }).join('') + '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length) +
+      '</section>';
+  }
+
   function payrollDiscrepancies() {
     if (!state.storesLoaded) return loadingPanel('discrepancies');
     var q = state.query.trim().toLowerCase();
@@ -2343,11 +2567,15 @@
     var open = all.filter(function (dsc) { return PayrollCore.pipeline.needsAction(dsc.status); }).length;
     var orphans = (state.stores.discrepancies || []).filter(function (dsc) { return !profile(dsc.badge); });
 
+    var openTaskCount = payrollTasks().filter(TasksCore.isOpen).length;
+
     return '<div class="metric-strip">' +
       metric('Open discrepancies', open, 'Not yet corrected or closed', open ? 'orange' : 'green') +
       metric('Total raised', all.length, 'In this market') +
+      metric('Payroll tasks', openTaskCount, 'Raised by hand, still open', openTaskCount ? 'orange' : 'green') +
       metric('Unmatched', orphans.length, 'Need connecting to an associate', orphans.length ? 'orange' : 'green') +
       '</div>' +
+      payrollTaskPanel() +
       (orphans.length ? '<div class="warn-banner"><b>' + orphans.length + '</b> discrepanc' +
         (orphans.length === 1 ? 'y' : 'ies') + ' could not be matched to an associate — usually a name ' +
         'typed differently on the form. Use Connect to link them.</div>' : '') +
@@ -2367,11 +2595,13 @@
             '<td>' + esc(dsc.location || '—') + '</td>' +
             '<td>' + esc(dsc.date || '<span class="warn-text">not set</span>') + '</td>' +
             '<td>' + esc(dsc.weekEnding || '—') + '</td>' +
-            '<td class="detail-cell">' + esc(dsc.details || '') + '</td>' +
+            '<td class="detail-cell">' + (detailText(dsc.details) || '<span class="sub">&mdash;</span>') + '</td>' +
             '<td>' + pipelineSelect(dsc, PayrollCore.pipeline, 'discrepancies') + '</td>' +
-            '<td>' + (p ? '' : '<button class="suite-btn" data-connect="' + esc(dsc.id) +
-              '" data-connect-kind="discrepancies">Connect…</button> ') +
-            '<button class="suite-btn danger" data-del="discrepancies|' + esc(dsc.id) + '">Remove</button></td></tr>';
+            '<td>' + (mayEdit()
+              ? (p ? '' : '<button class="suite-btn" data-connect="' + esc(dsc.id) +
+                  '" data-connect-kind="discrepancies">Connect…</button> ') +
+                '<button class="suite-btn danger" data-del="discrepancies|' + esc(dsc.id) + '">Remove</button>'
+              : '<span class="sub">&mdash;</span>') + '</td></tr>';
         }).join('') + '</tbody></table></div>' + rowCap(rows.length, all.length)
         : empty('No discrepancies yet', 'They arrive from the GEODIS Payroll Discrepancy Form.')) +
       '</section>';
@@ -2450,9 +2680,20 @@
     return d && !isNaN(d.getTime()) ? d : new Date();
   }
 
+  /* The same status, for an account that may not change it. A disabled <select>
+     still reads as a control somebody could use if they clicked harder; a chip
+     reads as a fact. The change log stays, because knowing who last moved it is
+     the read-only account's whole interest in the column. */
+  function readOnlyStatus(meta, last, title) {
+    return '<span class="cov-status ' + esc(meta.cls || '') + '"' +
+      (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(meta.label) + '</span>' +
+      (last ? '<div class="sub">' + esc(last.by) + ' · ' + esc(shortWhen(last.at)) + '</div>' : '');
+  }
+
   /* One status dropdown, driven by whichever pipeline the record belongs to. */
   function pipelineSelect(rec, pipe, collection) {
     var meta = pipe.statusMeta(rec.status);
+    if (!mayEdit()) return readOnlyStatus(meta, pipe.lastChange(rec), '');
     var keys = pipe.STATUS_KEYS.slice();
     if (meta.unknown) keys.unshift(meta.key);
     var last = pipe.lastChange(rec);
@@ -2470,25 +2711,41 @@
      Accounts, locations and shifts. Sign-in is not enforced yet, so this page is
      reachable by anyone today; once it is, everything here needs the admin role.
      The page says so rather than pretending to be locked. */
+  /* Which tab needs what. Account is everybody's own; Users is a manager's job
+     as much as an administrator's, which is the whole point of separating the
+     'roles' permission from 'admin'. The rest is settings, and settings are the
+     administrator's. */
+  var SETTINGS_TABS = [
+    ['account', 'Account', ''],
+    ['users', 'Users', 'roles'],
+    ['connections', 'Connections', 'edit'],
+    ['locations', 'Locations', 'admin'],
+    ['shifts', 'Shifts', 'admin'],
+    ['links', 'App settings', 'admin']
+  ];
   function settingsView() {
     var a = state.auth;
-    var admin = a.account && AuthCore.isAdmin(a.account);
-    var tabs = [['account', 'Account'], ['users', 'Users'], ['locations', 'Locations'],
-      ['shifts', 'Shifts'], ['connections', 'Connections'], ['links', 'RC links']];
+    var admin = mayAdmin();
+    var tabs = SETTINGS_TABS.filter(function (x) { return !x[2] || may(x[2]); });
+    // A tab that is no longer allowed must not stay selected: the panel behind
+    // it would render for somebody who may not see it.
+    if (!tabs.some(function (x) { return x[0] === state.admin.tab; })) state.admin.tab = 'account';
     if (!state.admin.loaded && state.admin.tab !== 'account') loadAdminData();
+    var role = AuthCore.roleMeta(account() && account().role);
     return hero('Settings', 'Accounts, roles, locations and shifts.', '', '') +
-      (a.signedIn && !admin
-        ? '<div class="warn-banner">You are signed in as <b>' + esc(a.email) + '</b> with the ' +
-          esc(AuthCore.roleMeta(a.account && a.account.role).label) + ' role. Changing accounts, ' +
-          'locations or shifts needs an administrator.</div>'
-        : '') +
+      (admin ? '' : '<div class="warn-banner">You are signed in as <b>' + esc(a.email) + '</b> with the ' +
+        esc(role.label) + ' role. ' +
+        (may('roles')
+          ? 'You can give colleagues and managers a role. Locations, shifts and the settings themselves need an administrator.'
+          : 'Changing accounts, locations or shifts needs a manager or an administrator.') +
+        '</div>') +
       '<div class="filter-row payroll-tabs">' + tabs.map(function (x) {
         return '<button class="suite-btn ' + (state.admin.tab === x[0] ? 'primary' : '') +
           '" data-settings-tab="' + x[0] + '">' + esc(x[1]) + '</button>';
       }).join('') + '</div>' +
       (state.admin.tab === 'account' ? accountPanel()
         : !state.admin.loaded ? loadingPanel('settings')
-        : state.admin.tab === 'users' ? usersPanel(admin)
+        : state.admin.tab === 'users' ? usersPanel()
         : state.admin.tab === 'locations' ? listPanel('locations', admin)
         : state.admin.tab === 'connections' ? connectionsPanel()
         : state.admin.tab === 'links' ? appConfigPanel(admin)
@@ -2694,6 +2951,7 @@
       'time off — stops doing so.\n\n' +
       'This does not change the PLX workbook. If the row there still carries this id, ' +
       'they will appear on the unconnected list again.')) return;
+    if (!guard('edit', 'undo a connection')) return;
     SuiteData.deleteRecord('timeclockLinks', id).then(function () {
       return SuiteData.loadCollection('timeclockLinks');
     }).then(function (rows) {
@@ -2708,6 +2966,7 @@
   /* Accepting a suggestion writes the same record the search modal writes, so
      there is one shape of connection however it was made. */
   function acceptConnection(eid, badge, workbookName) {
+    if (!guard('edit', 'connect a timeclock id')) return;
     var actor = currentActor(true);
     if (!actor) return;
     var target = profile(badge);
@@ -2728,63 +2987,87 @@
     });
   }
 
+  /* Only the signed-in half. Signing in happens at the gate now -- nothing
+     renders this panel until there is an account that may view. */
   function accountPanel() {
-    var a = state.auth;
-    if (a.signedIn) {
-      var role = AuthCore.roleMeta(a.account && a.account.role);
-      var mk = (a.account && a.account.markets) || [];
-      return '<section class="suite-panel"><div class="suite-panel-head"><h2>Signed in</h2>' +
-        '<div class="suite-actions"><button class="suite-btn" data-sign-out>Sign out</button></div></div>' +
-        '<dl class="detail-list">' +
-        detail('Email', a.email) +
-        detail('Role', role.label + (role.unknown ? ' — not a role this build knows, so it grants nothing' : '')) +
-        detail('Markets', mk.length ? mk.join(', ') : 'All markets') +
-        detail('Account', a.account && a.account.enabled === false ? 'Disabled' : 'Active') +
-        '</dl>' +
-        (a.error ? '<div class="warn-banner">' + esc(a.error) + '</div>' : '') +
-        '<p class="perf-note">Sign-in is not enforced yet, so the tool works signed out exactly as it ' +
-        'did before. What signing in changes today is that status changes are attributed to your ' +
-        'account rather than a name typed into this browser.</p></section>';
-    }
-    return '<section class="suite-panel"><div class="suite-panel-head"><h2>Sign in</h2></div>' +
-      '<form class="signin-form" data-signin>' +
-      '<label class="suite-field"><span>Work email</span>' +
-      '<input name="email" type="email" autocomplete="username" placeholder="you@geodis.com" required></label>' +
-      '<label class="suite-field"><span>Password</span>' +
-      '<input name="password" type="password" autocomplete="current-password" minlength="6" required></label>' +
-      '<div class="signin-actions">' +
-      '<button class="suite-btn primary" data-signin-do="in"' + (a.loading ? ' disabled' : '') + '>' +
-      (a.loading ? 'Working…' : 'Sign in') + '</button>' +
-      '<button type="button" class="suite-btn" data-signin-do="create">Create account</button>' +
-      '<button type="button" class="suite-btn" data-signin-do="reset">Forgot password</button>' +
-      '</div></form>' +
+    var a = state.auth, acct = account();
+    var role = AuthCore.roleMeta(acct && acct.role);
+    var mk = (acct && acct.markets) || [];
+    var doing = role.can.length
+      ? role.can.map(function (c) {
+          return { view: 'see everything in the tool', edit: 'change records',
+            import: 'import reports', roles: 'give colleagues and managers a role',
+            admin: 'change settings' }[c] || c;
+        }).join(', ')
+      : 'nothing yet';
+    return '<section class="suite-panel"><div class="suite-panel-head"><h2>Signed in</h2>' +
+      '<div class="suite-actions"><button class="suite-btn" data-sign-out>Sign out</button></div></div>' +
+      '<dl class="detail-list">' +
+      detail('Email', a.email) +
+      detail('Role', role.label + (role.unknown ? ' — not a role this build knows, so it grants nothing' : '')) +
+      detail('You can', doing) +
+      detail('Markets', mk.length ? mk.join(', ') : 'All markets') +
+      detail('Account', acct && acct.enabled === false ? 'Disabled' : 'Active') +
+      '</dl>' +
       (a.error ? '<div class="warn-banner">' + esc(a.error) + '</div>' : '') +
-      '<p class="perf-note">Open to <b>' + esc(AuthCore.ALLOWED_DOMAINS.join('</b> and <b>')) + '</b> ' +
-      'addresses. A new account starts as a viewer until an administrator changes it.</p></section>';
+      (a.denied ? '<div class="warn-banner">' + esc(a.denied) + '</div>' : '') +
+      '<p class="perf-note">Every status change and every note is recorded against this account. ' +
+      'A role is changed under <b>Users</b> by a manager or an administrator — never by the ' +
+      'account itself.</p></section>';
   }
 
-  function usersPanel(admin) {
-    var rows = state.admin.users.map(AuthCore.normalizeUser)
-      .sort(function (x, y) { return x.email.localeCompare(y.email); });
-    var me = state.auth.account;
+  /* Accounts. Open to anybody with 'roles' -- a manager staffing their own team
+     as much as an administrator -- and every row decides for itself whether the
+     signed-in person may touch it. What they may set it TO is decided again on
+     the server; the select below only offers what makes sense. */
+  function usersPanel() {
+    /* normalizeUser drops anything it does not know about, which is what makes
+       it safe -- but `pinnedRole` is computed by the server on read and has to
+       survive, so it is carried across by hand. */
+    var rows = state.admin.users.map(function (u) {
+      var n = AuthCore.normalizeUser(u);
+      n.pinnedRole = u && u.pinnedRole ? String(u.pinnedRole) : '';
+      return n;
+    }).sort(function (x, y) { return x.email.localeCompare(y.email); });
+    var me = account();
     var markets = allMarkets();
+    var grantable = AuthCore.grantableRoles(me);
+    var ceiling = AuthCore.roleMeta(grantable[grantable.length - 1] || 'pending');
     return '<section class="suite-panel">' +
+      '<p class="perf-note">Anyone with a work email can create their own account, and it arrives as a ' +
+      '<b>' + esc(AuthCore.roleMeta(AuthCore.DEFAULT_ROLE).label) + '</b> — the domain check is what ' +
+      'stands in for an approval. Change anybody who needs more, or less. You can grant up to <b>' +
+      esc(ceiling.label) + '</b>, and cannot change your own access or any account above it.</p>' +
       (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
         '<th>Email</th><th>Name</th><th>Role</th><th>Markets</th><th>Status</th><th>Last seen</th></tr></thead><tbody>' +
         rows.map(function (u) {
           // An admin cannot edit their own access, so the row is shown read-only
           // rather than offering a control that would be refused.
-          var editable = admin && AuthCore.canManage(me, u);
+          /* A pinned account gets no role control at all. It is not that the
+             person lacks the standing -- it is that the change could not hold:
+             ADMIN_EMAILS re-grants admin at the next sign-in. Offering a select
+             that silently reverts is worse than offering nothing. */
+          var editable = AuthCore.canManage(me, u) && !u.pinnedRole;
           return '<tr><td><div class="name">' + esc(u.email) + '</div>' +
             (me && me.email === u.email ? '<div class="sub">This is you</div>' : '') + '</td>' +
             '<td>' + esc(u.name || '—') + '</td>' +
             '<td>' + (editable
               ? '<select class="suite-select" data-user-role="' + esc(u.email) + '">' +
-                AuthCore.grantableRoles(me).map(function (k) {
-                  return '<option value="' + esc(k) + '" ' + (u.role === k ? 'selected' : '') + '>' +
-                    esc(AuthCore.roleMeta(k).label) + '</option>';
-                }).join('') + '</select>'
-              : esc(AuthCore.roleMeta(u.role).label)) + '</td>' +
+                /* The account's CURRENT role is always an option, even when it
+                   is above what this person may grant -- otherwise the select
+                   would open showing somebody a role they do not have, and a
+                   stray change would silently demote them. */
+                grantable.concat(grantable.indexOf(u.role) === -1 ? [u.role] : [])
+                  .map(function (k) {
+                    return '<option value="' + esc(k) + '" ' + (u.role === k ? 'selected' : '') +
+                      (grantable.indexOf(k) === -1 ? ' disabled' : '') + '>' +
+                      esc(AuthCore.roleMeta(k).label) + '</option>';
+                  }).join('') + '</select>'
+              : esc(AuthCore.roleMeta(u.role).label) +
+                (u.pinnedRole
+                  ? '<div class="sub warn-text">Pinned by the deployment (ADMIN_EMAILS) — ' +
+                    'a change here would be undone at the next sign-in</div>'
+                  : me && me.email === u.email ? '' : '<div class="sub">above your own</div>')) + '</td>' +
             '<td>' + (editable
               ? '<input class="suite-input" data-user-markets="' + esc(u.email) + '" value="' +
                 esc(u.markets.join(', ')) + '" placeholder="All markets">' +
@@ -2823,7 +3106,14 @@
     { key: 'rcAssignmentObject', label: 'RC assignment object API name',
       hint: 'The object an assignment record lives on. TargetRecruit uses TR1__Closing_Report__c; its ids start "a58".' },
     { key: 'ilPtoTrackerUrl', label: 'Shared IL PTO tracker (SharePoint)',
-      hint: 'The workbook Chicago and St. Louis share. Adds an "Open the spreadsheet" link beside the PTO import.' }
+      hint: 'The workbook Chicago and St. Louis share. Blank uses the built-in link.' },
+    /* Who may create an account. Only ever ADDS to the built-in list -- see
+       setAllowedDomains() in auth-core.js. Clearing this field falls back to the
+       built-ins rather than to nothing, so a typo here cannot lock every
+       administrator out of a tool with no other way in. */
+    { key: 'allowedDomains', label: 'Extra email domains that may sign up',
+      hint: 'Comma-separated, e.g. contractor.com. ' +
+        AuthCore.ALLOWED_DOMAINS.join(' and ') + ' are always allowed and cannot be removed here.' }
   ];
   function appConfigPanel(admin) {
     var rows = state.admin.appConfig || [];
@@ -2831,7 +3121,7 @@
       var r = rows.filter(function (x) { return x.key === k; })[0];
       return r ? r.value || '' : '';
     };
-    return '<section class="suite-panel"><div class="suite-panel-head"><h2>RC links</h2></div>' +
+    return '<section class="suite-panel"><div class="suite-panel-head"><h2>App settings</h2></div>' +
       '<p class="perf-note">The daily RC assignment export carries an 18-character record id for the ' +
       'associate and the assignment. With a base URL set, those become links straight into RC.</p>' +
       APP_SETTINGS.map(function (f) {
@@ -3600,6 +3890,97 @@
     if (main && main.parentNode !== document.body) document.body.appendChild(main);
   }
 
+  /* ---------- who is signed in, and what they may do ----------
+     One place asks the question, so a control and the handler behind it can
+     never disagree about it. These are convenience only: the server checks the
+     same thing on every request, and it is the server's answer that counts. A
+     hidden button is a courtesy, not a permission. */
+  function account() { return state.auth.account; }
+  function may(action) { return AuthCore.can(account(), action); }
+  function mayEdit() { return may('edit'); }
+  function mayImport() { return may('import'); }
+  function mayAdmin() { return may('admin'); }
+
+  /* Every write in the suite funnels through persist/remove/persistAdmin/saveDoc,
+     so this is where the refusal belongs. Hiding buttons is done as well, but
+     only this is load-bearing: a read-only account that reaches a write path by
+     any route -- a stale render, a keyboard shortcut, a devtools click -- is
+     told no here rather than getting a server error it cannot interpret. */
+  function guard(action, what) {
+    if (may(action)) return true;
+    var role = AuthCore.roleMeta(account() && account().role);
+    alert('That was not saved.\n\n' +
+      (state.auth.signedIn
+        ? 'Your account has the ' + role.label + ' role, which cannot ' + (what || 'change this') + '. ' +
+          'A manager or an administrator can change that under Settings.'
+        : 'You are not signed in.'));
+    return false;
+  }
+
+  /* ---------- the gate ----------
+     Nothing renders until there is an account that may view. The three states
+     are kept apart deliberately, because they need three different things from
+     the person looking at them: wait, sign in, or ask somebody for a role. */
+  function gateScreen() {
+    var a = state.auth;
+    if (!a.ready) return gateShell('Checking your sign-in…', '', '');
+    if (!a.signedIn) return signInScreen();
+    if (!may('view')) return noAccessScreen();
+    return '';
+  }
+  function gateShell(title, body, extra) {
+    return '<div class="gate"><div class="gate-card">' +
+      '<div class="gate-brand"><div class="suite-logo">G</div>' +
+      '<div><strong>GEODIS</strong><small>MANAGEMENT SUITE</small></div></div>' +
+      '<h1>' + esc(title) + '</h1>' + (body ? '<p>' + body + '</p>' : '') + (extra || '') +
+      '</div></div>';
+  }
+  function signInScreen() {
+    var a = state.auth;
+    return gateShell('Sign in',
+      'This tool carries the roster, attendance and pay for the whole site. ' +
+      'It is open to ' + boldList(AuthCore.allowedDomainList()) + ' addresses.',
+      '<form class="signin-form gate-form" data-signin>' +
+      '<label class="suite-field"><span>Work email</span>' +
+      '<input name="email" type="email" autocomplete="username" placeholder="you@geodis.com" required></label>' +
+      '<label class="suite-field"><span>Password</span>' +
+      '<input name="password" type="password" autocomplete="current-password" minlength="6" required></label>' +
+      '<div class="signin-actions">' +
+      '<button class="suite-btn primary" data-signin-do="in"' + (a.loading ? ' disabled' : '') + '>' +
+      (a.loading ? 'Working…' : 'Sign in') + '</button>' +
+      '<button type="button" class="suite-btn" data-signin-do="create">Create account</button>' +
+      '<button type="button" class="suite-btn" data-signin-do="reset">Forgot password</button>' +
+      '</div></form>' +
+      (a.error ? '<div class="warn-banner">' + esc(a.error) + '</div>' : '') +
+      '<p class="gate-note">A new account starts as a <b>Colleague</b>, so the tool works as soon as ' +
+      'you are in. A manager or an administrator can change that from Settings.</p>');
+  }
+  function noAccessScreen() {
+    var a = state.auth, acct = account();
+    var role = AuthCore.roleMeta(acct && acct.role);
+    var disabled = acct && acct.enabled === false;
+    return gateShell(disabled ? 'This account has been disabled' : 'Waiting on a role',
+      'You are signed in as <b>' + esc(a.email) + '</b>.' +
+      (disabled
+        ? ' Somebody switched this account off. If that was not expected, ask an administrator.'
+        : ' The account exists but has the <b>' + esc(role.label) + '</b> role, which cannot see ' +
+          'anything yet. Ask a manager or an administrator to give it one.'),
+      (a.error ? '<div class="warn-banner">' + esc(a.error) + '</div>' : '') +
+      (a.denied ? '<div class="warn-banner">' + esc(a.denied) + '</div>' : '') +
+      '<div class="signin-actions"><button class="suite-btn" data-sign-out>Sign out</button></div>');
+  }
+
+  /* Said once, at the top, rather than by every control that quietly is not
+     there. Somebody who cannot find the button they used yesterday needs to know
+     why, and who to ask. */
+  function readOnlyBanner() {
+    if (mayEdit()) return '';
+    var role = AuthCore.roleMeta(account() && account().role);
+    return '<div class="warn-banner read-only-banner">You have the <b>' + esc(role.label) +
+      '</b> role, so this is a view of the day and nothing here can be changed. ' +
+      'A manager or an administrator can give you the Colleague role under Settings → Users.</div>';
+  }
+
   /* ---------- render ---------- */
   var VIEWS = {
     overview: overview, associates: associates, profile: profileView,
@@ -3608,8 +3989,26 @@
     settings: settingsView, tasks: tasksView
   };
   function render() {
+    invalidateTasks();
     unmountRecon();   // rescue the reconciliation DOM before innerHTML wipes it
-    var body = (VIEWS[state.view] || overview)();
+    var gate = gateScreen();
+    if (gate) {
+      /* The reconciliation tool lives in the page's own markup rather than in
+         this string, so innerHTML on the suite root never touches it. Today
+         `suite-active` already hides it, and unmountRecon() above has just put
+         it back where that rule reaches -- this is a second latch on the same
+         door, for the case where the reconciliation view was the one on screen
+         when the session ended. The roster is what is behind it. */
+      document.body.classList.add('suite-gated');
+      root.innerHTML = gate;
+      return;
+    }
+    document.body.classList.remove('suite-gated');
+    /* The reconciliation tool is a separate script over its own markup, so it
+       cannot ask mayEdit() the way this file does. The class is how it finds
+       out -- see body.suite-readonly in suite.css and GEODISSuite.can() below. */
+    document.body.classList.toggle('suite-readonly', !mayEdit());
+    var body = readOnlyBanner() + (VIEWS[state.view] || overview)();
     root.innerHTML = '<div class="suite-layout">' + navHtml() + '<div class="suite-main">' + headerHtml() +
       '<main class="suite-content">' + body + '</main></div></div>';
     if (state.view === 'reconciliation') mountRecon();
@@ -3633,11 +4032,19 @@
         ' · ' + esc(p.market) + (p.empNumber ? '' : ' · badge ' + esc(p.badge)) + '</option>';
     }).join('') + '</datalist>';
   }
+  /* An option may be a plain string, or a [value, label] pair when the two
+     differ. They differ for anything stored by key: the task Kind select used to
+     offer labels only, so the value it POSTed was "Payroll issue" and the
+     `selected` test never matched the key it was given as a default -- which
+     silently left the FIRST option chosen. Somebody picking a kind got whatever
+     the list happened to start with. */
   function field(label, name, type, value, opts) {
     var input;
     if (type === 'select') {
       input = '<select name="' + name + '">' + (opts || []).map(function (o) {
-        return '<option ' + (o === value ? 'selected' : '') + '>' + esc(o) + '</option>';
+        var v = Array.isArray(o) ? o[0] : o, l = Array.isArray(o) ? o[1] : o;
+        return '<option value="' + esc(v) + '"' + (String(v) === String(value) ? ' selected' : '') + '>' +
+          esc(l) + '</option>';
       }).join('') + '</select>';
     } else if (type === 'badge' || type === 'badge-optional') {
       input = '<input name="' + name + '" list="roster-list" value="' + esc(value) + '"' +
@@ -3650,19 +4057,15 @@
   }
   function modal(type, badge) {
     var fields = '', title = '';
-    if (type === 'timeoff') {
-      title = 'New time-off request';
-      fields = field('Associate', 'badge', 'badge', badge || '') +
-        field('Type', 'type', 'select', 'PTO', TIME_OFF_TYPES) +
-        field('Start', 'start', 'date', today()) + field('End', 'end', 'date', today()) +
-        field('Hours', 'hours', 'number', '8') +
-        field('Status', 'status', 'select', TimeOffCore.DEFAULT_STATUS, TimeOffCore.STATUS_KEYS) +
-        field('Notes', 'notes', 'text', '');
-    } else if (type === 'task') {
+    /* There is no "new time-off request" form. Requests are raised on the shared
+       IL PTO tracker, which is what actually gets paid from -- one typed in here
+       would be approved here and still leave the person marked absent by the
+       sheet. Everything on the Time Off page links to the tracker instead. */
+    if (type === 'task') {
       title = 'Raise a task';
       fields = field('What needs doing', 'title', 'text', '') +
         field('Kind', 'kind', 'select', TasksCore.DEFAULT_KIND,
-          TasksCore.KINDS.map(function (k) { return k.label; })) +
+          TasksCore.KINDS.map(function (k) { return [k.key, k.label]; })) +
         // Optional: plenty of tasks are about a system or a site, not a person.
         field('Associate (optional)', 'badge', 'badge-optional', badge || '') +
         field('Detail', 'detail', 'text', '');
@@ -3690,6 +4093,7 @@
      Every write goes to the shared collection first; the local list and the
      re-render follow. A failed write is surfaced, never silently swallowed. */
   function persist(name, record, localKey) {
+    if (!guard(ADMIN_COLLECTIONS[name] || 'edit', WRITE_VERB[name] || 'change this')) return Promise.resolve();
     return SuiteData.saveRecord(name, record).then(function (saved) {
       if (saved && saved.record) record = saved.record;
       if (saved && saved.associatePto) state.stores.associatePto = saved.associatePto;
@@ -3702,6 +4106,7 @@
     });
   }
   function remove(name, localKey, id) {
+    if (!guard(ADMIN_COLLECTIONS[name] || 'edit', 'remove records')) return Promise.resolve();
     return SuiteData.deleteRecord(name, id).then(function () {
       state.stores[localKey] = state.stores[localKey].filter(function (x) { return x.id !== id; });
       rebuild(); render();
@@ -3710,6 +4115,18 @@
       alert('That record could not be removed.\n\n' + err.message);
     });
   }
+  /* Collections whose write permission is not the ordinary 'edit'. These change
+     what other people can do or see, so they are held higher -- and the same
+     table exists on the server, which is the copy that decides. */
+  var ADMIN_COLLECTIONS = { users: 'roles', appConfig: 'admin', locations: 'admin', shiftTypes: 'admin' };
+  // How the refusal reads. "cannot change this" is true but unhelpful.
+  var WRITE_VERB = {
+    timeoff: 'change time off', tasks: 'change tasks', discrepancies: 'change payroll records',
+    requisitions: 'change requests', contacts: 'change phone numbers',
+    timeclockLinks: 'connect a timeclock id', users: 'change accounts',
+    appConfig: 'change settings', locations: 'change locations', shiftTypes: 'change shifts'
+  };
+
   /* Attendance is absent on purpose: it is read from the PLX workbook and
      written nowhere, so it has no writer key here. */
   var LOCAL_KEY = { timeoff: 'timeOff', requisitions: 'requisitions',
@@ -3721,6 +4138,7 @@
      place: an admin page is low-traffic, and being certain what was stored
      matters more than saving a round trip. */
   function persistAdmin(which, patch) {
+    if (!guard(ADMIN_COLLECTIONS[which] || 'admin', WRITE_VERB[which] || 'change settings')) return;
     SuiteData.saveRecord(which, patch).then(function () {
       return SuiteData.loadCollection(which);
     }).then(function (rows) {
@@ -3843,12 +4261,20 @@
       var f = document.querySelector('[data-form="task"]');
       if (f) {
         f.querySelector('[name="title"]').value = 'Add ' + nm + ' to the timeclock';
-        f.querySelector('[name="kind"]').value = TasksCore.kindMeta('system').label;
+        f.querySelector('[name="kind"]').value = 'system';
         f.querySelector('[name="detail"]').value =
           'On the PLX workbook roster and scheduled, but absent from the on-premise report, ' +
           'so there is no timeclock record yet.' +
           (who && who.empNumber ? ' EID ' + who.empNumber + '.' : '');
       }
+      return;
+    }
+
+    if (e.target.closest('[data-task-clear]')) {
+      state.tasks.kind = 'all'; state.tasks.status = 'all';
+      state.tasks.urgency = 'all'; state.tasks.source = 'all';
+      state.query = '';
+      render();
       return;
     }
 
@@ -3872,6 +4298,7 @@
     var del = e.target.closest('[data-del]');
     if (del) {
       var parts = del.dataset.del.split('|'), name = parts[0], id = parts.slice(1).join('|');
+      if (!guard(ADMIN_COLLECTIONS[name] || 'edit', WRITE_VERB[name] || 'remove records')) return;
       if (!confirm('Remove this record for everyone?')) return;
       if (state.admin[name] !== undefined) {
         SuiteData.deleteRecord(name, id).then(function () {
@@ -3955,8 +4382,8 @@
       render();
       return;
     }
-    if (e.target.closest('[data-req-save]')) { saveReqImport(); return; }
-    if (e.target.closest('[data-req-sites]')) { saveSiteLessons(); return; }
+    if (e.target.closest('[data-req-save]')) { if (guard('import', 'import reports')) saveReqImport(); return; }
+    if (e.target.closest('[data-req-sites]')) { if (guard('admin', 'change locations')) saveSiteLessons(); return; }
     if (e.target.closest('[data-req-clear]')) {
       state.reqSources = []; state.reqImport = null; render(); return;
     }
@@ -3974,6 +4401,7 @@
   // reason debounces so it is not one write per keystroke.
   var docTimers = {};
   function saveDoc(el) {
+    if (!guard('edit', 'document the floor')) return Promise.resolve();
     var date = state.coverage.reviewDate || ScheduleCore.isoDate(coverageAsOf());
     var key = el.dataset.docKey;
     var row = el.closest('.cov-doc');
@@ -4117,16 +4545,47 @@
     docTimers[key] = setTimeout(function () { saveDoc(el); }, 700);
   });
 
+  /* Searching re-renders the whole page, which on a roster of several hundred is
+     a lot of work to do between two keystrokes. Two things were wrong with doing
+     it synchronously:
+
+       1. The caret was slammed to the END of the input every time, so correcting
+          a typo in the middle of a query was impossible -- you typed one letter
+          and the cursor jumped past everything.
+       2. On a long list the render could not keep up with a fast typist.
+
+     `state.query` still updates immediately, so the render that eventually runs
+     is against what was actually typed; only the DRAWING waits. The browser
+     shows the typing natively in the meantime, so nothing feels delayed. */
+  var searchTimer = null;
   root.addEventListener('input', function (e) {
     if (e.target.id !== 'suite-search') return;
-    state.query = e.target.value;
-    render();
-    var i = document.getElementById('suite-search');
-    if (i) { i.focus(); i.setSelectionRange(state.query.length, state.query.length); }
+    var el = e.target;
+    var start = el.selectionStart, end = el.selectionEnd;
+    state.query = el.value;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(function () {
+      render();
+      var i = document.getElementById('suite-search');
+      if (!i) return;
+      i.focus();
+      // Where the caret actually was, not the end of the text.
+      try { i.setSelectionRange(start, end); } catch (err) { /* not a text input */ }
+    }, SEARCH_DELAY_MS);
   });
   root.addEventListener('change', function (e) {
     if (e.target.id === 'market-picker') { setMarket(e.target.value); }
     if (e.target.id === 'status-filter') { state.statusFilter = e.target.value; render(); }
+
+    /* Every import lands in a shared collection everybody else then works from,
+       so it is gated at the point the file is chosen. Refusing after the parse
+       would let somebody watch a workbook be read and only then be told it was
+       never going to be saved. */
+    var importer = e.target.closest('[data-cov],[data-shift-book],[data-pto-book],[data-req-file]');
+    if (importer && importer.files && importer.files.length && !guard('import', 'import reports')) {
+      importer.value = '';
+      return;
+    }
 
     var cov = e.target.closest('[data-cov]');
     if (cov && cov.files && cov.files[0]) {
@@ -4146,6 +4605,9 @@
     if (e.target.id === 'req-site') { state.reqSite = e.target.value; render(); return; }
     if (e.target.id === 'req-when') { state.reqWhen = e.target.value; render(); return; }
     if (e.target.id === 'task-kind') { state.tasks.kind = e.target.value; render(); }
+    if (e.target.id === 'task-status') { state.tasks.status = e.target.value; render(); }
+    if (e.target.id === 'task-urgency') { state.tasks.urgency = e.target.value; render(); }
+    if (e.target.id === 'task-source') { state.tasks.source = e.target.value; render(); }
     if (e.target.id === 'task-done') { state.tasks.showDone = e.target.checked; render(); }
     if (e.target.id === 'timeoff-completed') { state.timeoff.showCompleted = e.target.checked; render(); }
     if (e.target.id === 'cov-status') { state.coverage.statusFilter = e.target.value; render(); }
@@ -4172,6 +4634,7 @@
     if (hit) {
       var kind = state.connectKind || 'timeoff';
       if (kind === 'timeclock') {
+        if (!guard('edit', 'connect a timeclock id')) return;
         var actor = currentActor(true);
         if (!actor) return;
         var target = profile(hit.dataset.connectTo);
@@ -4240,8 +4703,12 @@
     }
     if (type === 'task') {
       if (!String(data.title || '').trim()) { alert('A task needs a description of what has to be done.'); return; }
-      // The select shows labels; the record stores the key.
-      var picked = TasksCore.KINDS.filter(function (k) { return k.label === data.kind; })[0];
+      /* The select carries the key. A label is still accepted, because a tab
+         left open from before this changed would post one, and quietly filing
+         that task under "Follow up" is how a payroll issue goes missing. */
+      var picked = TasksCore.KINDS.filter(function (k) {
+        return k.key === data.kind || k.label === data.kind;
+      })[0];
       data.kind = picked ? picked.key : TasksCore.DEFAULT_KIND;
       var p = data.badge ? profile(data.badge) : null;
       if (p) { data.name = p.name; data.market = p.market || ''; data.location = p.locationLabel || ''; }
@@ -4270,32 +4737,68 @@
   });
 
 
-  loadStoredCoverage();
+  /* ---------- boot ----------
+     Nothing is fetched until there is an account that may view it. That is not
+     only politeness: every one of these requests is refused by the server
+     without a token, so firing them early would fill the console with 401s and
+     seed every store with an empty list, which then looks exactly like "the
+     data is gone".
+
+     `loaded` guards against running twice -- a role change or a token refresh
+     re-fires onChange, and reloading everything each time would hammer the
+     server for no new information. */
+  var loaded = false;
+  function loadEverything() {
+    if (loaded) return;
+    loaded = true;
+    loadStoredCoverage();
+
+    SuiteData.loadIlPtoSync().then(function (sync) {
+      state.ilPto.sync = sync || {};
+      if (state.view === 'timeoff') render();
+    }).catch(function () {});
+
+    SuiteData.loadPlxSync().then(function (sync) {
+      state.plx.sync = sync;
+      if (state.view === 'reconciliation') render();
+    }).catch(function () {});
+
+    SuiteData.loadReqSync().then(function (sync) {
+      state.reqSync = sync;
+      if (state.view === 'requisitions') render();
+    }).catch(function () {});
+
+    SuiteData.loadAll().then(function (stores) {
+      state.stores = stores;
+      state.storesLoaded = true;
+      // The domain allowlist an administrator set. Applied here so the browser
+      // and the server agree on who may create an account.
+      var dom = (stores.appConfig || []).filter(function (r) { return r.key === 'allowedDomains'; })[0];
+      AuthCore.setAllowedDomains(dom ? dom.value : '');
+      rebuild();
+      render();
+    });
+  }
+
   SuiteAuth.onChange(function (snap) {
     state.auth = snap;
-    if (state.view === 'settings') render();
+    if (AuthCore.can(snap.account, 'view')) loadEverything();
+    /* A render on every auth change, not only on Settings. The gate is the whole
+       shell now, so signing in, signing out, or having a role changed under you
+       has to redraw the page rather than leave whatever was on screen before. */
+    render();
   });
   SuiteAuth.resume();
 
-  SuiteData.loadIlPtoSync().then(function (sync) {
-    state.ilPto.sync = sync || {};
-    if (state.view === 'timeoff') render();
-  });
-
-  SuiteData.loadPlxSync().then(function (sync) {
-    state.plx.sync = sync;
-    if (state.view === 'reconciliation') render();
-  });
-
-  SuiteData.loadReqSync().then(function (sync) {
-    state.reqSync = sync;
-    if (state.view === 'requisitions') render();
-  });
-
-  SuiteData.loadAll().then(function (stores) {
-    state.stores = stores;
-    state.storesLoaded = true;
-    rebuild();
+  /* The server refused something mid-session: signed out in another tab, or a
+     role taken away while this page was open. Re-asking the auth module is what
+     puts the gate back up, and saying so beats a page that quietly stops
+     working. */
+  document.addEventListener('geodis:denied', function (e) {
+    var status = e.detail && e.detail.status;
+    SuiteAuth.noteDenied(status === 401
+      ? 'This session is no longer signed in. Sign in again to carry on.'
+      : 'This account is no longer allowed to do that. Its role may have changed.');
     render();
   });
 
@@ -4303,6 +4806,12 @@
     go: go,
     state: state,
     profile: profile,
+    /* What the signed-in account may do, for the reconciliation script in
+       index.html. It shares the page but not this closure, and it writes notes
+       and status overrides -- which are edits, and must be refused for a
+       read-only account here rather than optimistically applied and then lost
+       when the server says no. */
+    can: function (action) { return may(action); },
     reload: function () {
       return SuiteData.loadAll().then(function (s) { state.stores = s; rebuild(); render(); });
     }

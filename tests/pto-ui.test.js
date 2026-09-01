@@ -121,7 +121,10 @@ const rowFor = name => $$('.cov-row').filter(r => r.textContent.indexOf(name) !=
   const f = $('[data-form="task"]');
   t('a task form opens', !!f);
   t('already describing the job', f.querySelector('[name="title"]').value === 'Add Nate New to the timeclock');
-  t('as a system task', f.querySelector('[name="kind"]').value === 'Add to a system');
+  // The select carries the kind KEY. It used to carry the label, which is how a
+  // kind somebody picked could arrive at the server as free text.
+  t('as a system task', f.querySelector('[name="kind"]').value === 'system');
+  t('and shows that in words', f.querySelector('[name="kind"]').selectedOptions[0].textContent === 'Add to a system');
   t('naming them by EID, which is what the team works from',
     f.querySelector('[name="detail"]').value.indexOf('21407056') !== -1);
   if ($('[data-close]')) click($('[data-close]'));

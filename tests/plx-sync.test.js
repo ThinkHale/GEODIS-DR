@@ -55,11 +55,20 @@ if (!fs.existsSync(book)) {
 console.log('— the push endpoint —');
 const XLSX = require('xlsx');
 const src = fs.readFileSync(path.join(__dirname, '..', 'functions', 'index.js'), 'utf8');
+/* The browser-facing halves of these handlers sit behind requireUser() now.
+   The definition lives outside the slice each harness pulls, so the shared
+   stub is injected -- same shape, same status codes. See fn-auth.js. */
+const { makeAuth, reqGet } = require('./fn-auth.js');
+const auth = makeAuth();
 const consts = src.slice(src.indexOf('const COLLECTIONS = {'), src.indexOf('const NOTES_ORIGIN'));
 const helpers = src.slice(src.indexOf('async function readJsonArray'), src.indexOf('async function handleCollection'));
 // Start at the shared worker: handlePlx and the browser upload both call it, so
 // slicing from handlePlx alone leaves applyPlxWorkbook undefined.
-const handler = src.slice(src.indexOf('async function applyPlxWorkbook('), src.indexOf('function parseToState'));
+/* Sliced up to the auth section, not to the end of the file: past this point
+   the source defines the REAL requireUser, which would shadow the injected stub
+   and then need the Admin SDK and the whole COLLECTIONS map to run. The real
+   one is exercised by collections.test.js, which pulls it in on purpose. */
+const handler = src.slice(src.indexOf('async function applyPlxWorkbook('), src.indexOf('/* ---------- who is calling ----------'));
 
 const NOTES_ORIGIN = 'https://geodis.ebtools.pro';
 const KEY = 'k';
@@ -82,10 +91,10 @@ const Contacts = require('../contacts-core.js');
 const built = new Function(
   'bucket', 'readJsonFile', 'setKvCors', 'SYNC_KEY',
   'NOTES_ORIGIN', 'XLSX', 'ShiftKey', 'Sched', 'Intake', 'AttendanceImport',
-  'Contacts', 'rosterProfiles', 'fetch', 'console',
+  'Contacts', 'rosterProfiles', 'fetch', 'console', 'requireUser',
   consts + helpers + handler + '\nreturn {handlePlx, handlePlxUpload, handlePlxRefresh, COLLECTIONS};'
 )(bucket, readJsonFile, setKvCors, SYNC_KEY,
-  NOTES_ORIGIN, XLSX, SK, Sched, Intake, AttendanceImport, Contacts, rosterProfiles, fetchStub, console);
+  NOTES_ORIGIN, XLSX, SK, Sched, Intake, AttendanceImport, Contacts, rosterProfiles, fetchStub, console, auth.requireUser);
 const { handlePlx, handlePlxUpload, handlePlxRefresh, COLLECTIONS } = built;
 
 const mkRes = () => { const r = { code: null, body: null, set() { return r }, status(c) { r.code = c; return r }, json(b) { r.body = b; return r }, send() { return r } }; return r; };
@@ -186,13 +195,25 @@ const shifts = () => { try { return JSON.parse(files[COLLECTIONS.shifts.path]); 
 
   console.log('— the same workbook, uploaded from the browser —');
   files = {};
-  const upload = (body, origin) => call(handlePlxUpload, {
+  const upload = (body, origin, token) => call(handlePlxUpload, {
     method: 'POST', query: {}, body,
-    get: h => (h === 'origin' ? (origin === undefined ? NOTES_ORIGIN : origin) : '')
+    get: reqGet({
+      origin: origin === undefined ? NOTES_ORIGIN : origin,
+      authorization: token === undefined ? 'Bearer test-token' : token
+    })
   });
   t('a foreign origin is refused', (await upload({ fileBase64: makeBook() }, 'https://evil.example')).code === 403);
   t('and nothing is written', Object.keys(files).length === 0);
-  t('no sync key needed -- this IS the browser',
+  /* An upload replaces every shift tag and every open order the site works
+     from, so it is not something a read-only account gets to do by finding the
+     endpoint. */
+  t('an unsigned upload is refused', (await upload({ fileBase64: makeBook() }, undefined, '')).code === 401);
+  t('and still nothing is written', Object.keys(files).length === 0);
+  auth.as({ email: 'ro@geodis.com', role: 'viewer', enabled: true });
+  t('so is one from an account that cannot import',
+    (await upload({ fileBase64: makeBook() })).code === 403);
+  auth.as({ email: 'col@geodis.com', role: 'colleague', enabled: true });
+  t('no sync key needed -- this IS the browser, signed in',
     (await upload({ fileBase64: makeBook(), fileName: 'PLX.xlsx' })).code === 200);
   t('shift tags land the same as a push', shifts().length === 1);
   t('so do open orders', reqs().length === 2);
@@ -204,9 +225,14 @@ const shifts = () => { try { return JSON.parse(files[COLLECTIONS.shifts.path]); 
     (await upload({ fileBase64: makeBook() })).body.attendance.skipped !== undefined);
 
   console.log('— asking for a fresh pull —');
-  r = await call(handlePlxRefresh, { method: 'POST', query: {}, get: () => 'https://evil.example' });
+  const refresh = (origin, token) => call(handlePlxRefresh, { method: 'POST', query: {},
+    get: reqGet({ origin: origin === undefined ? NOTES_ORIGIN : origin,
+      authorization: token === undefined ? 'Bearer test-token' : token }) });
+  r = await refresh('https://evil.example');
   t('a foreign origin is refused', r.code === 403);
-  r = await call(handlePlxRefresh, { method: 'POST', query: {}, get: () => NOTES_ORIGIN });
+  // The flow reads SharePoint and rewrites the site's shift tags. Signed in only.
+  t('and so is an unsigned caller', (await refresh(undefined, '')).code === 401);
+  r = await refresh();
   t('with no flow configured it still succeeds', r.code === 200);
   t('but says it did not trigger', r.body.triggered === false);
   t('and explains how to enable it', r.body.message.indexOf('flowUrl') !== -1);
@@ -216,7 +242,7 @@ const shifts = () => { try { return JSON.parse(files[COLLECTIONS.shifts.path]); 
     (await push({ flowUrl: 'http://insecure.example' })).code === 400);
   t('setting it needs the sync key', (await push({ flowUrl: 'https://flow.example/run' }, '')).code === 401);
   t('set from the automation side', (await push({ flowUrl: 'https://flow.example/run' })).body.configured === true);
-  r = await call(handlePlxRefresh, { method: 'POST', query: {}, get: () => NOTES_ORIGIN });
+  r = await refresh();
   t('with a flow configured it triggers', r.body.triggered === true);
   t('calling the flow URL', fetched.u === 'https://flow.example/run');
   t('by POST', fetched.o.method === 'POST');

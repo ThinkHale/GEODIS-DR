@@ -67,6 +67,12 @@ service firebase.storage {
 This keeps the raw uploaded files (`raw/`) private, since those are the full
 unfiltered exports, and only exposes the computed snapshot publicly.
 
+> **This is no longer the rule to use.** See
+> [Turning sign-in on](#turning-sign-in-on) below: the snapshot is the roster,
+> and `allow read: if true` means anybody holding the URL has it without signing
+> in. The current rule refuses public reads and the tool fetches the snapshot
+> through the Cloud Function instead, which checks the account first.
+
 ## 3. Deploy the Cloud Function
 
 Install the Firebase CLI if you don't have it (`npm install -g firebase-tools`),
@@ -105,22 +111,23 @@ flags can shift between Firebase CLI versions, if any of this doesn't match
 what you see, the `firebase deploy` and `functions:secrets` docs will have
 the current syntax.)
 
-## 4. Point the tool at your Storage bucket
+## 4. Point the tool at your snapshot
 
 Once the function has run at least once, the snapshot lands at
-`snapshots/latest.json` in your default Storage bucket. Its public URL is:
-
-```
-https://storage.googleapis.com/YOUR-PROJECT.appspot.com/snapshots/latest.json
-```
-
-Open `index.html`, find this line near the bottom of the script:
+`snapshots/latest.json` in your default Storage bucket. The browser does **not**
+read it from there: it asks the Cloud Function for it, so the account check runs
+first. Open `index.html` and find this line near the bottom of the script:
 
 ```js
-const SNAPSHOT_URL = '';
+const SNAPSHOT_URL = 'https://YOUR-FUNCTION-URL/?snapshot=1';
 ```
 
-Fill in your URL. That's the only code change needed to turn on auto-sync.
+Point it at the same function URL the rest of the tool uses. That's the only code
+change needed to turn on auto-sync.
+
+(This used to be a `https://storage.googleapis.com/...` link straight to the
+file. That worked, and it also meant anybody with the link had the whole roster
+without signing in — see [Turning sign-in on](#turning-sign-in-on).)
 
 ## 5. Route the report emails into their own folders
 
@@ -222,9 +229,32 @@ target the **same** folder.
 **Trigger:** *When a new email arrives (V3)* — Folder: `Beeline Reqs`,
 **Only with attachments: Yes**, Include Attachments: **Yes**.
 
-**Action:** *Apply to each* over `triggerOutputs()?['body/attachments']`, with one
-**HTTP** action inside it. Looping matters: if a morning's mail ever carries both
-reports on one message, both get posted.
+**Action:** *Apply to each* over `triggerOutputs()?['body/attachments']`, with a
+**Condition** inside it and the **HTTP** action in the condition's *If yes* branch.
+Looping matters: if a morning's mail ever carries both reports on one message,
+both get posted.
+
+The condition keeps signature logos and inline images — which arrive as
+attachments too — from being posted and failing the run. Build it with the
+card's own controls, **not** as a pasted expression: two rows joined by **Or**,
+each picking **Name** from the dynamic content panel with the **ends with**
+operator, against `.csv` and `.xlsx`.
+
+A single `or(endsWith(…), endsWith(…))` expression looks tidier and returns
+`false` two different ways without erroring. The right-hand box stores what you
+type as *text*, so a boolean `true` on the left is compared against the string
+`"true"` and never matches; and an expression pasted into the left box as plain
+text stays a literal string rather than being evaluated. Picking **Name** from
+the panel keeps the comparison string-to-string and gets the loop name right
+for you.
+
+Both extensions on purpose: the reports arrive as `.csv` today
+(`GEODIS Open Reqs09-01-2026.csv`) and the endpoint reads either, so accepting
+both costs nothing and removes a way for this to break quietly.
+
+When a condition comes back `false` unexpectedly, open the **Condition** action
+in the run history and read its **inputs** — it prints the two values it
+actually compared, which names the cause immediately.
 
 - Method: `POST`
 - URI: `https://syncreport-eusvh7xq5q-uc.a.run.app/?reqSync=1`
@@ -285,6 +315,119 @@ curl -s -X POST "https://syncreport-eusvh7xq5q-uc.a.run.app/?reqSync=1" \
 
 The manual **Add an export by hand** panel stays exactly as it is, for a report
 that did not arrive or an off-cycle pull.
+
+## Turning sign-in on
+
+Every read and every write now needs a signed-in account. This is the part of the
+deployment that can lock the team out if it is done in the wrong order, so it is
+worth doing in this one.
+
+### What the roles mean
+
+| Role | Can |
+|---|---|
+| **Read-only** | See everything. Change nothing. Set deliberately, not a default. |
+| **Colleague** | Everything day to day — status changes, documenting the floor, importing reports. **This is what every new account starts as.** |
+| **Manager** | Everything a colleague can, plus giving colleagues and other managers a role. Not admin. |
+| **Administrator** | Everything, plus the settings panel. |
+
+Anyone with a work email can create their own account; nobody has to be invited,
+and it works the moment they are in. **The domain check is the approval** — only
+`geodis.com` and `employbridge.com` addresses can create an account at all, and
+everybody at those domains is already trusted with the floor.
+
+That is the trade being made, so it is worth stating plainly: a new sign-up can
+change time-off statuses and import reports without a second person approving
+them. What it cannot do is hand out roles or reach Settings. If that stops being
+acceptable — a wider domain added, say — the fix is to set `DEFAULT_ROLE` in
+`auth-core.js` back to `'viewer'`, so new accounts land read-only and wait for a
+manager.
+
+Approved domains are `geodis.com` and `employbridge.com`. An administrator can
+**add** more under Settings → App settings; the two built-in ones cannot be
+removed there, so a typo in that field cannot lock everybody out.
+
+### 1. Turn on Email/Password sign-in
+
+Firebase console → Authentication → Sign-in method → **Email/Password** → enable.
+Without this every sign-in fails with "Email sign-in is not switched on for this
+project yet."
+
+### 2. Make yourself an administrator
+
+Somebody has to be able to grant the first role, and nobody can grant a role
+until an administrator exists. Two ways through, and which one you need depends
+on whether anybody has signed in yet:
+
+- **Nobody has.** The first account to sign in becomes the administrator
+  automatically. Sign in, confirm Settings → Users shows you as Administrator,
+  and you are done.
+- **People already have accounts.** They will all be read-only, and none of them
+  can promote anybody. Set the `ADMIN_EMAILS` environment variable on the
+  function — comma-separated — and sign in again; every address listed is raised
+  to admin on sign-in.
+
+  ```sh
+  echo 'ADMIN_EMAILS=you@geodis.com' >> functions/.env
+  firebase deploy --only functions:syncReport
+  ```
+
+  `ADMIN_EMAILS` re-grants admin on **every** sign-in by those addresses, so it
+  is a standing back door as long as it is set. That is either what you want or
+  a hazard, depending on the deployment:
+
+  - **Left set** (what this one does) it is the way back in if every admin
+    account is ever lost or disabled. Settings → Users marks those rows *Pinned
+    by the deployment* and offers no role control, and the API refuses a role
+    change on them with a 409 — because a change that reverts at the next
+    sign-in is worse than one that is refused out loud.
+  - **Taken out** after the first real administrators exist, the granted roles
+    simply stay: they were written to the account, not held in the variable.
+
+  Either way it cannot re-enable a **disabled** account: taking somebody's
+  access away stays final.
+
+### 3. Close the public snapshot
+
+Until this is done the sign-in is a locked front door with the window open —
+`snapshots/latest.json` is the whole roster, and it was world-readable. In
+Storage → Rules:
+
+```
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
+```
+
+Nothing needs public read any more. The Cloud Function uses Admin SDK
+credentials and bypasses these rules entirely; the browser gets the snapshot from
+`?snapshot=1`, which checks the account first.
+
+### 4. Check it
+
+- Open the tool in a private window. You should get a sign-in card and **nothing
+  else** — no navigation, no roster, and no reconciliation table underneath it.
+- `curl -s 'https://syncreport-eusvh7xq5q-uc.a.run.app/?timeoff=1'` should answer
+  `401`, not a list of requests. Same for `?snapshot=1`.
+- `curl -s 'https://firebasestorage.googleapis.com/v0/b/geodis-dr.firebasestorage.app/o/snapshots%2Flatest.json?alt=media'`
+  should be refused once step 3 is done. If it still returns the roster, the
+  rules have not taken effect.
+- Sign in as a read-only account: the pages render, a banner explains why nothing
+  can be changed, and there are no status dropdowns or Remove buttons.
+
+### What is NOT affected
+
+The Power Automate flows authenticate with `x-sync-key`, not with an account, and
+none of them changed. Those are the report-email pushes (`?reqSync=1`,
+`?ptoIntake=1`, `?attendanceImport=1`, `?discrepancyIntake=1`, `?payroll=1` with
+`rows`, `?plx=1`, `?ilPto=1`) and the original `?type=beeline|crm|rcended` upload.
+If a flow starts failing after this change, the sync key is the thing to check —
+not the accounts.
 
 ## What's already verified vs. what needs your environment
 

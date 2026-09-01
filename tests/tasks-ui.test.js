@@ -147,8 +147,18 @@ const upload = (kind, aoa, name) => {
   click($('.suite-add'));
   t('a form opens', !!$('[data-form="task"]'));
   const form = $('[data-form="task"]');
+  const kindSel = form.querySelector('[name="kind"]');
+  /* The select used to carry labels as its values, which meant the default it
+     was given ('note') matched no option and the browser silently left the FIRST
+     one -- "PTO request" -- selected. Somebody choosing "Payroll issue" was the
+     only one who got what they picked; everybody who accepted the default filed
+     their task under the wrong kind. */
+  t('the default is the kind the form says it is', kindSel.value === 'note');
+  t('every kind is offered by key', Array.from(kindSel.options).map(o => o.value).join(',') ===
+    'pto,payroll,terminate,system,attendance,note');
+  t('and labelled in words', Array.from(kindSel.options).some(o => o.textContent === 'Payroll issue'));
   form.querySelector('[name="title"]').value = 'Add Ann to Beeline';
-  form.querySelector('[name="kind"]').value = 'Add to a system';
+  kindSel.value = 'system';
   form.querySelector('[name="badge"]').value = 'b1';
   form.querySelector('[name="detail"]').value = 'Never got a Beeline record';
   form.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));

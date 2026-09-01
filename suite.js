@@ -92,6 +92,7 @@
     reqImport: null,         // last import result, for the report shown after
     ptoImport: null,         // the shared IL PTO tracker's last import
     reqExpanded: {},         // request id -> candidate list open
+    reqSync: null,           // what the emailed Beeline exports last produced
     reqHealth: 'all',
     reqSite: 'all',          // work-location number, within the chosen market
     reqWhen: 'all',          // start-date window
@@ -2993,16 +2994,75 @@
     return (rows || []).filter(function (r) { return !r.market || r.market === state.market; });
   }
 
+  /* The two Beeline exports arrive by email and a Power Automate flow posts each
+     one as it lands (see SETUP.md). A feed nobody has to touch is exactly the
+     feed nobody notices has stopped, so the page says when each half last
+     arrived and goes loud once one of them misses a morning.
+
+     The halves are reported SEPARATELY on purpose. They come in two emails, and
+     the failure that actually happens is one rule breaking while the other keeps
+     working -- which looks like a perfectly current board carrying yesterday's
+     candidates. */
+  var REQ_HALVES = [
+    ['reqs', 'GEODIS Open Reqs', 'openings and pipeline counts'],
+    ['candidates', 'Candidate Status per Req', 'who is on each request'],
+    ['combined', 'Combined export', 'both halves in one file']
+  ];
+  function reqSyncBar() {
+    var s = state.reqSync;
+    if (!s || !s.syncedAt) {
+      return '<section class="suite-panel plx-bar"><div class="plx-info">' +
+        '<strong>Emailed Beeline exports</strong>' +
+        '<span>No export has arrived by email yet. Once the Power Automate flow is running, both ' +
+        'reports import themselves each morning and this says when they last landed. Until then, ' +
+        'add them by hand below.</span></div></section>';
+    }
+    var srcs = s.sources || {};
+    var present = REQ_HALVES.filter(function (h) { return srcs[h[0]]; });
+    var oldest = present.reduce(function (acc, h) {
+      var at = srcs[h[0]].receivedAt || '';
+      return !acc || String(at) < acc ? String(at) : acc;
+    }, '');
+
+    return staleNote(oldest, 'A Beeline export', { after: DAILY_STALE_AFTER_HOURS, cadence: 'every morning' }) +
+      '<section class="suite-panel plx-bar"><div class="plx-info">' +
+      '<strong>Emailed Beeline exports</strong>' +
+      '<span>' + esc(s.reqs || 0) + ' requests and ' + esc(s.candidates || 0) +
+      ' candidates, imported from the reports as they arrive.</span>' +
+      '<ul class="req-src">' + present.map(function (h) {
+        var src = srcs[h[0]];
+        var age = ageLabel(src.receivedAt);
+        var late = hoursSince(src.receivedAt);
+        return '<li><b>' + esc(h[1]) + '</b> · ' + esc(h[2]) + ' · ' +
+          (src.unreadable
+            ? '<span class="warn-text">the stored copy could not be re-read</span>'
+            : '<span' + (late != null && late >= DAILY_STALE_AFTER_HOURS ? ' class="warn-text"' : '') + '>' +
+              esc(age) + '</span> · ' + esc(src.rowCount || 0) + ' rows') + '</li>';
+      }).join('') +
+      REQ_HALVES.filter(function (h) { return !srcs[h[0]] && h[0] !== 'combined'; }).map(function (h) {
+        return '<li><b>' + esc(h[1]) + '</b> · ' + esc(h[2]) +
+          ' · <span class="warn-text">has never arrived</span></li>';
+      }).join('') + '</ul>' +
+      '</div></section>' +
+      (s.warnings && s.warnings.length
+        ? '<div class="warn-banner cov-warn"><strong>From the last import</strong><ul>' +
+          s.warnings.slice(0, 6).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') +
+          (s.warnings.length > 6 ? '<li>…and ' + (s.warnings.length - 6) + ' more.</li>' : '') +
+          '</ul></div>'
+        : '');
+  }
+
   function reqImportPanel() {
     var srcs = state.reqSources || [];
     var missing = srcs.length ? ReqsCore.missingColumns(srcs) : [];
     return '<section class="suite-panel req-import"><div class="suite-panel-head">' +
-      '<h2>Daily Beeline export</h2><div class="suite-actions">' +
+      '<h2>Add an export by hand</h2><div class="suite-actions">' +
       (srcs.length ? '<button class="suite-btn" data-req-clear="1">Start over</button> ' : '') +
       (srcs.length && missing.length ? '<button class="suite-btn" data-req-save="1">Save anyway</button> ' : '') +
       '<label class="suite-btn cov-pick' + (srcs.length ? '' : ' primary') + '">Add export file' +
       '<input type="file" accept=".csv,.xlsx,.xls" data-req-file></label></div></div>' +
-      '<p class="perf-note">Drop the <b>GEODIS Open Reqs</b> and <b>Candidate Status per Req</b> exports — in either ' +
+      '<p class="perf-note">The emailed exports import themselves; this is for a report that did not arrive, ' +
+      'or an off-cycle pull. Drop the <b>GEODIS Open Reqs</b> and <b>Candidate Status per Req</b> exports — in either ' +
       'order, or one combined file if the columns are all on it. Both files list one row per candidate, so the ' +
       'request list is shorter than the row count.</p>' +
       (srcs.length ? '<ul class="req-src">' + srcs.map(function (s) {
@@ -3325,7 +3385,7 @@
         '</div></section>';
 
     return hero('Beeline Requests', 'Open requests and the candidates attached to them.', 'requisition', 'New request') +
-      reqImportPanel() + body +
+      reqSyncBar() + reqImportPanel() + body +
       (wbOnly.length
         ? '<section class="suite-panel"><div class="suite-panel-head"><h2>In the PLX workbook, not in Beeline</h2></div>' +
           '<p class="perf-note">The workbook is edited by the client, so a request can appear there before Beeline has it — ' +
@@ -3480,6 +3540,8 @@
      tool depends on being refreshed says how old it is, and says so loudly once
      it is older than a run cycle. */
   var STALE_AFTER_HOURS = 20;      // 8am and 4pm runs; 20h means two were missed
+  // One report each morning, so 30 hours means a morning was missed outright.
+  var DAILY_STALE_AFTER_HOURS = 30;
   function hoursSince(iso) {
     var t = Date.parse(iso || '');
     if (isNaN(t)) return null;
@@ -4223,6 +4285,11 @@
   SuiteData.loadPlxSync().then(function (sync) {
     state.plx.sync = sync;
     if (state.view === 'reconciliation') render();
+  });
+
+  SuiteData.loadReqSync().then(function (sync) {
+    state.reqSync = sync;
+    if (state.view === 'requisitions') render();
   });
 
   SuiteData.loadAll().then(function (stores) {

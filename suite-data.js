@@ -452,6 +452,16 @@
   // open orders, attendance history and point balances -- refreshes in one pass.
   function uploadPlx(payload) { return post('plxUpload=1', payload); }
 
+  /* ---------- the daily Beeline requisition exports ----------
+     Power Automate posts each export here as its email arrives (see SETUP.md).
+     The browser only ever READS what those pushes produced; the manual import on
+     the Beeline Requests page writes the collections directly, as it always has. */
+  function loadReqSync() {
+    return getJson(API + '?reqSync=1')
+      .then(function (d) { return d.sync || {}; })
+      .catch(function (err) { console.warn('Could not read the Beeline sync state.', err); return {}; });
+  }
+
   /* ---------- payroll periods ---------- */
   function loadPayrollPeriods() {
     return getJson(API + '?payroll=1')
@@ -524,6 +534,7 @@
     loadCoverageDates: loadCoverageDates,
     loadAdmin: loadAdmin,
     loadPlxSync: loadPlxSync,
+    loadReqSync: loadReqSync,
     loadIlPtoSync: loadIlPtoSync,
     uploadPlx: uploadPlx,
     loadPayrollPeriods: loadPayrollPeriods,

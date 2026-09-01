@@ -10,6 +10,7 @@ const t = (n, c) => { if (c) pass++; else { fail++; console.log('  FAIL: ' + n);
 const records = [{ badge: 'b1', person: 'Ava Reed', action: 'matched', actionLabel: 'M', reason: '', market: 'Chicago' }];
 const hoursAgo = h => new Date(Date.now() - h * 3600000).toISOString();
 let plxSync = {};
+let reqSync = {};
 
 const dom = new JSDOM(`<!doctype html><html><body class="suite-active">
  <div id="suite-root"></div><header>h</header><main id="recon-main"><div id="tbody">R</div></main></body></html>`,
@@ -20,9 +21,10 @@ w.XLSX = { read: () => ({ SheetNames: [], Sheets: {} }), utils: { sheet_to_json:
 w.fetch = u => {
   const s = String(u);
   if (s.indexOf('plx=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ sync: plxSync }) });
+  if (s.indexOf('reqSync=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ sync: reqSync }) });
   if (/schedule=1|coverage=1|payroll=1/.test(s)) return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
   const k = s.match(/\?(\w+)=1/)[1];
-  const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions', performance: 'performance',
+  const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions', reqCandidates: 'reqCandidates', performance: 'performance',
     shifts: 'shifts', discrepancies: 'discrepancies', associatePto: 'associatePto', locations: 'locations',
     appConfig: 'appConfig', timeclockLinks: 'timeclockLinks' };
   return Promise.resolve({ ok: true, json: () => Promise.resolve({ [map[k]]: [] }) });
@@ -90,6 +92,48 @@ const send = updatedAt => d.dispatchEvent(new w.CustomEvent('geodis:records', { 
   click($('[data-nav="reconciliation"]'));
   t('no warning', d.body.textContent.indexOf('PLX workbook is') === -1);
   t('but the age is still stated', d.body.textContent.indexOf('2 hours ago') !== -1);
+
+  /* The Beeline exports arrive in TWO emails, and the failure that actually
+     happens is one Outlook rule breaking while the other keeps working: a board
+     that looks current, carrying last week's candidates. So the halves are aged
+     separately, not rolled into one "last synced". */
+  console.log('— the emailed Beeline exports, before any flow runs —');
+  const txt = () => d.body.textContent;
+  const showReqs = async () => {
+    await w.SuiteData.loadReqSync().then(s => { w.GEODISSuite.state.reqSync = s; });
+    click($('[data-nav="overview"]'));
+    click($('[data-nav="requisitions"]'));
+  };
+  await showReqs();
+  t('says no export has arrived', txt().indexOf('No export has arrived by email yet') !== -1);
+  t('and the manual import is still offered', !!$('[data-req-file]'));
+
+  console.log('— both halves landed this morning —');
+  reqSync = { syncedAt: hoursAgo(3), reqs: 110, candidates: 633,
+    sources: { reqs: { fileName: 'Open Reqs.xlsx', receivedAt: hoursAgo(3), rowCount: 633 },
+               candidates: { fileName: 'Cand.xlsx', receivedAt: hoursAgo(3), rowCount: 633 } } };
+  await showReqs();
+  t('both are named', txt().indexOf('GEODIS Open Reqs') !== -1 && txt().indexOf('Candidate Status per Req') !== -1);
+  t('with their age', txt().indexOf('3 hours ago') !== -1);
+  t('and no warning', txt().indexOf('It should refresh every morning') === -1);
+
+  console.log('— one rule broke, the other kept working —');
+  reqSync = { syncedAt: hoursAgo(3), reqs: 110, candidates: 633,
+    sources: { reqs: { fileName: 'Open Reqs.xlsx', receivedAt: hoursAgo(3), rowCount: 633 },
+               candidates: { fileName: 'Cand.xlsx', receivedAt: hoursAgo(50), rowCount: 610 } } };
+  await showReqs();
+  t('the stale half is flagged even though the import just ran',
+    txt().indexOf('It should refresh every morning') !== -1);
+  t('it says how old that half is', txt().indexOf('2 days ago') !== -1);
+  t('the fresh half still reads as fresh', txt().indexOf('3 hours ago') !== -1);
+  t('and the counts are still shown, not hidden', txt().indexOf('110 requests') !== -1);
+
+  console.log('— a half that has never arrived at all —');
+  reqSync = { syncedAt: hoursAgo(2), reqs: 110, candidates: 0,
+    sources: { reqs: { fileName: 'Open Reqs.xlsx', receivedAt: hoursAgo(2), rowCount: 633 } } };
+  await showReqs();
+  t('named as never having arrived', txt().indexOf('has never arrived') !== -1);
+  t('rather than being left off the list entirely', txt().indexOf('Candidate Status per Req') !== -1);
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

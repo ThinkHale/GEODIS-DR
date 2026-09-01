@@ -38,6 +38,7 @@ const PtoTracker = require('./pto-tracker-core.js');
 const Tasks = require('./tasks-core.js');
 const TransitionPto = require('./transition-pto.js');
 const AttendanceImport = require('./attendance-import.js');
+const ReqsCore = require('./reqs-core.js');
 const ShiftKey = require('./shift-key.js');
 const Contacts = require('./contacts-core.js');
 const Auth = require('./auth-core.js');
@@ -53,6 +54,18 @@ const RAW_PATH = {
   beeline: 'raw/beeline-latest.xlsx',
   crm: 'raw/crm-latest.xlsx',
   rcended: 'raw/rcended-latest.xlsx'   // optional RC "Ended Assignments" report
+};
+/* The two daily Beeline requisition exports, kept apart because they arrive in
+   separate emails minutes apart and each is rebuilt against whatever the other
+   last was. Keyed by what ReqsCore.describe() calls the file, so the slot a file
+   lands in is decided by its columns and never by its name. */
+const REQ_RAW_PATH = {
+  reqs: 'raw/beeline-open-reqs.xlsx',
+  candidates: 'raw/beeline-candidate-status.xlsx',
+  combined: 'raw/beeline-combined.xlsx'
+};
+const REQ_LABEL = {
+  reqs: 'GEODIS Open Reqs', candidates: 'Candidate Status per Req', combined: 'combined export'
 };
 const SNAPSHOT_PATH = 'snapshots/latest.json';
 const NOTES_PATH = 'notes/notes.json';
@@ -161,6 +174,8 @@ const MAX_LOG_ENTRIES = 40;
 // Hours submitted to Beeline, one document per pay period. Each pull is compared
 // with the one before it; what moved after the period closed is the point.
 const PLX_META_PATH = 'plx/sync.json';     // when the workbook last landed, and what came out of it
+// When each Beeline requisition export last landed, and what came out of it.
+const REQ_META_PATH = 'reqs/sync.json';
 /* The on-demand refresh flow's URL. Deliberately NOT a Firebase secret: a
    declared secret must exist before the function can deploy at all, which would
    make an optional feature block every deploy. It lives in the bucket instead,
@@ -177,6 +192,58 @@ const MAX_CHECKS_PER_DAY = 24;
 const MAX_EXCEPTION_ROWS = 5000;
 const MAX_PRESENT_KEYS = 20000;
 const NOTES_ORIGIN = 'https://geodis.ebtools.pro';   // the tool's front-end origin
+
+/* Power Automate represents a binary action output as
+   {"$content-type":"…","$content":"<base64>"}, and whether an expression hands you
+   the bytes or that envelope depends on the connector and on how the flow was
+   written. base64() over the envelope yields base64 of the JSON text, which
+   decodes to something that is plainly not a workbook and sends whoever built the
+   flow hunting for the wrong thing.
+
+   Both forms are accepted instead, because which one a given flow produces is not
+   worth a debugging round trip. */
+function decodeWorkbookBody(b64) {
+  const buf = Buffer.from(b64, 'base64');
+  const head = buf.slice(0, 60).toString('utf8');
+  if (head.indexOf('$content') === -1) return buf;
+  try {
+    const envelope = JSON.parse(buf.toString('utf8'));
+    if (envelope && typeof envelope.$content === 'string') {
+      return Buffer.from(envelope.$content, 'base64');
+    }
+  } catch (err) { /* not an envelope after all; use what arrived */ }
+  return buf;
+}
+
+/* A real .xlsx is a ZIP starting with "PK\x03\x04". */
+function isXlsxZip(b) {
+  return b.length >= 4 && b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04;
+}
+/* Power Automate's "Get Attachment (V2)" often DOUBLE-base64-encodes contentBytes:
+   one decode yields the ASCII base64 TEXT of the real file (it starts "UEsD"). If
+   the first decode is not a ZIP but looks like base64 text, unwrap one more layer.
+
+   Returns the buffer unchanged when unwrapping does not produce a workbook, so a
+   file that is legitimately not a ZIP -- a .csv export -- passes through intact
+   rather than being mangled by a second decode. Every flow posting an attachment
+   goes through here; the behaviour was learned once, on the reconciliation feed,
+   and must not be re-learned per endpoint. */
+function unwrapDoubleBase64(buffer) {
+  if (isXlsxZip(buffer)) return buffer;
+  const asText = buffer.toString('latin1');
+  if (asText.length >= 8 && /^[A-Za-z0-9+/=\s]+$/.test(asText.slice(0, 200))) {
+    const inner = Buffer.from(asText, 'base64');
+    if (isXlsxZip(inner)) return inner;
+  }
+  return buffer;
+}
+
+/* What a Power Automate flow actually posted, whichever of the two shapes its
+   connector produced. Both quirks were learned the hard way on feeds already
+   running; a new flow should not have to rediscover either. */
+function flowAttachment(b64) {
+  return unwrapDoubleBase64(decodeWorkbookBody(b64));
+}
 
 async function readRawFile(type) {
   try {
@@ -636,6 +703,157 @@ async function handleAttendanceImport(req, res) {
   await bucket.file(COLLECTIONS.associatePto.path).save(JSON.stringify(pto), { contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' } });
   res.status(200).json({ ok: true, imported: built.summary, attendanceCount: byId.size,
     supersededDuplicates: superseded.length, associatePtoCount: pto.length });
+}
+
+/* ---------- the daily Beeline requisition exports ----------
+   Two exports land by email each morning -- "GEODIS Open Reqs" (req-level
+   openings and pipeline counts) and "Candidate Status per Req" (who is attached
+   to each req). A Power Automate flow watching the Outlook folder they are filed
+   into POSTs each attachment here as it arrives. See SETUP.md.
+
+   WHICH export a file is, is read off its COLUMNS -- ReqsCore.describe() already
+   tells the two apart -- never off the file name or the subject line. Both
+   attachments come out of the same folder, a renamed export is routine, and
+   routing on a name would silently overwrite the wrong half.
+
+   Nothing waits for both. Each push rebuilds the board from EVERY stored half,
+   so the 6am reqs email publishes immediately and the 6:05 candidate email adds
+   to it -- rather than the first email publishing a board with no candidates and
+   wiping the list the previous morning left. */
+function reqAoaFrom(buffer) {
+  // The same read the browser import does, so a file gives the same board
+  // whichever way it arrived. raw:true keeps 04/27/2026 as written.
+  const wb = XLSX.read(buffer, { type: 'buffer', raw: true });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+}
+async function parseStoredReqExport(kind, fileName) {
+  try {
+    const [buf] = await bucket.file(REQ_RAW_PATH[kind]).download();
+    const parsed = ReqsCore.parseExport(reqAoaFrom(buf), fileName || REQ_LABEL[kind]);
+    return parsed.reqs.length ? parsed : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function handleReqSync(req, res) {
+  setKvCors(res);
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (req.method === 'GET') {
+    res.set('Cache-Control', 'no-cache, max-age=0');
+    res.status(200).json({ ok: true, sync: await readJsonFile(REQ_META_PATH) });
+    return;
+  }
+  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
+  const expected = SYNC_KEY.value();
+  if (!expected || req.get('x-sync-key') !== expected) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
+
+  const body = req.body || {};
+  const b64 = String(body.fileBase64 || body.file || '');
+  if (!b64) { res.status(400).json({ ok: false, error: 'Missing fileBase64' }); return; }
+  const fileName = String(body.fileName || '').slice(0, 200) || 'Beeline export';
+  const buffer = flowAttachment(b64);
+
+  /* Nothing is written until the file proves it is a requisition export. A flow
+     that fires on the wrong email, or an attachment Power Automate mangled, must
+     not overwrite the half that was working -- the same rule the reconciliation
+     feed learned. */
+  let parsed;
+  try {
+    parsed = ReqsCore.parseExport(reqAoaFrom(buffer), fileName);
+  } catch (err) {
+    res.status(400).json({ ok: false, error: 'The export could not be read: ' + err.message +
+      '. It was not saved; the previous export is kept.' });
+    return;
+  }
+  if (!parsed.reqs.length) {
+    res.status(400).json({ ok: false, error: (parsed.warnings[0] || 'No requests were found in this file.') +
+      ' It was not saved; the previous export is kept.', fileName });
+    return;
+  }
+  const kind = ReqsCore.describe(parsed);
+  if (!REQ_RAW_PATH[kind]) {
+    /* Request-IDs, but neither an openings column nor a candidate column. It is
+       not either export, and guessing a slot for it would replace a good half
+       with something unusable. Name what it did carry, so the export can be
+       fixed rather than debugged blind. */
+    res.status(400).json({ ok: false, fileName,
+      error: 'This file has Request-IDs but neither a "Candidates Requested" nor a "Candidate" column, ' +
+        'so it is neither of the two exports. It was not saved; the previous exports are kept.',
+      columnsFound: Object.keys(parsed.has || {}).filter(k => parsed.has[k]) });
+    return;
+  }
+
+  const now = new Date().toISOString();
+  await bucket.file(REQ_RAW_PATH[kind]).save(buffer, {
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  });
+
+  const meta = await readJsonFile(REQ_META_PATH);
+  const sources = meta && typeof meta.sources === 'object' && meta.sources ? meta.sources : {};
+  sources[kind] = { fileName, receivedAt: now, rowCount: parsed.rowCount,
+    reqs: parsed.reqs.length, candidates: parsed.candidates.length };
+
+  /* Re-read every other half from storage. The one that just arrived is used as
+     parsed rather than round-tripped through the bucket. */
+  const warnings = [];
+  const loaded = [];
+  for (const k of Object.keys(REQ_RAW_PATH)) {
+    if (!sources[k]) continue;
+    const p = k === kind ? parsed : await parseStoredReqExport(k, sources[k].fileName);
+    if (p) { loaded.push({ at: sources[k].receivedAt || '', parsed: p }); continue; }
+    sources[k].unreadable = true;
+    warnings.push('The stored ' + REQ_LABEL[k] + ' could not be re-read, so this board was built without it.');
+  }
+  /* Newest first. buildBoard lets the FIRST source win every field it fills, so
+     the order decides which export's answer survives where the two overlap. A
+     half that stopped arriving must not keep outvoting today's file. */
+  loaded.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+
+  const locations = await readJsonArray(COLLECTIONS.locations.path);
+  const board = ReqsCore.buildBoard({ sources: loaded.map(s => s.parsed), locations });
+  const reqRecords = ReqsCore.toReqRecords(board);
+  const candRecords = ReqsCore.toCandidateRecords(board);
+  const existing = await readJsonArray(COLLECTIONS.requisitions.path);
+  const merged = ReqsCore.mergeForSave(existing, reqRecords);
+
+  if (merged.length > MAX_COLLECTION_RECORDS || candRecords.length > MAX_COLLECTION_RECORDS) {
+    res.status(400).json({ ok: false, error: 'That export would store more than ' + MAX_COLLECTION_RECORDS +
+      ' records. Nothing was changed.' });
+    return;
+  }
+  // Same shaping the browser import gets on its way through handleCollection:
+  // declared fields only, id preserved, updatedAt stamped.
+  const stamp = (rows, fields) => rows.map(r => {
+    const rec = sanitizeRecord(r, fields);
+    rec.id = String(r.id).slice(0, 64);
+    rec.updatedAt = now;
+    return rec;
+  });
+  await bucket.file(COLLECTIONS.requisitions.path).save(
+    JSON.stringify(stamp(merged, COLLECTIONS.requisitions.fields)),
+    { contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' } });
+  await bucket.file(COLLECTIONS.reqCandidates.path).save(
+    JSON.stringify(stamp(candRecords, COLLECTIONS.reqCandidates.fields)),
+    { contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' } });
+
+  const missing = ReqsCore.missingColumns(loaded.map(s => s.parsed));
+  const sync = {
+    syncedAt: now,
+    lastKind: kind,
+    lastLabel: REQ_LABEL[kind],
+    lastFileName: fileName,
+    sources: sources,
+    reqs: reqRecords.length,
+    candidates: candRecords.length,
+    missing: missing.map(m => ({ label: m.label, why: m.why })),
+    warnings: warnings.concat(board.warnings).slice(0, 20)
+  };
+  await bucket.file(REQ_META_PATH).save(JSON.stringify(sync), {
+    contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+  });
+  res.status(200).json({ ok: true, kind, sync });
 }
 
 async function handlePtoIntake(req, res) {
@@ -1222,28 +1440,6 @@ async function applyIlPtoWorkbook(buffer, opts) {
   return { ok: true, meta: meta };
 }
 
-/* Power Automate represents a binary action output as
-   {"$content-type":"…","$content":"<base64>"}, and whether an expression hands you
-   the bytes or that envelope depends on the connector and on how the flow was
-   written. base64() over the envelope yields base64 of the JSON text, which
-   decodes to something that is plainly not a workbook and sends whoever built the
-   flow hunting for the wrong thing.
-
-   Both forms are accepted instead, because which one a given flow produces is not
-   worth a debugging round trip. */
-function decodeWorkbookBody(b64) {
-  const buf = Buffer.from(b64, 'base64');
-  const head = buf.slice(0, 60).toString('utf8');
-  if (head.indexOf('$content') === -1) return buf;
-  try {
-    const envelope = JSON.parse(buf.toString('utf8'));
-    if (envelope && typeof envelope.$content === 'string') {
-      return Buffer.from(envelope.$content, 'base64');
-    }
-  } catch (err) { /* not an envelope after all; use what arrived */ }
-  return buf;
-}
-
 async function handleIlPto(req, res) {
   setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
@@ -1445,6 +1641,7 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
     if (req.query.ptoIntake !== undefined) { await handlePtoIntake(req, res); return; }
     if (req.query.transitionImport !== undefined) { await handleTransitionImport(req, res); return; }
     if (req.query.attendanceImport !== undefined) { await handleAttendanceImport(req, res); return; }
+    if (req.query.reqSync !== undefined) { await handleReqSync(req, res); return; }
     if (req.query.discrepancyIntake !== undefined) { await handleDiscrepancyIntake(req, res); return; }
     if (req.query.payroll !== undefined) { await handlePayroll(req, res); return; }
     if (req.query.signIn !== undefined) { await handleSignIn(req, res); return; }
@@ -1475,26 +1672,12 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
     const b64 = req.body && req.body.fileBase64;
     if (!b64) { res.status(400).send('Missing fileBase64 in request body'); return; }
 
-    let buffer = Buffer.from(b64, 'base64');
-
-    // A real .xlsx is a ZIP starting with "PK\x03\x04".
-    const isZip = (b) => b.length >= 4 && b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04;
-
-    // Power Automate's "Get Attachment (V2)" often DOUBLE-base64-encodes contentBytes:
-    // one decode yields the ASCII base64 text of the real file (starts with "UEsD").
-    // If the first decode isn't a ZIP but looks like base64 text, unwrap one more layer.
-    if (!isZip(buffer)) {
-      const asText = buffer.toString('latin1');
-      if (asText.length >= 8 && /^[A-Za-z0-9+/=\s]+$/.test(asText.slice(0, 200))) {
-        const inner = Buffer.from(asText, 'base64');
-        if (isZip(inner)) buffer = inner;
-      }
-    }
+    const buffer = unwrapDoubleBase64(Buffer.from(b64, 'base64'));
 
     // Guard: reject anything that still isn't a valid .xlsx (e.g. the tiny ASCII
     // skeleton PA produces on a truly mangled upload) BEFORE overwriting the last-good
     // file, so one bad upload can't wipe good data and the failure is visible.
-    if (!isZip(buffer)) {
+    if (!isXlsxZip(buffer)) {
       res.status(400).json({ ok: false, error: 'Uploaded ' + type + ' file is not a valid .xlsx (got ' + buffer.length + ' bytes). It was not saved; the previous file is kept.' });
       return;
     }

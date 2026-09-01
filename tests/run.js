@@ -34,6 +34,7 @@ const SUITES = [
   { file: 'transition-import.test.js', name: 'transition workbook import', dom: false },
   { file: 'attendance-import.test.js', name: 'attendance workbook import', dom: false },
   { file: 'plx-sync.test.js', name: 'live PLX workbook sync + open orders', dom: false },
+  { file: 'req-sync.test.js', name: 'Beeline req exports arriving by email', dom: false },
   { file: 'auth.test.js', name: 'accounts, roles and permissions', dom: false },
   { file: 'point-policy.test.js', name: 'attendance point scale (import == manual)', dom: false },
   { file: 'contacts.test.js', name: 'associate phone numbers', dom: false },

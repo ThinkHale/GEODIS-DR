@@ -187,6 +187,105 @@ handles "I only have one file so far" gracefully and just waits.
 4. Click "Run a manual check instead" to confirm the fallback still works
    exactly as before.
 
+## Automating the Beeline requisition exports
+
+The two Beeline exports land by email each morning:
+
+| Report | Carries |
+| --- | --- |
+| **GEODIS Open Reqs** | openings, the submitted/declined/offered/hired pipeline, hiring manager, profit centre (which is where the market comes from) |
+| **Candidate Status per Req** | who is attached to each req, their Beeline id, job position, work location |
+
+Neither is complete on its own, and both list **one row per (req × candidate)** —
+633 rows is 110 requests, not 633.
+
+One flow handles both. Move both reports into a single Outlook folder, point the
+flow at that folder, and it posts every attachment that lands there to
+`?reqSync=1`. **Which report a file is, is worked out from its columns**, not
+from the file name or the subject line — so the two can share a folder, the
+export can be renamed, and neither can be filed as the other.
+
+### 1. One Outlook folder, two rules
+
+Right-click the mailbox → **New Folder**, e.g. `Beeline Reqs`. Then
+Settings → Mail → **Rules** → Add new rule, once per report:
+
+- *Condition:* Subject contains `<the report's subject text>` — Subject is
+  usually safer than From, since both reports come from the same Beeline sender.
+- *Action:* Move to `Beeline Reqs`, and tick **Stop processing more rules**.
+
+Pull up a recent copy of each email to get the exact subject text. Both rules
+target the **same** folder.
+
+### 2. The flow
+
+**Trigger:** *When a new email arrives (V3)* — Folder: `Beeline Reqs`,
+**Only with attachments: Yes**, Include Attachments: **Yes**.
+
+**Action:** *Apply to each* over `triggerOutputs()?['body/attachments']`, with one
+**HTTP** action inside it. Looping matters: if a morning's mail ever carries both
+reports on one message, both get posted.
+
+- Method: `POST`
+- URI: `https://syncreport-eusvh7xq5q-uc.a.run.app/?reqSync=1`
+- Headers: `x-sync-key: <the SYNC_KEY secret>`, `Content-Type: application/json`
+- Body:
+
+```json
+{
+  "fileBase64": "@{items('Apply_to_each')?['contentBytes']}",
+  "fileName":   "@{items('Apply_to_each')?['name']}"
+}
+```
+
+`contentBytes` comes back in whichever shape your connector produces — raw
+base64, base64-of-base64, or a `{"$content-type":…,"$content":…}` envelope. The
+endpoint takes all three, so there is nothing to get right here.
+
+### 3. What it does with each file
+
+1. Refuses anything without a `Request-ID` column, **without touching what is
+   already stored** — a rule that fires on the wrong email cannot wipe a
+   working report.
+2. Saves the raw file under whichever half it turned out to be.
+3. Rebuilds the board from **every** stored half and writes the `requisitions`
+   and `reqCandidates` collections.
+
+Step 3 is why nothing waits for the second email. The 06:00 reqs export
+publishes immediately; the 06:05 candidate export adds to it. Without it, the
+first email of the day would publish a board with no candidates on it and wipe
+the list the previous morning left.
+
+Requests **typed into the suite by hand are left alone**, and a req that has left
+Beeline keeps its record with only its Beeline half cleared — the workbook or a
+person may be the only thing that knows about it.
+
+### 4. Check it
+
+Beeline Requests shows a bar naming each half, when it last arrived, and how many
+rows it carried. The halves are aged **separately** on purpose: the failure that
+actually happens is one Outlook rule breaking while the other keeps working,
+which otherwise looks like a perfectly current board carrying last week's
+candidates. Past 30 hours — a missed morning — that half goes loud.
+
+To test without waiting for tomorrow's email, POST a saved copy of either report
+to the endpoint directly (see the curl below). That proves the function, the key
+and the parsing independently of whether the Outlook trigger fired — which is the
+split you want when something is not working, because they fail for different
+reasons and the flow run history only tells you about the second one.
+
+```sh
+# base64 the file, post it, and read back what the endpoint made of it
+python3 -c "import base64,json,sys;print(json.dumps({'fileBase64':base64.b64encode(open(sys.argv[1],'rb').read()).decode(),'fileName':sys.argv[1]}))" \
+  "GEODIS Open Reqs.xlsx" > /tmp/req.json
+curl -s -X POST "https://syncreport-eusvh7xq5q-uc.a.run.app/?reqSync=1" \
+  -H "x-sync-key: $SYNC_KEY" -H 'Content-Type: application/json' \
+  --data @/tmp/req.json | python3 -m json.tool
+```
+
+The manual **Add an export by hand** panel stays exactly as it is, for a report
+that did not arrive or an off-cycle pull.
+
 ## What's already verified vs. what needs your environment
 
 Everything in `reconcile-core.js`, the Cloud Function's parsing and
@@ -198,12 +297,24 @@ deployment, the security rules, the Outlook rules, and the Power Automate
 HTTP call syntax for your specific connector. Those are worth a real test
 run before you trust it for daily use.
 
-## Keeping the two copies of reconcile-core.js in sync
+## Keeping the shared core files in sync
 
-`reconcile-core.js` lives in two places in this delivery, one next to
-`index.html` for the browser, one inside `functions/` for the Cloud
-Function (Cloud Functions can't reach outside their own folder at deploy
-time). If you ever change the matching or recommendation rules, change both
-copies, or better, set up your GitHub Pages repo and your Functions repo to
-both pull from one shared file (a git submodule, or just a small script that
-copies it into place before each deploy).
+Several core files live in two places, one at the repo root for the browser and
+one inside `functions/` for the Cloud Function (Cloud Functions can't reach
+outside their own folder at deploy time): `reconcile-core.js`, `reqs-core.js`,
+`schedule-core.js`, `shift-key.js`, `timeoff-core.js`, `tasks-core.js`,
+`contacts-core.js`, `pipeline-core.js`, `payroll-core.js`, `auth-core.js`.
+
+If you change one, change both copies. To check them all at once:
+
+```sh
+for f in reconcile-core reqs-core schedule-core shift-key timeoff-core \
+         tasks-core contacts-core pipeline-core payroll-core auth-core; do
+  diff -q "$f.js" "functions/$f.js" || echo "DRIFTED: $f.js"
+done
+```
+
+`shift-key.js` had already drifted once this way — the browser copy gained the
+connection-review logic and the deployed copy did not. Nothing broke, because
+the function does not call it, which is exactly what makes this the kind of
+drift you find late.

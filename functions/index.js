@@ -34,6 +34,8 @@ const Intake = require('./form-intake.js');
 const TimeOff = require('./timeoff-core.js');
 const Payroll = require('./payroll-core.js');
 const TransitionImport = require('./transition-import.js');
+const PtoTracker = require('./pto-tracker-core.js');
+const Tasks = require('./tasks-core.js');
 const TransitionPto = require('./transition-pto.js');
 const AttendanceImport = require('./attendance-import.js');
 const ShiftKey = require('./shift-key.js');
@@ -1070,6 +1072,138 @@ async function handlePlx(req, res) {
   res.status(200).json({ ok: true, sync: applied.meta });
 }
 
+/* ---------- the shared IL PTO tracker ----------
+   Watched on SharePoint by a flow that fires when the file is modified, which is
+   what makes a same-day approval land the same day. The cost of that trigger is
+   that it also fires on a save made mid-edit, when the sheet is briefly missing
+   rows somebody is in the middle of moving.
+
+   Two things make that survivable. The import never deletes, so a row that is
+   briefly absent keeps its record either way. And the tasks it would otherwise
+   raise are held when too many requests vanish at once: one person moving a row
+   between tabs is a question worth asking, thirty disappearing together is
+   somebody with the file open, and asking thirty times teaches people to ignore
+   the tasks. What was held is recorded, so it is visible rather than lost. */
+const ILPTO_META_PATH = 'timeoff/il-tracker.json';
+const ILPTO_SOURCE = 'IL Shared PTO Tracker';
+const ILPTO_MAX_AUTO_TASKS = 5;
+
+async function applyIlPtoWorkbook(buffer, opts) {
+  opts = opts || {};
+  let wb;
+  try {
+    wb = XLSX.read(buffer, { type: 'buffer' });
+  } catch (err) {
+    return { ok: false, status: 400, error: 'Could not read the workbook: ' + err.message };
+  }
+  const sheets = wb.SheetNames.map(n => ({
+    name: n,
+    aoa: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: '' })
+  }));
+
+  const parsed = PtoTracker.parseTracker(sheets);
+  if (!parsed.sheets.length) {
+    return { ok: false, status: 400,
+      error: 'None of the GEODIS tabs were found. Expected 30080, GEODIS - 20062 and 20062 Geodis Processed.' };
+  }
+  if (!parsed.requests.length) {
+    // A save caught mid-edit can read as a valid workbook with nothing on it.
+    return { ok: false, status: 400, error: 'The GEODIS tabs were read but hold no GEODIS rows.' };
+  }
+
+  // EID -> badge, from the roster snapshot the reconciliation already publishes.
+  const snapshot = await readJsonFile(SNAPSHOT_PATH);
+  const byEid = {};
+  ((snapshot && snapshot.records) || []).forEach(r => {
+    const e = String(r.empNumber || '').trim();
+    if (e && !byEid[e]) byEid[e] = r.badge;
+  });
+
+  const built = PtoTracker.toTimeOffRecords(parsed, {
+    badgeForEid: e => byEid[String(e || '').trim()] || '',
+    source: ILPTO_SOURCE,
+    pipeline: TimeOff
+  });
+
+  const existing = await readJsonArray(COLLECTIONS.timeoff.path);
+  const merged = PtoTracker.mergeForSave(existing, built.records, ILPTO_SOURCE);
+
+  let raised = [];
+  let heldTasks = 0;
+  if (merged.vanished.length > ILPTO_MAX_AUTO_TASKS) {
+    heldTasks = merged.vanished.length;
+  } else if (merged.vanished.length) {
+    const tasks = await readJsonArray(COLLECTIONS.tasks.path);
+    raised = PtoTracker.vanishedTasks(merged.vanished, {
+      tasks: Tasks, existing: tasks, source: ILPTO_SOURCE
+    });
+    if (raised.length) {
+      const cleaned = tasks.concat(raised.map(t => {
+        const c = sanitizeRecord(t, COLLECTIONS.tasks.fields);
+        c.id = String(t.id).slice(0, 64);
+        return c;
+      }));
+      await bucket.file(COLLECTIONS.tasks.path).save(JSON.stringify(cleaned), {
+        contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+      });
+    }
+  }
+
+  const clean = merged.records.map(r => {
+    const c = sanitizeRecord(r, COLLECTIONS.timeoff.fields);
+    c.id = String(r.id).slice(0, 64);
+    return c;
+  });
+  await bucket.file(COLLECTIONS.timeoff.path).save(JSON.stringify(clean), {
+    contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+  });
+
+  const meta = {
+    syncedAt: new Date().toISOString(),
+    fileName: String(opts.fileName || '').slice(0, 200),
+    modifiedAt: String(opts.modifiedAt || '').slice(0, 40),
+    requests: built.records.length,
+    matched: built.records.length - built.unmatched.length,
+    unmatched: built.unmatched.length,
+    otherClients: parsed.nonGeodis,
+    tabs: parsed.sheets.map(s => s.name),
+    vanished: merged.vanished.length,
+    tasksRaised: raised.length,
+    tasksHeld: heldTasks,
+    warnings: parsed.warnings.slice(0, 20)
+  };
+  if (heldTasks) {
+    meta.warnings.unshift(heldTasks + ' request(s) left the sheet at once without being processed. ' +
+      'That is more than one person moving a row, so no tasks were raised — check whether the file was ' +
+      'saved mid-edit. Every record was kept.');
+  }
+  await bucket.file(ILPTO_META_PATH).save(JSON.stringify(meta), {
+    contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+  });
+  return { ok: true, meta: meta };
+}
+
+async function handleIlPto(req, res) {
+  setKvCors(res);
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (req.method === 'GET') {
+    res.set('Cache-Control', 'no-cache, max-age=0');
+    res.status(200).json({ ok: true, sync: await readJsonFile(ILPTO_META_PATH) });
+    return;
+  }
+  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
+  if (req.get('x-sync-key') !== SYNC_KEY.value()) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
+
+  const body = req.body || {};
+  const b64 = String(body.fileBase64 || body.file || '');
+  if (!b64) { res.status(400).json({ ok: false, error: 'Missing fileBase64' }); return; }
+  const applied = await applyIlPtoWorkbook(Buffer.from(b64, 'base64'), {
+    fileName: body.fileName, modifiedAt: body.modifiedAt
+  });
+  if (!applied.ok) { res.status(applied.status || 400).json({ ok: false, error: applied.error }); return; }
+  res.status(200).json({ ok: true, sync: applied.meta });
+}
+
 /* ---------- the workbook, uploaded from the browser ----------
    The workbook lives in another Microsoft tenant, so no automation here can
    reach it. Somebody uploads it instead, whenever they run attendance, and this
@@ -1256,6 +1390,7 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
     if (req.query.plxUpload !== undefined) { await handlePlxUpload(req, res); return; }
     if (req.query.plx !== undefined) { await handlePlx(req, res); return; }
     if (req.query.plxRefresh !== undefined) { await handlePlxRefresh(req, res); return; }
+    if (req.query.ilPto !== undefined) { await handleIlPto(req, res); return; }
     if (req.query.schedule !== undefined) { await handleSchedule(req, res); return; }
     if (req.query.coverage !== undefined) { await handleCoverage(req, res); return; }
     // Suite collections: ?attendance=1, ?timeoff=1, ?requisitions=1, ?performance=1

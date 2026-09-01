@@ -438,6 +438,16 @@
       .then(function (d) { return d.sync || {}; })
       .catch(function (err) { console.warn('Could not read the PLX sync state.', err); return {}; });
   }
+  /* ---------- the shared IL PTO tracker ----------
+     Watched on SharePoint by a flow that fires when the file changes, so unlike
+     the PLX workbook nobody has to remember to upload it. This reports what that
+     flow last did. */
+  function loadIlPtoSync() {
+    return getJson(API + '?ilPto=1')
+      .then(function (d) { return d.sync || {}; })
+      .catch(function (err) { console.warn('Could not read the IL PTO tracker sync state.', err); return {}; });
+  }
+
   // Uploading the workbook from the browser. Everything it carries -- shift tags,
   // open orders, attendance history and point balances -- refreshes in one pass.
   function uploadPlx(payload) { return post('plxUpload=1', payload); }
@@ -514,6 +524,7 @@
     loadCoverageDates: loadCoverageDates,
     loadAdmin: loadAdmin,
     loadPlxSync: loadPlxSync,
+    loadIlPtoSync: loadIlPtoSync,
     uploadPlx: uploadPlx,
     loadPayrollPeriods: loadPayrollPeriods,
     loadPayrollPeriod: loadPayrollPeriod,

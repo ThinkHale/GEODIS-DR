@@ -94,6 +94,7 @@
     connectFor: '', connectQuery: '', connectKind: 'timeoff',
     payroll: { periods: [], week: '', period: null, tab: 'discrepancies', loading: false },
     plx: { sync: null, busy: false, note: '' },   // the last PLX workbook uploaded
+    ilPto: { sync: null },                        // what the PTO tracker flow last did
     auth: { signedIn: false, email: '', account: null, loading: false, error: '' },
     admin: { users: [], locations: [], shiftTypes: [], appConfig: [], loaded: false, tab: 'account' },
     shiftKey: null,          // parsed "Geodis Key" vocabulary, when a workbook is loaded
@@ -1877,7 +1878,29 @@
       'touch requests from any other source.' +
       (link ? '' : ' <span class="warn-text">No spreadsheet link is set — add one under Settings → RC links.</span>') +
       '</p>' +
+      ptoSyncNote() +
       (imp ? shiftImportReport(imp) : '') + '</section>';
+  }
+
+  /* What the SharePoint flow last did. The file is watched rather than uploaded,
+     so this is normally the only sign it is working -- and the only place the
+     held-task warning surfaces. */
+  function ptoSyncNote() {
+    var s = state.ilPto.sync;
+    if (!s || !s.syncedAt) return '';
+    var bits = [
+      '<b>' + esc(s.requests || 0) + '</b> requests',
+      esc(s.matched || 0) + ' matched to an associate',
+      s.unmatched ? esc(s.unmatched) + ' not on the roster' : '',
+      s.tasksRaised ? '<b class="warn-text">' + esc(s.tasksRaised) + '</b> raised as tasks' : ''
+    ].filter(Boolean);
+    return '<div class="overview-req-note">Last pulled from SharePoint ' +
+      esc(new Date(s.syncedAt).toLocaleString()) +
+      (s.fileName ? ' · ' + esc(s.fileName) : '') + ' · ' + bits.join(' · ') + '</div>' +
+      ((s.warnings && s.warnings.length)
+        ? '<div class="import-report' + (s.tasksHeld ? ' bad' : '') + '"><strong>From that pull</strong><ul>' +
+          s.warnings.slice(0, 6).map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') + '</ul></div>'
+        : '');
   }
 
   function readPtoTracker(file) {
@@ -4140,6 +4163,11 @@
     if (state.view === 'settings') render();
   });
   SuiteAuth.resume();
+
+  SuiteData.loadIlPtoSync().then(function (sync) {
+    state.ilPto.sync = sync || {};
+    if (state.view === 'timeoff') render();
+  });
 
   SuiteData.loadPlxSync().then(function (sync) {
     state.plx.sync = sync;

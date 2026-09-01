@@ -56,6 +56,19 @@ t('the check happens before the workbook is even read',
 // A browser upload has no file timestamp and must always apply.
 t('with no modifiedAt it always applies', /if \(opts\.modifiedAt\)/.test(apply));
 
+console.log('— a shortcut is not the workbook —');
+/* "Add shortcut to My files" on a single shared FILE makes a .url: a hundred-odd
+   bytes of Internet Shortcut text. XLSX does not throw on it -- it reads the text
+   as one sheet -- so the honest-looking failure was "none of the GEODIS tabs were
+   found", which sends whoever built the flow looking at tab names. */
+t('a .url shortcut is recognised for what it is', /InternetShortcut/i.test(apply));
+t('and the error names it, rather than blaming the tab names',
+  /is a \.url shortcut, not the workbook/.test(apply));
+t('it says what to do instead', /containing folder/.test(apply));
+t('anything implausibly small is refused too', /too small to be the tracker/.test(apply));
+t('the size check runs before the tab check',
+  apply.indexOf('too small to be the tracker') < apply.indexOf('None of the GEODIS tabs'));
+
 console.log('— it writes through the same guards as everything else —');
 t('time-off records are sanitised against the whitelist',
   /sanitizeRecord\(r, COLLECTIONS\.timeoff\.fields\)/.test(apply));

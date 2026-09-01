@@ -1119,6 +1119,27 @@ async function applyIlPtoWorkbook(buffer, opts) {
     aoa: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: '' })
   }));
 
+  /* A OneDrive shortcut to a file is a .url -- a hundred-odd bytes of Internet
+     Shortcut text, not the workbook. XLSX does not throw on it; it reads the text
+     as a single sheet, so without this the flow would report "none of the GEODIS
+     tabs were found" and send whoever built it looking at tab names. Say what
+     actually arrived instead. */
+  if (buffer.length < 4096 || (sheets.length === 1 && wb.SheetNames[0] === 'Sheet1')) {
+    const head = buffer.slice(0, 200).toString('utf8');
+    if (/\[InternetShortcut\]/i.test(head) || /^\s*URL\s*=/im.test(head)) {
+      return { ok: false, status: 400,
+        error: 'That is a .url shortcut, not the workbook — ' + buffer.length + ' bytes of link text. ' +
+          'A OneDrive shortcut to a single FILE is a pointer, and reading it returns the pointer. ' +
+          'Share the containing folder and add a shortcut to that, or read the file from its own ' +
+          'SharePoint site instead.' };
+    }
+    if (buffer.length < 4096) {
+      return { ok: false, status: 400,
+        error: 'That file is only ' + buffer.length + ' bytes, which is too small to be the tracker. ' +
+          'Check that the flow is reading the workbook itself and not a shortcut or an error page.' };
+    }
+  }
+
   const parsed = PtoTracker.parseTracker(sheets);
   if (!parsed.sheets.length) {
     return { ok: false, status: 400,

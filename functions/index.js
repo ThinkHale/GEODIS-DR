@@ -1073,23 +1073,41 @@ async function handlePlx(req, res) {
 }
 
 /* ---------- the shared IL PTO tracker ----------
-   Watched on SharePoint by a flow that fires when the file is modified, which is
-   what makes a same-day approval land the same day. The cost of that trigger is
-   that it also fires on a save made mid-edit, when the sheet is briefly missing
-   rows somebody is in the middle of moving.
+   The workbook belongs to another branch and reaches us as a shared link on
+   somebody else's OneDrive. Nothing can trigger on it being modified: that needs
+   the file in your own drive, and a link grants no folder access. So a flow reads
+   it on a recurrence and pushes it here.
 
-   Two things make that survivable. The import never deletes, so a row that is
-   briefly absent keeps its record either way. And the tasks it would otherwise
-   raise are held when too many requests vanish at once: one person moving a row
-   between tabs is a question worth asking, thirty disappearing together is
-   somebody with the file open, and asking thirty times teaches people to ignore
-   the tasks. What was held is recorded, so it is visible rather than lost. */
+   Polling means a run can land on a save made mid-edit, when the sheet is briefly
+   missing rows somebody is moving between tabs. Two things make that survivable.
+   The import never deletes, so a row that is briefly absent keeps its record
+   either way. And the tasks it would otherwise raise are held when too many
+   requests vanish at once: one person moving a row is a question worth asking,
+   thirty disappearing together is somebody with the file open, and asking thirty
+   times teaches people to ignore the tasks. What was held is recorded, so it is
+   visible rather than lost. */
 const ILPTO_META_PATH = 'timeoff/il-tracker.json';
 const ILPTO_SOURCE = 'IL Shared PTO Tracker';
 const ILPTO_MAX_AUTO_TASKS = 5;
 
 async function applyIlPtoWorkbook(buffer, opts) {
   opts = opts || {};
+
+  /* The file lives on somebody else's OneDrive, shared by link, so nothing can
+     trigger on it being modified -- that needs the file in your own drive. A flow
+     polls it instead, and a poll that re-imports an unchanged workbook every few
+     minutes would rewrite all 56 records and their updatedAt stamps for nothing.
+
+     So the flow sends the file's own lastModifiedDateTime and this stops early
+     when it has not moved. The poll costs a read; only a real edit costs a write.
+     Sending no modifiedAt always applies, which is what a browser upload does. */
+  if (opts.modifiedAt) {
+    const last = await readJsonFile(ILPTO_META_PATH);
+    if (last && last.modifiedAt && String(last.modifiedAt) === String(opts.modifiedAt)) {
+      return { ok: true, meta: Object.assign({}, last, { skipped: true, checkedAt: new Date().toISOString() }) };
+    }
+  }
+
   let wb;
   try {
     wb = XLSX.read(buffer, { type: 'buffer' });

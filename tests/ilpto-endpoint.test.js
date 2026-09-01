@@ -45,6 +45,17 @@ t('and what was held is recorded, not lost', /tasksHeld/.test(apply) && /saved m
 t('records are written either way, because the import never deletes',
   apply.indexOf('COLLECTIONS.timeoff.path).save') > apply.indexOf('heldTasks'));
 
+console.log('— a poll that changes nothing costs nothing —');
+/* The file is on somebody else's OneDrive, shared by link, so nothing can trigger
+   on modification -- that needs it in your own drive. A flow polls instead, and an
+   unchanged workbook must not rewrite every record and its updatedAt stamp. */
+t('an unchanged file stops before parsing', /String\(last\.modifiedAt\) === String\(opts\.modifiedAt\)/.test(apply));
+t('and says it skipped rather than reporting a fresh sync', /skipped: true/.test(apply));
+t('the check happens before the workbook is even read',
+  apply.indexOf('opts.modifiedAt') < apply.indexOf('XLSX.read'));
+// A browser upload has no file timestamp and must always apply.
+t('with no modifiedAt it always applies', /if \(opts\.modifiedAt\)/.test(apply));
+
 console.log('— it writes through the same guards as everything else —');
 t('time-off records are sanitised against the whitelist',
   /sanitizeRecord\(r, COLLECTIONS\.timeoff\.fields\)/.test(apply));

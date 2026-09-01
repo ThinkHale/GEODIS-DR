@@ -1882,19 +1882,35 @@
       (imp ? shiftImportReport(imp) : '') + '</section>';
   }
 
-  /* What the SharePoint flow last did. The file is watched rather than uploaded,
-     so this is normally the only sign it is working -- and the only place the
-     held-task warning surfaces. */
+  /* What the flow last did. The workbook is pulled rather than uploaded, so this
+     is normally the only sign it is working -- and the only place the held-task
+     warning surfaces.
+
+     A flow that quietly stops is worse than no flow: PTO would look settled while
+     approvals piled up in a sheet nobody was reading. So a tracker that has not
+     refreshed says so, rather than showing a stale figure as though it were
+     current. Until an automation exists at all this is what says the import is
+     still a manual job. */
   function ptoSyncNote() {
     var s = state.ilPto.sync;
-    if (!s || !s.syncedAt) return '';
+    if (!s || !s.syncedAt) {
+      return '<div class="overview-req-note">No automated pull has run yet — ' +
+        'the tracker is imported by hand from the button above.</div>';
+    }
+    // Polled every four hours, so nine means two runs were missed.
+    var stale = staleNote(s.syncedAt, 'The shared IL PTO tracker',
+      { after: 9, cadence: 'every four hours' });
+    if (stale) return stale + ptoSyncFigures(s);
+    return ptoSyncFigures(s);
+  }
+  function ptoSyncFigures(s) {
     var bits = [
       '<b>' + esc(s.requests || 0) + '</b> requests',
       esc(s.matched || 0) + ' matched to an associate',
       s.unmatched ? esc(s.unmatched) + ' not on the roster' : '',
       s.tasksRaised ? '<b class="warn-text">' + esc(s.tasksRaised) + '</b> raised as tasks' : ''
     ].filter(Boolean);
-    return '<div class="overview-req-note">Last pulled from SharePoint ' +
+    return '<div class="overview-req-note">Last pulled ' +
       esc(new Date(s.syncedAt).toLocaleString()) +
       (s.fileName ? ' · ' + esc(s.fileName) : '') + ' · ' + bits.join(' · ') + '</div>' +
       ((s.warnings && s.warnings.length)
@@ -3448,13 +3464,19 @@
     if (h < 48) return Math.round(h) + ' hours ago';
     return Math.round(h / 24) + ' days ago';
   }
-  function staleNote(iso, what) {
+  /* opts: { after, cadence } -- feeds vary. The PLX workbook is pushed twice a
+     day, so 20 hours means two runs were missed; the PTO tracker is polled every
+     four, where 20 hours would be five. A threshold that fits one feed says
+     nothing useful about the other. */
+  function staleNote(iso, what, opts) {
+    opts = opts || {};
+    var after = opts.after || STALE_AFTER_HOURS;
     var h = hoursSince(iso);
-    if (h == null || h < STALE_AFTER_HOURS) return '';
+    if (h == null || h < after) return '';
     return '<div class="warn-banner"><strong>' + esc(what) + ' is ' + esc(ageLabel(iso)) + '</strong>' +
-      '<p>It should refresh twice a day. This usually means the Power Automate flow is failing — ' +
-      'a SharePoint connection whose token has expired is the common cause, and it shows as a 401 ' +
-      'in the flow run history.</p></div>';
+      '<p>It should refresh ' + esc(opts.cadence || 'twice a day') + '. This usually means the Power ' +
+      'Automate flow is failing — a SharePoint connection whose token has expired is the common cause, ' +
+      'and it shows as a 401 in the flow run history.</p></div>';
   }
 
   function plxBar() {

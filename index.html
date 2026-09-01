@@ -960,15 +960,58 @@ async function loadSyncedSnapshot(){
   if(!SNAPSHOT_URL){ showUploadSection(); return; }
   try{
     const res = await authedGet(SNAPSHOT_URL);
+    /* A 401 or 403 is not "there is no snapshot yet". It means this browser was
+       not allowed to ask -- which, before the snapshot moved behind the account
+       check, could not happen. Saying "falling back to manual upload" for it
+       sent people hunting for exports that were never the problem. */
+    if(res.status===401 || res.status===403){
+      const err = new Error(res.status===401
+        ? 'Not signed in, so the roster was not loaded.'
+        : 'This account is not allowed to read the roster.');
+      err.denied = res.status;
+      throw err;
+    }
     if(!res.ok) throw new Error('HTTP '+res.status);
     const data = await res.json();
     if(!data || !Array.isArray(data.records)) throw new Error('Unexpected snapshot format');
     syncedSnapshot = data;
     showSyncedResults();
+    return true;
   }catch(err){
-    console.warn('No synced snapshot available yet, falling back to manual upload.', err);
+    if(err.denied) console.warn('The roster was refused: '+err.message, err);
+    else console.warn('No synced snapshot available yet, falling back to manual upload.', err);
     showUploadSection();
+    return false;
   }
+}
+
+/* The roster needs a signed-in account, and sign-in resolves LONG after this
+   script runs -- the Firebase SDK is not even fetched until suite.js calls
+   resume(), on the line after this one.
+ *
+ * Calling loadSyncedSnapshot() straight away therefore sent the request with no
+ * Authorization header, got a 401, swallowed it as "no snapshot yet", and left
+ * the whole suite without a roster for the rest of the session: Associates,
+ * Time Off and Attendance all short-circuit on `state.records` being null, so
+ * every one of them read as empty with nothing on screen explaining why.
+ *
+ * So it waits to be told. onChange fires immediately with whatever is known
+ * (usually "not known yet"), and again each time that changes, which also
+ * covers somebody signing in at the gate minutes later. */
+let snapshotPending = false;
+function loadSnapshotWhenAllowed(snap){
+  if(syncedSnapshot || snapshotPending) return;
+  if(!snap || !snap.signedIn) return;
+  // The account record arrives a moment after the sign-in itself; until it does
+  // there is no role to check, so wait for the next callback rather than guess.
+  if(!window.AuthCore || !window.AuthCore.can(snap.account, 'view')) return;
+  snapshotPending = true;
+  loadSyncedSnapshot().then(ok=>{
+    // Only a success latches. A network blip should be retried by the next
+    // auth change, not remembered as "there is no roster".
+    snapshotPending = false;
+    if(!ok) syncedSnapshot = null;
+  });
 }
 function showSyncedResults(){
   S.records = syncedSnapshot.records.map(r=>({
@@ -1007,7 +1050,13 @@ function showUploadSection(){
 document.getElementById('btn-toggle-manual').addEventListener('click', showUploadSection);
 document.getElementById('btn-back-to-sync').addEventListener('click', ()=>{ if(syncedSnapshot) showSyncedResults(); });
 
-loadSyncedSnapshot();
+if(window.SuiteAuth && window.SuiteAuth.onChange){
+  window.SuiteAuth.onChange(loadSnapshotWhenAllowed);
+}else{
+  // No auth module at all (an older shell, or a load failure). Ask anyway and
+  // let the server decide -- better than showing nothing on a hunch.
+  loadSyncedSnapshot();
+}
 </script>
 <script src="suite.js"></script>
 </body>

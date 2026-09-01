@@ -29,6 +29,12 @@
     createAccount: function () { return Promise.resolve(); },
     resetPassword: function () { return Promise.resolve(); },
     signOut: function () { root.__setAuth({ signedIn: false, email: '', account: null }); return Promise.resolve(); },
-    idToken: function () { return Promise.resolve('test-token'); }
+    /* Empty when signed out, exactly as the real module behaves
+       (`state.user ? getIdToken() : Promise.resolve('')`). Handing out a token
+       unconditionally made every DOM test look authenticated from frame zero,
+       which is a state the real page is never in -- and it is precisely why a
+       boot that asked for the roster before sign-in resolved passed here and
+       returned 401 in production. */
+    idToken: function () { return Promise.resolve(snap.signedIn ? 'test-token' : ''); }
   };
 })(typeof window !== 'undefined' ? window : this);

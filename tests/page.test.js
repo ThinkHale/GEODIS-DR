@@ -11,7 +11,7 @@ const snapshot={updatedAt:'2026-08-24T11:30:00Z',counts:{total:3,matched:1},reco
  {badge:'1002',empNumber:'',person:'Ben Ortiz',altName:'',action:'endCrm',actionLabel:'End in RC',reason:'Beeline shows Terminated.',market:'Atlanta',marketVerified:true,marketRaw:'',newBadge:null,crmStart:'2/1/2025',beeStart:'',endDate:'',endReason:'',dup:false},
  {badge:'1003',empNumber:'E3',person:'Cleo Nash',altName:'',action:'addBeeline',actionLabel:'Add to Beeline',reason:'No record in Beeline.',market:'Dallas',marketVerified:true,marketRaw:'',newBadge:null,crmStart:'3/3/2025',beeStart:'',endDate:'',endReason:'',dup:false}
 ]};
-const posted=[];
+const posted=[], fetched=[];
 const dom=new JSDOM(html,{runScripts:'outside-only',url:'https://geodis.ebtools.pro/'});
 const w=dom.window, d=w.document;
 w.XLSX={read(){},utils:{}};
@@ -20,6 +20,13 @@ w.fetch=(url,opt)=>{
   const u=String(url);
   if(opt&&opt.method==='POST'){ posted.push({url:u,body:JSON.parse(opt.body)});
     return Promise.resolve({ok:true,json:()=>Promise.resolve({ok:true,count:1})}); }
+  fetched.push(u);
+  /* The roster is behind the account check now, so an unauthenticated read of it
+     is a 401 -- exactly what the live function returns. Answering 200 here would
+     hide the bug this file exists to catch. */
+  if(u.includes('snapshot=1') && !(opt&&opt.headers&&opt.headers.Authorization)){
+    return Promise.resolve({ok:false,status:401,json:()=>Promise.resolve({ok:false,error:'Sign in to use this.',signIn:true})});
+  }
   /* The roster comes through the Cloud Function now, behind the same account
      check as everything else -- it used to be a public Storage URL that anybody
      with the link could read without signing in. */
@@ -30,8 +37,21 @@ w.fetch=(url,opt)=>{
   return Promise.resolve({ok:true,json:()=>Promise.resolve({[map[k[1]]]:[]})});
 };
 ['auth-core.js','tests/suite-auth-stub.js','reconcile-core.js','suite-data.js','schedule-core.js','shift-key.js','pipeline-core.js','timeoff-core.js','payroll-core.js','tasks-core.js','contacts-core.js','reqs-core.js', 'pto-tracker-core.js'].forEach(f=>w.eval(fs.readFileSync(R+f,'utf8')));
+/* Where production actually starts. The Firebase SDK is not even fetched until
+   suite.js calls resume(), so the page's own script runs while sign-in is still
+   UNKNOWN -- not signed out, not signed in. The stub defaults to signed-in for
+   the convenience of the other suites; this one models the real boot, because
+   the gap between those two states is where the roster went missing. */
+w.__setAuth({ready:false,signedIn:false,email:'',account:null});
 w.eval(html.match(/<script>\n"use strict";([\s\S]*?)<\/script>/)[1]);
 w.eval(fs.readFileSync(R+'suite.js','utf8'));
+
+console.log('— the roster waits for sign-in rather than asking without one —');
+t('no roster request while sign-in is still unknown',
+  !fetched.some(u=>u.includes('snapshot=1')));
+t('and no collections either', !fetched.some(u=>u.includes('timeoff=1')));
+// Sign-in completes, minutes later in real life.
+w.__setRole('colleague');
 
 const $=s=>d.querySelector(s), $$=s=>Array.from(d.querySelectorAll(s));
 const click=el=>el.dispatchEvent(new w.MouseEvent('click',{bubbles:true}));
@@ -43,7 +63,14 @@ t('suite shell rendered', !!$('.suite-nav'));
 t('body stays suite-active', d.body.classList.contains('suite-active'));
 
 console.log('— snapshot -> suite handoff —');
+/* The whole suite short-circuits on state.records being null: Associates, Time
+   Off and Attendance each return their "waiting on the roster" panel. So one
+   silently-swallowed 401 on this fetch emptied three pages at once, with
+   nothing on any of them saying why. */
+t('the roster was fetched once sign-in landed', fetched.some(u=>u.includes('snapshot=1')));
 t('roster built from the real snapshot', w.GEODISSuite.state.profiles.size===3);
+t('and it reached the suite, not just the reconciliation table',
+  !!w.GEODISSuite.state.records && w.GEODISSuite.state.records.length===3);
 t('profile keyed by badge', !!w.GEODISSuite.profile('1001'));
 t('assignment status derived', w.GEODISSuite.profile('1002').status==='Ended');
 t('sync time reached the suite', $('.suite-nav-footer').textContent.includes('Roster synced'));

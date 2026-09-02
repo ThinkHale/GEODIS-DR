@@ -149,11 +149,51 @@ A **coverage document** holds that day's checks plus whatever a manager document
 | `documented{}` | person key -> `{ disposition, reason, name, badge }` |
 
 Each check keeps **full detail for everyone who was not where they should be**, and
-a **bare key list for everyone who was on premise**. That answers both "who was
-missing and why" and "was this person here at 2pm" without writing a row per person
-per pull. A check's `id` derives from its as-of instant, so re-uploading the same
-export replaces that check instead of double-counting the day. Checks are capped at
-24 per day; documentation survives every later check.
+a **bare key list for everyone who was on premise**. A check's `id` derives from its
+as-of instant, so re-uploading the same export replaces that check instead of
+double-counting the day. Checks are capped at 24 per day; documentation survives
+every later check.
+
+### The full report, and why it lives somewhere else
+
+Exceptions and present-keys answer "who was missing and why" and "was this person
+here at 2pm". They cannot answer **"who was on the floor at 10:30 last Tuesday"** —
+somebody working an ordinary shift appears in neither list in any detail. So every
+row of every pull is stored too, in its own object per day:
+
+```
+coverage/days/{date}.json   exceptions + documentation      kept for good
+coverage/rows/{date}.json   { checks: { <checkId>: rows[] } } kept 7 days
+```
+
+Two reasons they are apart rather than one fat document:
+
+1. The day document is **read-modify-written every time somebody documents an
+   absence**. Rows inside it would make each typed note drag the whole day's report
+   down and back up.
+2. Pruning becomes a **list and a delete**. Stripping a field back out of the day
+   documents would mean *reading* every old day to find out whether it still had
+   rows — work that grows forever, on a path that runs on every save.
+
+`ROW_RETENTION_DAYS` is 7, stated in both `schedule-core.js` and
+`functions/index.js` with a test asserting they agree. The cutoff is computed from
+the server's UTC date while a check's date key is the **site's local** date, so a
+day of slack is added: the window is never shorter than seven days and at worst
+holds one extra. Losing a day early is the failure that matters.
+
+`exceptions[]` is deliberately **not** derived from `rows[]` on read. It outlives
+it — once the week is up the rows go and the exceptions stay, because they are the
+half somebody may still have to answer for. The duplication is the price of the two
+having different lifetimes.
+
+A day whose rows have aged out reads back without them, and the review page says
+so rather than going quiet — otherwise it looks like data went missing.
+
+**Market scoping applies to `rows[]` exactly as it does to `exceptions[]`.** It is
+the widest field a check carries — every person the pull covered — so a
+market-restricted reader who got it unfiltered would receive every other market's
+roster in one field. `filterCoverage()` scopes it, and `coverageCheckDecision()`
+judges a write against it, because what is stored is what must be permitted.
 
 ### Person keys
 

@@ -807,6 +807,18 @@
 
      The id is derived from the as-of instant, so re-uploading the same export
      replaces that check instead of double-counting the day. */
+  /* One row, projected for storage. Shared by `rows` and `exceptions` so the two
+     can never drift into different shapes -- they are the same rows, held for
+     different lengths of time. */
+  function checkRow(r) {
+    return {
+      key: personKey(r), name: r.name, badge: r.badge || '', wfmId: r.wfmId || '',
+      status: r.status, present: !!r.present,
+      shift: r.shiftRaw || r.dayCode || '', location: r.location || '',
+      job: r.job || '', manager: r.manager || ''
+    };
+  }
+
   function toCheck(res, opts) {
     opts = opts || {};
     var exceptions = res.rows.filter(function (r) {
@@ -819,14 +831,17 @@
       fileName: opts.fileName || '',
       graceMinutes: res.graceMinutes,
       summary: res.summary,
-      exceptions: exceptions.map(function (r) {
-        return {
-          key: personKey(r), name: r.name, badge: r.badge || '', wfmId: r.wfmId || '',
-          status: r.status, present: !!r.present,
-          shift: r.shiftRaw || r.dayCode || '', location: r.location || '',
-          job: r.job || '', manager: r.manager || ''
-        };
-      }),
+      /* EVERY row, not only the ones that needed acting on. Kept for a week and
+         then dropped -- see COVERAGE_ROWS_DIR in functions/index.js -- because a
+         full report is what answers "who was actually on the floor at 10am last
+         Tuesday", and no amount of exception detail reconstructs it.
+
+         `exceptions` below is deliberately NOT derived from this at read time.
+         It outlives it: once the week is up the rows go and the exceptions stay,
+         because they are the half somebody may still have to answer for. The
+         duplication is the price of the two of them having different lifetimes. */
+      rows: res.rows.map(checkRow),
+      exceptions: exceptions.map(checkRow),
       presentKeys: res.rows.filter(function (r) { return r.present; }).map(personKey)
     };
   }
@@ -1129,6 +1144,9 @@
     profileKeys: profileKeys,
     isoDateTime: isoDateTime,
     toCheck: toCheck,
+    checkRow: checkRow,
+    // Stated once, so the page and the server cannot disagree about the window.
+    ROW_RETENTION_DAYS: 7,
     scheduleForStorage: scheduleForStorage,
     SHEET_COLUMNS: SHEET_COLUMNS,
     shiftLabel: shiftLabel,

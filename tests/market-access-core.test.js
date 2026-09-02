@@ -172,6 +172,43 @@ t('coverage reads filter exceptions, present keys, and documentation',
 t('coverage summary is recomputed without the global aggregate',
   coverage.checks[0].summary.total === 3 && coverage.checks[0].summary.present === 2 &&
   coverage.checks[0].summary.coverage === null);
+
+/* The full report is the widest thing a check carries: every person the pull
+   covered, not just the ones who needed acting on. It is copied onto the scoped
+   check with Object.assign, so leaving it unfiltered would hand a market-scoped
+   account every other market's roster in one field. */
+const withRows = MarketAccess.filterCoverage(chicago, {
+  date: '2026-08-25', checks: [{ id: 'mixed',
+    exceptions: [{ key: 'b:C1', badge: 'C1', status: 'missing' }],
+    presentKeys: ['b:C2'],
+    rows: [{ key: 'b:C1', badge: 'C1', status: 'missing' },
+      { key: 'b:C2', badge: 'C2', status: 'working' },
+      { key: 'b:S1', badge: 'S1', status: 'working' }] }],
+  documented: {}
+}, context);
+t('the full report is scoped the same way the exceptions are',
+  withRows.checks[0].rows.length === 2);
+t('and the other market is not in it',
+  !withRows.checks[0].rows.some(r => r.badge === 'S1'));
+t('an unrestricted reader still gets the whole report',
+  MarketAccess.filterCoverage({ email: 'a@geodis.com', role: 'admin', enabled: true, markets: [] }, {
+    checks: [{ id: 'mixed', rows: [{ key: 'b:C1' }, { key: 'b:S1' }] }], documented: {}
+  }, context).checks[0].rows.length === 2);
+t('a check with no rows on it gains none -- an aged-out day stays aged out',
+  coverage.checks[0].rows === undefined);
+/* Writing is judged on what is actually being stored. The rows reach further
+   than the exceptions, so a pull carrying another market cannot be written even
+   when its exception list happens to be clean. */
+t('a check whose ROWS cross markets cannot be written by a restricted caller',
+  !MarketAccess.coverageCheckDecision(chicago, {
+    exceptions: [{ key: 'b:C1', badge: 'C1' }], presentKeys: ['b:C1'],
+    rows: [{ key: 'b:C1', badge: 'C1' }, { key: 'b:S1', badge: 'S1' }]
+  }, context).allowed);
+t('and one that stays inside the market can',
+  MarketAccess.coverageCheckDecision(chicago, {
+    exceptions: [{ key: 'b:C1', badge: 'C1' }], presentKeys: ['b:C1'],
+    rows: [{ key: 'b:C1', badge: 'C1' }, { key: 'b:C2', badge: 'C2' }]
+  }, context).allowed);
 t('a mixed-market check cannot be replaced by a restricted caller',
   !MarketAccess.coverageCheckDecision(chicago, {
     exceptions: [{ key: 'b:C1' }, { key: 'b:S1' }], presentKeys: []

@@ -29,7 +29,11 @@ const days = {
     checks: [
       { id: 'C1', asOf: TODAY + 'T10:00:00', fileName: 'onprem-10.csv', summary: { onShift: 2, byStatus: { working: 0, missing: 2, unscheduled: 0 }, coverage: 0 }, presentKeys: [], exceptions: [ex(K_AVA, 'Reed, Ava', 'b1'), ex(K_CLEO, 'Nash, Cleo', 'b2'), EXTRA] },
       { id: 'C2', asOf: TODAY + 'T10:15:00', fileName: 'onprem-1015.csv', summary: { onShift: 2, byStatus: { working: 0, missing: 2, unscheduled: 0 }, coverage: 0 }, presentKeys: [], exceptions: [ex(K_AVA, 'Reed, Ava', 'b1'), ex(K_CLEO, 'Nash, Cleo', 'b2')] },
-      { id: 'C3', asOf: TODAY + 'T10:30:00', fileName: 'onprem-1030.csv', summary: { onShift: 2, byStatus: { working: 1, missing: 1, unscheduled: 0 }, coverage: 50 }, presentKeys: [K_AVA], exceptions: [ex(K_CLEO, 'Nash, Cleo', 'b2')] }
+      /* Inside the retention window, so this one carries the WHOLE report --
+         everybody the pull covered, not just the people who needed acting on.
+         Ava is on it as `working`, which no exception list would ever hold. */
+      { id: 'C3', asOf: TODAY + 'T10:30:00', fileName: 'onprem-1030.csv', summary: { onShift: 2, byStatus: { working: 1, missing: 1, unscheduled: 0 }, coverage: 50 }, presentKeys: [K_AVA], exceptions: [ex(K_CLEO, 'Nash, Cleo', 'b2')],
+        rows: [Object.assign(ex(K_AVA, 'Reed, Ava', 'b1', 'working'), { present: true }), ex(K_CLEO, 'Nash, Cleo', 'b2'), EXTRA] }
     ],
     documented: {}
   },
@@ -107,7 +111,31 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   t('the file name is shown', d.body.textContent.indexOf('onprem-1030.csv') !== -1);
   t('that pull’s exception is listed', d.body.textContent.indexOf('Nash, Cleo') !== -1);
   t('the person present at that pull is not an exception', d.body.textContent.indexOf('Reed, Ava') === -1);
-  t('it is honest that only exceptions are stored', d.body.textContent.indexOf('does not keep a row per person') !== -1);
+
+  /* The full report is the point of keeping rows: it answers "who was actually
+     on the floor at 10:30", which no exception list can. */
+  console.log('— the whole report, while it is still held —');
+  t('the banner says the rows are held', /3 rows held/.test(d.body.textContent));
+  const statusSel = () => $('#cov-status');
+  t('"Everyone on the report" is offered',
+    Array.from(statusSel().options).some(o => o.value === 'everyone'));
+  t('and it is not the default -- exceptions are what needs working',
+    statusSel().value === 'all');
+  t('the default reads as exceptions, not as everything',
+    Array.from(statusSel().options).some(o => /Exceptions only \(1\)/.test(o.textContent)));
+  statusSel().value = 'everyone';
+  statusSel().dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(60);
+  t('somebody who was simply working now appears', d.body.textContent.indexOf('Reed, Ava') !== -1);
+  t('alongside the exception', d.body.textContent.indexOf('Nash, Cleo') !== -1);
+  t('every row of the report is listed', $$('.suite-table tbody tr').length === 3);
+  t('and the page says the full report is being kept, and for how long',
+    /full report/i.test(d.body.textContent) && /7 days/.test(d.body.textContent));
+  statusSel().value = 'all';
+  statusSel().dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(60);
+  t('switching back narrows to the exceptions', $$('.suite-table tbody tr').length === 1);
+
 
   console.log('— switching pulls —');
   pick('#review-check', 'C1');
@@ -191,6 +219,19 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   const pastPost = posts.filter(p => p.body && p.body.document).pop();
   t('filed against yesterday', pastPost.url.indexOf('date=' + YESTERDAY) !== -1);
   t('and not against today', pastPost.url.indexOf('date=' + TODAY) === -1);
+
+  /* Yesterday's check has no rows on it -- a day past the retention window keeps
+     its exceptions and loses the full report. The page has to SAY so, or it
+     reads as data having gone missing. */
+  console.log('— a day whose full report has aged out —');
+  t('its exception is still there in full', d.body.textContent.indexOf('Nash, Cleo') !== -1);
+  t('no "rows held" claim', !/rows held/.test(d.body.textContent));
+  t('"Everyone" is not offered for a day that cannot answer it',
+    !Array.from($('#cov-status').options).some(o => o.value === 'everyone'));
+  t('the page explains the rows aged out rather than going quiet',
+    /aged out/i.test(d.body.textContent));
+  t('while saying what is kept for good', /kept for good/i.test(d.body.textContent));
+
   pick('#review-date', TODAY);
   await settle(60);
 

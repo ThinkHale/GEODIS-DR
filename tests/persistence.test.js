@@ -72,6 +72,14 @@ t('Ava recorded as present', check.presentKeys.indexOf('b:80-AREED1001') !== -1)
 const cleoEx = check.exceptions.find(e => e.name === 'Nash, Cleo');
 t('Cleo is scheduled and absent -> exception', !!cleoEx && cleoEx.status === 'missing');
 t('exception carries the shift', cleoEx.shift === '7:00 AM - 3:30 PM');
+/* Every row, not only the ones that needed acting on -- that is what answers
+   "who was on the floor at 11:12", which no exception list can. */
+t('the whole report is carried too', check.rows.length === res.rows.length);
+t('including somebody simply working', check.rows.some(r => r.name === 'Reed, Ava' && r.status === 'working'));
+t('rows and exceptions are the same shape',
+  Object.keys(check.rows[0]).sort().join() === Object.keys(check.exceptions[0]).sort().join());
+t('the exceptions are still their own list, not derived on read',
+  check.exceptions.length < check.rows.length);
 t('exception carries the badge for follow-up', cleoEx.badge === '80-CNASH1003');
 t('absent people are not in presentKeys', check.presentKeys.indexOf('b:80-CNASH1003') === -1);
 t('Ben is on PTO, not an exception', !check.exceptions.some(e => e.name === 'Ortiz, Ben'));
@@ -117,7 +125,15 @@ const handlers = src.slice(src.indexOf('function dateKeyOf'), src.indexOf('/* --
 
 let files = {};
 const bucket = {
-  file: p => ({ save: async body => { files[p] = body; } }),
+  file: p => ({
+    save: async body => { files[p] = body; },
+    // Pruning aged-out reports deletes whole objects, so the fake has to be able
+    // to. A missing file raises 404, the way Cloud Storage does.
+    delete: async () => {
+      if (!(p in files)) { const e = new Error('No such object'); e.code = 404; throw e; }
+      delete files[p];
+    }
+  }),
   getFiles: async ({ prefix }) => [Object.keys(files).filter(k => k.startsWith(prefix)).map(name => ({ name }))]
 };
 const NOTES_ORIGIN = 'https://geodis.ebtools.pro';
@@ -193,6 +209,64 @@ const call = async (h, method, query, body, origin, token) => {
   t('neither check nor document refused', (await call(handleCoverage, 'POST', { date: '2026-08-25' }, { junk: 1 })).code === 400);
   t('bad date refused', (await call(handleCoverage, 'POST', { date: '../x' }, { check })).code === 400);
   t('foreign origin refused', (await call(handleCoverage, 'POST', { date: '2026-08-25' }, { check }, 'https://evil.example')).code === 403);
+
+  /* The bulky half of a check is stored apart from the day document and kept for
+     a week. Two things have to hold, and they pull in opposite directions:
+     the day document must stay light (it is rewritten every time somebody types
+     a note), and the reader must not have to know any of that. */
+  console.log('  · the full report, kept for a week');
+  const dayKey = n => {
+    const d = new Date(); d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  };
+  const TODAY_K = dayKey(0), OLD_K = dayKey(-30);
+  const fresh = Object.assign({}, check, { id: 'CKROWS', asOf: TODAY_K + 'T09:00:00' });
+
+  r = await call(handleCoverage, 'POST', { date: TODAY_K }, { check: fresh });
+  t('the day saved', r.code === 200);
+  t('and reports how many rows it kept', r.body.rowsKept === check.rows.length);
+  const rowFile = 'coverage/rows/' + TODAY_K + '.json';
+  t('the full report went to its own object', !!files[rowFile]);
+  t('keyed by the check it came from',
+    JSON.parse(files[rowFile]).checks.CKROWS.length === check.rows.length);
+  /* The day document is read-modify-written on every note somebody types. If the
+     rows lived in it, every note would drag the whole report down and back. */
+  const lightDoc = JSON.parse(files['coverage/days/' + TODAY_K + '.json']);
+  t('and NOT into the day document', !lightDoc.checks.some(c => c.rows !== undefined));
+  /* The point of keeping them apart: documenting an absence rewrites the day
+     document, and must not drag the whole report down and back up with it. */
+  const rowsBefore = files[rowFile];
+  await call(handleCoverage, 'POST', { date: TODAY_K },
+    { document: { key: 'b:80-CNASH1003', name: 'Nash, Cleo', badge: '80-CNASH1003', reason: 'Car trouble', disposition: 'Called in' } });
+  t('a note is saved', !!JSON.parse(files['coverage/days/' + TODAY_K + '.json']).documented['b:80-CNASH1003']);
+  t('and never touches the stored report', files[rowFile] === rowsBefore);
+
+  r = await call(handleCoverage, 'GET', { date: TODAY_K });
+  const readBack = r.body.coverage.checks.find(c => c.id === 'CKROWS');
+  t('a reader gets them back on the check, as one shape',
+    readBack.rows.length === check.rows.length);
+  t('with the exceptions still alongside', readBack.exceptions.length === check.exceptions.length);
+  t('and is told where the window starts', !!r.body.coverage.rowsRetainedFrom);
+
+  // A backfill for a date already outside the window stores nothing it would
+  // only have to delete on the next pass.
+  r = await call(handleCoverage, 'POST', { date: OLD_K }, { check: Object.assign({}, check, { id: 'CKOLD' }) });
+  t('a backfill past the window keeps no rows', r.body.rowsKept === 0);
+  t('and writes no rows object at all', !files['coverage/rows/' + OLD_K + '.json']);
+  t('while still storing the day itself', !!files['coverage/days/' + OLD_K + '.json']);
+
+  // A report that has aged out is deleted outright on the next save.
+  files['coverage/rows/' + OLD_K + '.json'] = JSON.stringify({ date: OLD_K, checks: { X: [{ key: 'b:1' }] } });
+  files['coverage/days/' + OLD_K + '.json'] = files['coverage/days/' + OLD_K + '.json'] || '{}';
+  await call(handleCoverage, 'POST', { date: TODAY_K }, { check: fresh });
+  t('an aged-out report is dropped', !files['coverage/rows/' + OLD_K + '.json']);
+  t('but its day -- exceptions and documentation -- is untouched',
+    !!files['coverage/days/' + OLD_K + '.json']);
+  t('and the current one is left alone', !!files[rowFile]);
+
+  t('the browser and the server agree on the window',
+    SC.ROW_RETENTION_DAYS === 7 &&
+    /const ROW_RETENTION_DAYS = 7;/.test(src));
 
   console.log('  · reading a day back');
   r = await call(handleCoverage, 'GET', { date: '2026-08-25' });

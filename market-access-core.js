@@ -339,11 +339,20 @@
         return recordDecision(user, 'coverage', { key: key }, compiled).allowed;
       });
       if (!exceptions.length && !presentKeys.length) return;
-      checks.push(Object.assign({}, check, {
+      /* The full report gets the SAME scoping as the exceptions. It arrives on
+         the check only for days still inside the retention window, and it names
+         every person on the floor -- so copying the check through with
+         Object.assign and leaving this alone would hand a market-scoped account
+         every other market's roster, by the widest margin of anything here. */
+      var scoped = Object.assign({}, check, {
         exceptions: exceptions,
         presentKeys: presentKeys,
         summary: scopedCoverageSummary(exceptions, presentKeys)
-      }));
+      });
+      if (Array.isArray(check.rows)) {
+        scoped.rows = filterRecords(user, 'coverage', check.rows, compiled);
+      }
+      checks.push(scoped);
     });
     var documented = {};
     Object.keys(coverage.documented && typeof coverage.documented === 'object'
@@ -360,6 +369,11 @@
     check = check || {};
     var compiled = compileContext(context), decisions = [];
     (Array.isArray(check.exceptions) ? check.exceptions : []).forEach(function (row) {
+      decisions.push(recordDecision(user, 'coverage', row, compiled));
+    });
+    // Whatever is being STORED is what is being judged. The full report reaches
+    // further than the exceptions do, so it is checked too.
+    (Array.isArray(check.rows) ? check.rows : []).forEach(function (row) {
       decisions.push(recordDecision(user, 'coverage', row, compiled));
     });
     (Array.isArray(check.presentKeys) ? check.presentKeys : []).forEach(function (key) {

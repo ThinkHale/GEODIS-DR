@@ -1988,23 +1988,38 @@
     return checks.filter(function (ck) { return ck.id === c.reviewId; })[0] || checks[checks.length - 1];
   }
 
+  /* Which rows a stored check can show. Days inside the retention window keep
+     every row of the report; older ones kept only their exceptions, so the
+     answer changes with the age of the check being looked at. */
+  function reviewHasRows(check) { return Array.isArray(check.rows) && check.rows.length > 0; }
+  function reviewRows(check) {
+    // "Everyone" only means anything while the full report is still held.
+    if (state.coverage.statusFilter === 'everyone' && reviewHasRows(check)) return check.rows;
+    return check.exceptions || [];
+  }
+
   /* Filters for a stored check. Reuses the live view's control ids so the same
      handlers drive both, but the options come from what this check actually
-     holds. Everything stored IS an exception, so the live "Exceptions only" and
-     "On shift now" have nothing to narrow here and read as All rather than
-     silently emptying the table. */
+     holds. The live "Exceptions only" and "On shift now" have nothing to narrow
+     here and read as All rather than silently emptying the table. */
   function covReviewFilters(check) {
     var c = state.coverage;
     var ex = check.exceptions || [];
+    var full = reviewHasRows(check) ? check.rows : null;
+    // Counted over whichever set is on screen, so a number never promises rows
+    // the table cannot show.
+    var source = c.statusFilter === 'everyone' && full ? full : ex;
     var counts = {}, locs = {};
-    ex.forEach(function (r) {
+    source.forEach(function (r) {
       counts[r.status] = (counts[r.status] || 0) + 1;
       var l = locLeaf(r.location);
       if (l) locs[l] = (locs[l] || 0) + 1;
     });
-    var sel = counts[c.statusFilter] ? c.statusFilter : 'all';
-    var opts = [['all', 'All exceptions (' + ex.length + ')']].concat(
-      ScheduleCore.STATUS_ORDER.filter(function (k) { return counts[k]; })
+    var sel = counts[c.statusFilter] ? c.statusFilter
+      : c.statusFilter === 'everyone' && full ? 'everyone' : 'all';
+    var opts = [['all', 'Exceptions only (' + ex.length + ')']]
+      .concat(full ? [['everyone', 'Everyone on the report (' + full.length + ')']] : [])
+      .concat(ScheduleCore.STATUS_ORDER.filter(function (k) { return counts[k]; })
         .map(function (k) { return [k, ScheduleCore.STATUS[k].label + ' (' + counts[k] + ')']; }));
     return '<div class="filter-row">' +
       '<input class="suite-input" id="suite-search" value="' + esc(state.query) +
@@ -2020,8 +2035,10 @@
   }
   function covReviewFilter(rows) {
     var c = state.coverage, q = state.query.trim().toLowerCase();
+    /* 'everyone' has already chosen the SET; it narrows nothing within it. The
+       live view's computed filters have nothing to narrow here either. */
     var wantStatus = c.statusFilter === 'exceptions' || c.statusFilter === 'onshift' ||
-      c.statusFilter === 'onclock' ? 'all' : c.statusFilter;
+      c.statusFilter === 'onclock' || c.statusFilter === 'everyone' ? 'all' : c.statusFilter;
     return rows.filter(function (r) {
       if (state.market !== 'all') {
         // A stored exception carries no market of its own; take it from the
@@ -2040,13 +2057,16 @@
 
   function covReview(check) {
     var c = state.coverage;
-    var all = check.exceptions || [];
+    var all = reviewRows(check);
     var ex = covReviewFilter(all);
     var present = (check.presentKeys || []).length;
+    var full = reviewHasRows(check);
     return '<div class="review-banner"><strong>Stored check · ' + esc(c.reviewDate) + ' ' +
       esc((check.asOf || '').slice(11, 16)) + '</strong>' +
       '<span>' + esc(check.fileName || 'uploaded report') + ' · ' + present + ' on premise · ' +
-      ex.length + ' exception' + (ex.length === 1 ? '' : 's') + '</span></div>' +
+      (check.exceptions || []).length + ' exception' +
+      ((check.exceptions || []).length === 1 ? '' : 's') +
+      (full ? ' · <b>' + check.rows.length + ' rows held</b>' : '') + '</span></div>' +
       covMetrics(check.summary || { byStatus: {}, onShift: 0, coverage: null }) +
       '<section class="suite-panel">' + covReviewFilters(check) +
       (ex.length
@@ -2069,9 +2089,26 @@
         : empty(all.length ? 'Nothing matches those filters' : 'No exceptions in this check',
                 all.length ? 'Widen the status, location, or market filter to see more.'
                            : 'Everyone on shift was on premise at that moment.')) +
-      '<p class="export-hint">A stored check keeps full detail on every exception and a list of who was on ' +
-      'premise. It does not keep a row per person, so the table above is the exceptions only.</p>' +
+      '<p class="export-hint">' + esc(retentionNote(check)) + '</p>' +
       '</section>';
+  }
+
+  /* What this check still holds, and for how much longer. Said on the page
+     because the answer changes with the age of the check: a supervisor looking
+     at last Tuesday sees every row, and the same person looking at the Tuesday
+     before that sees the exceptions only. Without this the second case reads as
+     data having gone missing. */
+  function retentionNote(check) {
+    var days = ScheduleCore.ROW_RETENTION_DAYS;
+    if (reviewHasRows(check)) {
+      return 'This check still holds the full report — every one of its ' + check.rows.length +
+        ' rows, not only the exceptions. Full reports are kept for ' + days +
+        ' days; after that a check keeps its exceptions, its documentation and the ' +
+        'list of who was on premise, which stay for good.';
+    }
+    return 'The full report for this day has aged out — full reports are kept for ' + days +
+      ' days. What remains is every exception in full, whatever was documented against ' +
+      'them, and the list of who was on premise. Those are kept for good.';
   }
 
   function unlinkedBanner(res) {

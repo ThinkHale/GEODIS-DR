@@ -213,6 +213,36 @@ const MAX_SCHEDULE_PEOPLE = 5000;
 const MAX_CHECKS_PER_DAY = 24;
 const MAX_EXCEPTION_ROWS = 5000;
 const MAX_PRESENT_KEYS = 20000;
+
+/* ---------- the full on-premise report ----------
+   Every row of every pull, not just the exceptions -- that is what answers "who
+   was actually on the floor at 10am last Tuesday", and no amount of exception
+   detail reconstructs it.
+
+   It lives in its OWN object per day rather than inside the day document, for
+   two reasons that both bite in practice:
+
+     1. The day document is read-modify-written every time somebody documents an
+        absence. Fattening it from tens of KB to hundreds would make every note
+        somebody types drag the whole day's rows down and back up again.
+     2. Pruning becomes a list and a delete. Stripping a field back out of the
+        day documents would mean READING every old day to find out whether it
+        still had rows in it -- work that grows forever, on a path that runs on
+        every save.
+
+   Shape: { date, checks: { <checkId>: [row, ...] }, updatedAt }  */
+const COVERAGE_ROWS_DIR = 'coverage/rows';
+/* Seven days of full reports, then they go. The cutoff is computed from the
+   server's UTC date while a check's date key is the SITE's local date, so a day
+   of slack is added: the window is never shorter than the seven days asked for,
+   and at worst holds one extra. Losing a day early is the failure that matters;
+   keeping one longer is not. */
+/* Kept as a literal rather than read from Sched: the test harnesses slice this
+   file's source and run it against fakes, and reaching into another module here
+   would drag it into every one of them. schedule-core.js states the same number
+   for the browser, and a test asserts the two agree. */
+const ROW_RETENTION_DAYS = 7;
+const MAX_CHECK_ROWS = 20000;
 const NOTES_ORIGIN = 'https://geodis.ebtools.pro';   // the tool's front-end origin
 
 /* Power Automate represents a binary action output as
@@ -581,6 +611,17 @@ function dateKeyOf(v) {
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
 }
 function str(v, max) { return v == null ? '' : String(v).slice(0, max || 200); }
+/* One on-premise row, whitelisted. The same shape whether it is being kept for a
+   week as part of the full report or forever as an exception -- they are the
+   same rows, held for different lengths of time. */
+function coverageRow(r) {
+  r = r || {};
+  return {
+    key: str(r.key, 140), name: str(r.name, 120), badge: str(r.badge, 64), wfmId: str(r.wfmId, 64),
+    status: str(r.status, 24), present: !!r.present, shift: str(r.shift, 60),
+    location: str(r.location, 200), job: str(r.job, 120), manager: str(r.manager, 120)
+  };
+}
 function auditActor(actor) {
   actor = actor || {};
   return {
@@ -604,6 +645,56 @@ function strictInstant(v) {
     ? new Date(Date.UTC(year, month, 0)).getUTCDate() : 0;
   if (!maxDay || day < 1 || day > maxDay || hour > 23 || minute > 59 || second > 59) return null;
   return Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+// A date key shifted by whole days, staying in UTC so no local rule can move it.
+function shiftDateKey(key, days) {
+  const base = dateKeyOf(key);
+  if (!base) return '';
+  const d = new Date(base + 'T00:00:00Z');
+  if (isNaN(d.getTime())) return '';
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+// The oldest full report still worth keeping. Anything strictly older is gone.
+function rowRetentionFloor(today) {
+  const from = dateKeyOf(today) || new Date().toISOString().slice(0, 10);
+  return shiftDateKey(from, -ROW_RETENTION_DAYS);
+}
+
+/* Delete every day of full rows older than the floor. One list call and a delete
+   per stale day -- no reads, so this stays cheap however long the tool runs.
+   A failure here is logged and swallowed: it costs storage, and it must never
+   take down the save that triggered it. */
+/* Put the two halves back together for a reader. Never mutates what it is given:
+   the stored day document has no `rows` on its checks and must not gain one. */
+function withCoverageRows(coverage, rowStore) {
+  const doc = coverage && typeof coverage === 'object' ? coverage : {};
+  const byCheck = (rowStore && typeof rowStore.checks === 'object' && rowStore.checks) || {};
+  if (!Array.isArray(doc.checks) || !doc.checks.length) return Object.assign({}, doc);
+  return Object.assign({}, doc, {
+    checks: doc.checks.map(check => {
+      const rows = check && byCheck[check.id];
+      return Array.isArray(rows) ? Object.assign({}, check, { rows: rows }) : check;
+    })
+  });
+}
+
+async function pruneCoverageRows(floor) {
+  if (!floor) return [];
+  let keys = [];
+  try {
+    keys = await listDateKeys(COVERAGE_ROWS_DIR);
+  } catch (err) {
+    console.warn('Could not list stored on-premise rows to prune them.', err);
+    return [];
+  }
+  const stale = keys.filter(k => k < floor);
+  await Promise.all(stale.map(k =>
+    bucket.file(COVERAGE_ROWS_DIR + '/' + k + '.json').delete().catch(err => {
+      if (!err || err.code !== 404) console.warn('Could not drop ' + k + ' on-premise rows.', err);
+    })));
+  return stale;
 }
 
 async function listDateKeys(dir) {
@@ -796,10 +887,19 @@ async function handleCoverage(req, res) {
       }
       res.status(200).json({ ok: true, dates: dates }); return;
     }
-    const coverage = await readJsonFile(COVERAGE_DIR + '/' + date + '.json');
+    /* The day document and its full rows are stored apart, and put back together
+       here -- the browser gets one shape, and does not have to know that the
+       bulky half is kept for a week and the rest forever. A day whose rows have
+       aged out simply comes back without them. */
+    const [coverage, rowStore] = await Promise.all([
+      readJsonFile(COVERAGE_DIR + '/' + date + '.json'),
+      readJsonFile(COVERAGE_ROWS_DIR + '/' + date + '.json')
+    ]);
+    const merged = withCoverageRows(coverage, rowStore);
+    merged.rowsRetainedFrom = rowRetentionFloor(new Date().toISOString().slice(0, 10));
     const context = restricted ? await coverageMarketContext(date) : null;
     res.status(200).json({ ok: true,
-      coverage: restricted ? MarketAccess.filterCoverage(actor, coverage, context) : coverage });
+      coverage: restricted ? MarketAccess.filterCoverage(actor, merged, context) : merged });
     return;
   }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
@@ -807,6 +907,7 @@ async function handleCoverage(req, res) {
   if (!date) { res.status(400).json({ ok: false, error: 'Missing/invalid date' }); return; }
 
   const path = COVERAGE_DIR + '/' + date + '.json';
+  const rowsPath = COVERAGE_ROWS_DIR + '/' + date + '.json';
   const existing = await readJsonFile(path);
   const marketContext = restricted ? await coverageMarketContext(date) : null;
   const doc = {
@@ -816,11 +917,17 @@ async function handleCoverage(req, res) {
     updatedAt: new Date().toISOString()
   };
   const body = req.body || {};
+  // Carried out of the check branch so the rows can be filed after the day
+  // document is safely saved.
+  let savedCheck = null, savedRows = [];
 
   if (body.check) {
     const c = body.check;
     const exceptions = Array.isArray(c.exceptions) ? c.exceptions.slice(0, MAX_EXCEPTION_ROWS) : [];
     const present = Array.isArray(c.presentKeys) ? c.presentKeys.slice(0, MAX_PRESENT_KEYS) : [];
+    // Held aside: these go to their own object below, never into the day
+    // document, which is rewritten on every note somebody types.
+    const fullRows = (Array.isArray(c.rows) ? c.rows.slice(0, MAX_CHECK_ROWS) : []).map(coverageRow);
     const check = {
       id: str(c.id, 64) || 'CK' + Date.now(),
       asOf: str(c.asOf, 40),
@@ -828,11 +935,7 @@ async function handleCoverage(req, res) {
       graceMinutes: Number.isFinite(Number(c.graceMinutes)) ? Number(c.graceMinutes) : null,
       summary: (c.summary && typeof c.summary === 'object') ? c.summary : {},
       // Full detail for anyone who was not where they should be...
-      exceptions: exceptions.map(r => ({
-        key: str(r.key, 140), name: str(r.name, 120), badge: str(r.badge, 64), wfmId: str(r.wfmId, 64),
-        status: str(r.status, 24), present: !!r.present, shift: str(r.shift, 60),
-        location: str(r.location, 200), job: str(r.job, 120), manager: str(r.manager, 120)
-      })),
+      exceptions: exceptions.map(coverageRow),
       // ...and a bare key list for everyone who WAS on premise, so presence can
       // still be proven later without storing a row per person per pull.
       presentKeys: present.map(k => str(k, 140)),
@@ -841,7 +944,11 @@ async function handleCoverage(req, res) {
     // Re-running the same pull replaces it rather than double-counting the day.
     const i = doc.checks.findIndex(x => x && x.id === check.id);
     if (restricted) {
-      const incoming = MarketAccess.coverageCheckDecision(actor, check, marketContext);
+      /* Judged against the rows too, not just the exceptions. They are part of
+         what this write stores, and the rule has always been that you may not
+         write what you could not read back. */
+      const incoming = MarketAccess.coverageCheckDecision(
+        actor, Object.assign({}, check, { rows: fullRows }), marketContext);
       if (!incoming.allowed) { denyMarketWrite(res); return; }
       // A matching id owned partly or wholly by another market cannot be safely
       // replaced: its compact aggregate cannot be split after the fact. Reject
@@ -851,6 +958,8 @@ async function handleCoverage(req, res) {
         denyMarketWrite(res); return;
       }
     }
+    savedCheck = check;
+    savedRows = fullRows;
     if (i === -1) doc.checks.push(check); else doc.checks[i] = check;
     doc.checks.sort((a, b) => String(a.asOf || '').localeCompare(String(b.asOf || '')));
     if (doc.checks.length > MAX_CHECKS_PER_DAY) {
@@ -894,9 +1003,41 @@ async function handleCoverage(req, res) {
     contentType: 'application/json',
     metadata: { cacheControl: 'no-cache, max-age=0' }
   });
+
+  /* The full report, in its own object, and only while it is inside the window.
+     A backfill for an older date stores no rows at all rather than writing
+     something the next prune would immediately delete.
+
+     This runs AFTER the day document is saved and its failures are swallowed:
+     the exceptions and the documentation are the record that matters, and a
+     storage hiccup on the bulky half must not lose them or fail the request. */
+  const floor = rowRetentionFloor(new Date().toISOString().slice(0, 10));
+  if (savedCheck) {
+    try {
+      if (date < floor) {
+        // Outside the window before it was even written.
+      } else {
+        const store = await readJsonFile(rowsPath);
+        const byCheck = (store && typeof store.checks === 'object' && store.checks) || {};
+        byCheck[savedCheck.id] = savedRows;
+        // A pull the day document no longer holds has no rows to keep either.
+        const live = new Set(doc.checks.map(x => x && x.id));
+        Object.keys(byCheck).forEach(id => { if (!live.has(id)) delete byCheck[id]; });
+        await bucket.file(rowsPath).save(
+          JSON.stringify({ date: date, checks: byCheck, updatedAt: new Date().toISOString() }),
+          { contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' } });
+      }
+    } catch (err) {
+      console.warn('The day was saved, but its full on-premise rows were not.', err);
+    }
+    await pruneCoverageRows(floor);
+  }
+
   const visible = restricted ? MarketAccess.filterCoverage(actor, doc, marketContext) : doc;
   res.status(200).json({ ok: true, date: date,
-    checks: Array.isArray(visible.checks) ? visible.checks.length : 0 });
+    checks: Array.isArray(visible.checks) ? visible.checks.length : 0,
+    rowsKept: savedCheck ? (date >= floor ? savedRows.length : 0) : undefined,
+    rowsRetainedFrom: savedCheck ? floor : undefined });
 }
 
 /* ---------- PTO requests from Microsoft Forms ----------

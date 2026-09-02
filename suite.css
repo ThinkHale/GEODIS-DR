@@ -474,6 +474,11 @@ body.suite-active{margin:0;background:var(--suite-bg)}
   overflow:hidden;color:var(--suite-text)
 }
 .suite-panel+.source-disclosure{margin-top:14px}
+/* The connected list is settled work and can run to hundreds of rows. It
+   folds away so the page opens on what still needs doing -- and its body
+   holds a full panel, so it drops the tinted inset the provenance folds use. */
+.connected-fold>.source-disclosure-body{padding:0;background:none;border-top:0}
+.connected-fold>.source-disclosure-body>.suite-panel{border-top-left-radius:0;border-top-right-radius:0}
 .source-disclosure>summary{
   min-height:48px;padding:9px 13px;display:grid;grid-template-columns:7px minmax(0,1fr) auto;
   gap:10px;align-items:center;list-style:none;cursor:pointer;user-select:none

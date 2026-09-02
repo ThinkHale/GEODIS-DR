@@ -20,6 +20,11 @@ const src = fs.readFileSync(path.join(__dirname, '..', 'functions', 'index.js'),
    stub is injected -- same shape, same status codes. See fn-auth.js. */
 const { makeAuth, reqGet } = require('./fn-auth.js');
 const auth = makeAuth();
+/* A refused post is logged now, so "the flow never ran" and "the flow ran and
+   was turned away" stop looking identical. The console is captured to prove the
+   message says which, and never carries the secret itself. */
+const warnings = [];
+const cap = Object.assign({}, console, { warn: (...a) => warnings.push(a.join(' ')) });
 const consts = src.slice(src.indexOf('const RAW_PATH = {'), src.indexOf('const NOTES_ORIGIN'));
 const helpers = src.slice(src.indexOf('/* Power Automate represents a binary action output'), src.indexOf('/* ---------- shared, badge-keyed stores')) +
   src.slice(src.indexOf('async function readJsonFile('), src.indexOf('async function handleCollection('));
@@ -44,7 +49,7 @@ const SYNC_KEY = { value: () => KEY };
 const built = new Function(
   'bucket', 'NOTES_ORIGIN', 'SYNC_KEY', 'XLSX', 'ReqsCore', 'Buffer', 'console', 'requireUser',
   consts + '\n' + helpers + '\n' + handler + '\nreturn { handleReqSync, COLLECTIONS, REQ_META_PATH, REQ_RAW_PATH };'
-)(bucket, NOTES_ORIGIN, SYNC_KEY, XLSX, Q, Buffer, console, auth.requireUser);
+)(bucket, NOTES_ORIGIN, SYNC_KEY, XLSX, Q, Buffer, cap, auth.requireUser);
 const { handleReqSync, COLLECTIONS, REQ_META_PATH } = built;
 
 const mkRes = () => {
@@ -86,7 +91,21 @@ const candAoa = [
 
 (async () => {
   console.log('— the flow has to prove who it is —');
+  warnings.length = 0;
   t('no sync key is refused', (await push(reqAoa, 'reqs.xlsx', '')).code === 401);
+  /* Silence here is the failure that cost a morning: a flow posting with a stale
+     key looked exactly like a flow that never ran. */
+  t('and the refusal is logged, saying which feed', warnings.some(w => /Beeline requisition export/.test(w)));
+  t('and why', warnings.some(w => /no x-sync-key header was sent/.test(w)));
+  warnings.length = 0;
+  t('a wrong key is refused too', (await push(reqAoa, 'reqs.xlsx', 'not-the-key')).code === 401);
+  t('logged as a mismatch, not a missing header',
+    warnings.some(w => /does not match/.test(w)));
+  t('and the key that was offered never reaches the log',
+    warnings.every(w => w.indexOf('not-the-key') === -1));
+  t('only its length, which is what spots a truncated secret',
+    warnings.some(w => /11 characters/.test(w)));
+  warnings.length = 0;
   t('a wrong key is refused', (await push(reqAoa, 'reqs.xlsx', 'nope')).code === 401);
   t('and nothing was written', Object.keys(files).length === 0);
 

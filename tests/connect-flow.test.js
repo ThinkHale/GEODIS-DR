@@ -121,6 +121,86 @@ async function openAndPick(h) {
       h.d.body.textContent.indexOf('Someone Else Entirely') === -1);
   }
 
+  /* A person is only whole when three systems agree: RC supplies the profile,
+     the workbook supplies the site and shift, and the WFM timeclock id is what
+     every on-premise pull and attendance row is keyed on. The page used to show
+     one of those gaps and nothing about the other direction. */
+  console.log('— gaps from the roster side, not just the workbook —');
+  {
+    const h = harness();
+    await new Promise(r => setTimeout(r, 60));
+    const st = h.w.GEODISSuite.state;
+    st.storesLoaded = true;
+    // One workbook row that reaches nobody, and two roster people the workbook
+    // has never heard of.
+    st.stores.shifts = [
+      // The real case: the workbook spells him with one L, so no name rule will
+      // ever reach him -- but the similarity is high enough to suggest.
+      { eid: '80-AWILLI3693', name: 'Wilingham, Ahmad', nameKey: 'ahmad wilingham',
+        shift: '1st', building: '1536' }
+    ];
+    h.d.dispatchEvent(new h.w.CustomEvent('geodis:records', { detail: { records: [
+      { badge: 'B2', person: 'Ahmad Willingham', empNumber: 'E2', action: 'matched', actionLabel: 'M', reason: '', market: 'Chicago' },
+      { badge: 'B3', person: 'Nowhere In Workbook', empNumber: 'E3', action: 'matched', actionLabel: 'M', reason: '', market: 'Chicago' },
+      { badge: 'B4', person: 'Gone Away', empNumber: 'E4', action: 'endCrm', actionLabel: 'End', reason: '', market: 'Chicago', endDate: '2026-08-01' }
+    ] } }));
+    st.admin.tab = 'connections';
+    st.admin.loaded = true;
+    h.w.GEODISSuite.go('settings');
+    await new Promise(r => setTimeout(r, 60));
+
+    const gapRows = h.$$('.connect-gaps tbody tr');
+    t('the roster-side gap list is shown', gapRows.length > 0);
+    t('somebody the workbook never names is on it',
+      gapRows.some(r => r.textContent.indexOf('Nowhere In Workbook') !== -1));
+    t('an ENDED assignment is not chased for a shift tag',
+      !gapRows.some(r => r.textContent.indexOf('Gone Away') !== -1));
+    t('it says the fix is at source, not a connection',
+      /adding to the site\u2019s HC tab|adding to the site/i.test(h.d.body.textContent));
+    t('and no timeclock id is called out as the worse gap',
+      /invisible to attendance/i.test(h.d.body.textContent));
+    /* Someone the workbook DOES name under another spelling belongs in the
+       connect list above, not here -- listing them twice is noise. */
+    t('a person with a workbook suggestion is not repeated here',
+      !gapRows.some(r => r.textContent.indexOf('Ahmad Willingham') !== -1));
+    t('they are counted as waiting instead',
+      /waiting in the list above/i.test(h.d.body.textContent));
+  }
+
+  /* Connections already made are settled work, and there can be hundreds. */
+  console.log('— the connected list folds away —');
+  {
+    const h = harness({ links: [
+      { id: 'TCL-1', eid: '80-AAA', badge: 'B2', name: 'A, A', rosterName: 'Someone Else Entirely', linkedBy: 'X' }
+    ] });
+    await new Promise(r => setTimeout(r, 60));
+    seed(h);
+    await new Promise(r => setTimeout(r, 40));
+    h.w.GEODISSuite.go('settings');
+    await new Promise(r => setTimeout(r, 60));
+    const fold = h.$('.connected-fold');
+    t('connected associates are behind a fold', !!fold);
+    t('closed by default, so the page opens on what is left', !fold.open);
+    t('with the count on the summary', /1 connection/.test(fold.querySelector('summary').textContent));
+    t('and the table is still in there', !!fold.querySelector('.connect-made'));
+  }
+
+  /* A connection that needs a second look must not hide behind a summary. */
+  console.log('— unless one needs a second look —');
+  {
+    const h = harness({ links: [
+      { id: 'TCL-2', eid: '80-BBB', badge: 'GONE', name: 'B, B', rosterName: 'Off The Roster', linkedBy: 'X' }
+    ] });
+    await new Promise(r => setTimeout(r, 60));
+    seed(h);
+    await new Promise(r => setTimeout(r, 40));
+    h.w.GEODISSuite.go('settings');
+    await new Promise(r => setTimeout(r, 60));
+    const fold = h.$('.connected-fold');
+    t('a link to somebody off the roster opens the fold', fold && fold.open);
+    t('and the summary says why', /worth a second look/.test(fold.querySelector('summary').textContent));
+  }
+
   console.log('— a read-only account —');
   {
     const h = harness();

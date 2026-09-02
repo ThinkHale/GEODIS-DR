@@ -426,6 +426,24 @@ function denyMarketWrite(res) {
   res.status(403).json({ ok: false, forbidden: true,
     error: 'That record is outside your assigned markets or has no verified market.' });
 }
+/* Does this request carry the shared secret the automations post with?
+
+   It LOGS a refusal. Until now a flow posting with a stale or missing key was
+   turned away in total silence, which in the logs is indistinguishable from the
+   flow never having run at all -- so "the report hit my inbox but the tool did
+   not update" had two very different causes and no way to tell them apart. The
+   key itself is never logged; only that one was offered, and how long it was. */
+function hasSyncKey(req, what) {
+  const expected = SYNC_KEY.value();
+  const got = req.get('x-sync-key');
+  if (expected && got === expected) return true;
+  console.warn('Refused a ' + (what || 'sync') + ' post: ' +
+    (!expected ? 'the SYNC_KEY secret is not set on this deployment'
+      : !got ? 'no x-sync-key header was sent'
+      : 'the x-sync-key sent does not match (' + String(got).length + ' characters)'));
+  return false;
+}
+
 async function handleCollection(req, res, opts) {
   setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
@@ -611,6 +629,7 @@ function dateKeyOf(v) {
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
 }
 function str(v, max) { return v == null ? '' : String(v).slice(0, max || 200); }
+
 /* One on-premise row, whitelisted. The same shape whether it is being kept for a
    week as part of the full report or forever as an exception -- they are the
    same rows, held for different lengths of time. */
@@ -1068,7 +1087,7 @@ async function rosterProfiles() {
    so re-running the same workbook is safe and does not erase newer work. */
 async function handleTransitionImport(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
-  if (!SYNC_KEY.value() || req.get('x-sync-key') !== SYNC_KEY.value()) {
+  if (!hasSyncKey(req, 'transition workbook')) {
     res.status(401).json({ ok: false, error: 'Unauthorized' }); return;
   }
   const b64 = req.body && req.body.fileBase64;
@@ -1119,7 +1138,7 @@ async function handleTransitionImport(req, res) {
 
 async function handleAttendanceImport(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
-  if (!SYNC_KEY.value() || req.get('x-sync-key') !== SYNC_KEY.value()) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
+  if (!hasSyncKey(req, 'transition workbook')) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
   const body = req.body || {}; if (!body.plxBase64 || !body.redbullBase64) { res.status(400).json({ ok: false, error: 'Both workbook files are required' }); return; }
   const profiles = await rosterProfiles(); if (!profiles.length) { res.status(503).json({ ok: false, error: 'No roster snapshot is available' }); return; }
   const byName = Intake.buildNameIndex(profiles, Sched.rosterKey), now = new Date().toISOString(); let built;
@@ -1200,8 +1219,7 @@ async function handleReqSync(req, res) {
     return;
   }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
-  const expected = SYNC_KEY.value();
-  if (!expected || req.get('x-sync-key') !== expected) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
+  if (!hasSyncKey(req, 'Beeline requisition export')) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
 
   const body = req.body || {};
   const b64 = String(body.fileBase64 || body.file || '');
@@ -1312,10 +1330,7 @@ async function handleReqSync(req, res) {
 
 async function handlePtoIntake(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
-  const expected = SYNC_KEY.value();
-  if (!expected || req.get('x-sync-key') !== expected) {
-    res.status(401).json({ ok: false, error: 'Unauthorized' }); return;
-  }
+  if (!hasSyncKey(req, 'PTO form submission')) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
 
   const body = req.body || {};
   // One submission, or a batch if the flow is catching up.
@@ -1396,10 +1411,7 @@ async function handlePtoIntake(req, res) {
    so both Power Automate flows are built the same way. */
 async function handleDiscrepancyIntake(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
-  const expected = SYNC_KEY.value();
-  if (!expected || req.get('x-sync-key') !== expected) {
-    res.status(401).json({ ok: false, error: 'Unauthorized' }); return;
-  }
+  if (!hasSyncKey(req, 'payroll discrepancy form')) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
   const body = req.body || {};
   const subs = Array.isArray(body.submissions) ? body.submissions : [body];
   if (!subs.length || subs.length > 200) {
@@ -1546,7 +1558,7 @@ async function handlePayroll(req, res) {
   } else if (hasRows) {
     // The automation is a separate privileged principal and posts the complete
     // report. A browser token never substitutes for its sync key.
-    if (req.get('x-sync-key') !== SYNC_KEY.value()) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
+    if (!hasSyncKey(req, 'Beeline hours pull')) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
     if (body.rows.length > MAX_HOURS_ROWS) { res.status(400).json({ ok: false, error: 'Too many rows' }); return; }
   }
 
@@ -1823,7 +1835,7 @@ async function handlePlx(req, res) {
     return;
   }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
-  if (req.get('x-sync-key') !== SYNC_KEY.value()) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
+  if (!hasSyncKey(req, 'PLX workbook push')) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
 
   const body = req.body || {};
 
@@ -2010,7 +2022,7 @@ async function handleIlPto(req, res) {
     return;
   }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
-  if (req.get('x-sync-key') !== SYNC_KEY.value()) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
+  if (!hasSyncKey(req, 'IL PTO tracker pull')) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
 
   const body = req.body || {};
   const b64 = String(body.fileBase64 || body.file || '');
@@ -2344,9 +2356,7 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
 
     if (req.method !== 'POST') { res.status(405).send('POST only'); return; }
 
-    const key = req.get('x-sync-key');
-    const expected = SYNC_KEY.value();
-    if (!expected || key !== expected) { res.status(401).send('Unauthorized'); return; }
+    if (!hasSyncKey(req, 'Beeline/CRM report upload')) { res.status(401).send('Unauthorized'); return; }
 
     const type = String(req.query.type || '').toLowerCase();
     if (type !== 'beeline' && type !== 'crm' && type !== 'rcended') {

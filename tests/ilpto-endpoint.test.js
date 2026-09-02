@@ -12,15 +12,25 @@ const src = fs.readFileSync(path.join(__dirname, '..', 'functions', 'index.js'),
 console.log('— the endpoint exists and is guarded —');
 t('it is routed', /req\.query\.ilPto !== undefined/.test(src));
 t('and answers on ?ilPto=1', /function handleIlPto/.test(src));
+/* The check moved into hasSyncKey(), which refuses AND logs why -- a flow
+   posting with a stale key used to be turned away in total silence, which in
+   the logs looks exactly like the flow never running. The guard is the same
+   guard; only its expression changed. */
 t('a push needs the sync key', (() => {
   const h = src.slice(src.indexOf('async function handleIlPto'));
   const body = h.slice(0, h.indexOf('\n}\n'));
-  return /x-sync-key.*SYNC_KEY\.value\(\)/.test(body) && /401/.test(body);
+  return /hasSyncKey\(req/.test(body) && /401/.test(body);
 })());
+t('and a refusal is logged, not swallowed', (() => {
+  const h = src.slice(src.indexOf('function hasSyncKey'));
+  const body = h.slice(0, h.indexOf('\n}\n'));
+  return /console\.warn/.test(body) && /Refused a /.test(body);
+})());
+
 t('GET needs no key, so the page can show the last sync', (() => {
   const h = src.slice(src.indexOf('async function handleIlPto'));
   const body = h.slice(0, h.indexOf('\n}\n'));
-  return body.indexOf("req.method === 'GET'") < body.indexOf('x-sync-key');
+  return body.indexOf("req.method === 'GET'") < body.indexOf('hasSyncKey');
 })());
 t('anything but GET or POST is refused', /Method not allowed/.test(
   src.slice(src.indexOf('async function handleIlPto'), src.indexOf('async function handleIlPto') + 900)));

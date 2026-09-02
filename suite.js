@@ -3554,6 +3554,79 @@
   // still shown, but the button says "Review" and opens the search instead.
   var CONNECT_CONFIDENT = 0.88;
 
+  /* ---------- who is not fully attached ----------
+     A person is only whole when three systems agree about them: RC supplies the
+     profile, the PLX workbook supplies the site and shift, and the WFM timeclock
+     id is what every on-premise pull and every attendance row is keyed on.
+
+     The page used to show one of those gaps -- a workbook row reaching no
+     profile -- and nothing about the other direction. So an associate could be
+     on the roster, on the clock, and simply absent from the workbook, and there
+     was nowhere that said so. This is the other half.
+
+     Sorted so the work is in front: somebody with NO timeclock id is invisible
+     to attendance entirely, which beats somebody merely missing a site. */
+  function rosterGaps(rev) {
+    // A workbook row already suggests this profile, so their gap is the one
+    // being worked in the section above. Counted, not repeated.
+    var suggested = {};
+    (rev.unconnected || []).forEach(function (u) {
+      (u.suggestions || []).forEach(function (x) { if (x.badge) suggested[x.badge] = u; });
+    });
+    var out = { pending: [], missing: [] };
+    profilesInMarket().forEach(function (p) {
+      // Somebody whose assignment has ended needs no shift tag.
+      if (p.status === 'Ended') return;
+      if (p.shift && p.timeclockId) return;               // fully attached
+      var row = {
+        badge: p.badge, name: p.name, empNumber: p.empNumber || '',
+        timeclockId: p.timeclockId || '', shift: p.shift || '',
+        location: p.locationLabel || '', market: p.market || '',
+        needs: (p.shift ? [] : ['the workbook']).concat(p.timeclockId ? [] : ['a timeclock id'])
+      };
+      if (suggested[p.badge]) { row.waiting = suggested[p.badge]; out.pending.push(row); }
+      else out.missing.push(row);
+    });
+    var rank = function (r) { return (r.timeclockId ? 1 : 0) + (r.shift ? 2 : 0); };
+    out.missing.sort(function (a, b) {
+      return rank(a) - rank(b) || String(a.name).localeCompare(String(b.name));
+    });
+    return out;
+  }
+
+  function rosterGapPanel(rev) {
+    var gaps = rosterGaps(rev);
+    var q = state.query.trim().toLowerCase();
+    var rows = gaps.missing.filter(function (r) {
+      if (!q) return true;
+      return (r.name + ' ' + r.empNumber + ' ' + r.badge).toLowerCase().indexOf(q) !== -1;
+    });
+    if (!gaps.missing.length && !gaps.pending.length) return '';
+    return '<section class="suite-panel">' +
+      '<div class="suite-panel-head"><h2>On the roster, not attached to the workbook</h2></div>' +
+      '<p class="perf-note">These have an RC assignment but no row the workbook can be matched to, so they ' +
+      'carry no site and no shift and sit in no headcount block. Connecting cannot fix it — there is ' +
+      'nothing to connect them to. They need <b>adding to the site\u2019s HC tab</b> in the workbook.' +
+      (gaps.pending.length ? ' A further <b>' + gaps.pending.length + '</b> are named on the workbook under ' +
+        'a different spelling and are waiting in the list above.' : '') + '</p>' +
+      (rows.length ? '<div class="suite-table-wrap"><table class="suite-table connect-gaps"><thead><tr>' +
+        '<th>Associate</th><th>EID</th><th>Missing</th><th>Timeclock id</th><th></th>' +
+        '</tr></thead><tbody>' +
+        rows.slice(0, MAX_ROWS).map(function (r) {
+          return '<tr class="cov-row ' + (r.timeclockId ? 'warn' : 'bad') + '">' +
+            '<td><div class="name link" data-profile="' + esc(r.badge) + '">' + esc(r.name) + '</div>' +
+            '<div class="sub">' + esc(r.badge) + (r.market ? ' · ' + esc(r.market) : '') + '</div></td>' +
+            '<td>' + (r.empNumber ? '<b>' + esc(r.empNumber) + '</b>' : '<span class="warn-text">none</span>') + '</td>' +
+            '<td>' + esc(r.needs.join(' and ')) + '</td>' +
+            '<td>' + (r.timeclockId ? '<span class="mono">' + esc(r.timeclockId) + '</span>'
+              : '<span class="warn-text">none — invisible to attendance</span>') + '</td>' +
+            '<td><button class="suite-btn" data-profile="' + esc(r.badge) + '">Open</button></td></tr>';
+        }).join('') + '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length)
+        : empty(gaps.missing.length ? 'Nothing matches that search' : 'Everyone on the roster is attached',
+            gaps.missing.length ? 'Clear the search to see the rest.' : undefined)) +
+      '</section>';
+  }
+
   function connectionsPanel() {
     var rev = connectionData();
     var s = rev.summary;
@@ -3570,17 +3643,25 @@
          connection made in one session could not be corrected in the next. */
       return '<section class="suite-panel"><div class="workflow-empty">' +
         'No PLX workbook roster has been imported yet, so there is nothing to connect. ' +
-        'Import it from the Associates tab first.</div></section>' + connectedPanel();
+        'Import it from the Associates tab first.</div></section>' +
+        rosterGapPanel(rev) + connectedPanel();
     }
 
+    /* Counted from the ROSTER's side as well, because that is the question being
+       asked: is everybody attached? The workbook's own tally answers only half
+       of it. */
+    var gaps = rosterGaps(rev);
+    var active = profilesInMarket().filter(function (p) { return p.status !== 'Ended'; });
+    var whole = active.filter(function (p) { return p.shift && p.timeclockId; }).length;
     return '<div class="metric-strip">' +
-      metric('Connected', s.connected, 'of ' + s.total + ' on the workbook roster',
-        s.connected === s.total ? 'green' : '') +
-      metric('Not connected', s.unconnected, 'Invisible to attendance and points',
-        s.unconnected ? 'orange' : 'green') +
-      metric('Ready to connect', s.withSuggestion, 'A close name is waiting on one click') +
+      metric('Fully attached', whole, 'of ' + active.length + ' active associates have both a ' +
+        'workbook row and a timeclock id', whole === active.length ? 'green' : '') +
+      metric('Ready to connect', s.withSuggestion, 'A close name is waiting on one click',
+        s.withSuggestion ? 'orange' : 'green') +
       metric('Need a decision', s.contested + s.noMatch,
         s.contested + ' contested · ' + s.noMatch + ' with no near match') +
+      metric('Not on the workbook', gaps.missing.length,
+        'No row to match — add them at source', gaps.missing.length ? 'orange' : 'green') +
       '</div>' +
       (s.noEid ? '<div class="warn-banner"><b>' + s.noEid + '</b> workbook row(s) have no EID at all, ' +
         'so they cannot be connected this way — fix the EID column in the workbook.</div>' : '') +
@@ -3597,7 +3678,7 @@
         : empty(s.unconnected ? 'Nothing matches that search' : 'Everyone on the workbook roster is connected',
           s.unconnected ? 'Clear the search to see the rest.'
             : 'New starters will appear here when the workbook next names somebody the roster spells differently.')) +
-      '</section>' + connectedPanel();
+      '</section>' + rosterGapPanel(rev) + connectedPanel();
   }
 
   /* People carrying more than one timeclock id. Often legitimate -- the same
@@ -3688,10 +3769,22 @@
     });
   }
 
+  /* Connections already made are settled work, and there can be hundreds of
+     them. Folded away so the page opens on what still needs doing -- except
+     when one of them needs a second look, in which case it opens itself rather
+     than hiding a problem behind a summary. */
   function connectedPanel() {
     var rows = connectedList();
-    if (!(state.stores.timeclockLinks || []).length) return '';
-    return '<section class="suite-panel"><div class="suite-panel-head">' +
+    var links = state.stores.timeclockLinks || [];
+    if (!links.length) return '';
+    var concerns = rows.filter(function (r) { return r.alsoLinked || !r.onRoster; }).length;
+    return '<details class="source-disclosure connected-fold"' + (concerns ? ' open' : '') + '><summary>' +
+      '<span class="source-dot" aria-hidden="true"></span><span><b>Connected by hand</b><small>' +
+      esc(links.length + ' connection' + (links.length === 1 ? '' : 's') +
+        (concerns ? ' · ' + concerns + ' worth a second look' : ' · nothing outstanding')) +
+      '</small></span><span class="source-toggle">Details</span></summary>' +
+      '<div class="source-disclosure-body">' +
+      '<section class="suite-panel"><div class="suite-panel-head">' +
       '<h2>Connected by hand</h2></div>' +
       '<p class="perf-note">Every connection somebody made, newest concerns first. Disconnecting one puts ' +
       'that associate back on the list above — it does not change the workbook, so if the row there still ' +
@@ -3717,7 +3810,7 @@
               '</tr>';
           }).join('') + '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length)
         : empty('Nothing matches that search', 'Clear the search to see every connection.')) +
-      '</section>';
+      '</section></div></details>';
   }
 
   function disconnect(id) {

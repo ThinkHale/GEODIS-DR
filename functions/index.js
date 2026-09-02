@@ -287,13 +287,30 @@ function isXlsxZip(b) {
    with no delimiter in the first few KB is not one of these exports. Getting
    this wrong in the permissive direction costs a 400 and the previous file is
    kept; getting it wrong the other way is what happened here. */
+/* The start of the file as text, or '' if it is not text at all.
+
+   UTF-16 has to be handled explicitly: it is half NUL bytes, so the plain
+   "any NUL means binary" rule calls a perfectly good CSV binary. Some systems
+   export CSV that way and SheetJS reads it happily -- it was only this guard
+   that would have turned it away. */
+function decodeHead(b) {
+  let head = b.slice(0, 4096);
+  if (head.length % 2) head = head.slice(0, head.length - 1);
+  if (head.length >= 2 && head[0] === 0xFF && head[1] === 0xFE) return head.toString('utf16le');
+  if (head.length >= 2 && head[0] === 0xFE && head[1] === 0xFF) {
+    // Node has no utf16be; swapping the pairs gives the same string.
+    const swapped = Buffer.from(head);
+    swapped.swap16();
+    return swapped.toString('utf16le');
+  }
+  for (let i = 0; i < head.length; i++) if (head[i] === 0) return '';
+  const text = head.toString('utf8');
+  return text.indexOf('\uFFFD') === -1 ? text : '';
+}
 function looksLikeDelimitedText(b) {
   if (!b || b.length < 8) return false;
-  const head = b.slice(0, 4096);
-  for (let i = 0; i < head.length; i++) if (head[i] === 0) return false;
-  const text = head.toString('utf8');
-  if (text.indexOf('\uFFFD') !== -1) return false;
-  return /[,;\t]/.test(text);
+  const text = decodeHead(b);
+  return !!text && /[,;\t]/.test(text);
 }
 
 function unwrapDoubleBase64(buffer) {
@@ -321,8 +338,21 @@ function unwrapDoubleBase64(buffer) {
 /* What a Power Automate flow actually posted, whichever of the two shapes its
    connector produced. Both quirks were learned the hard way on feeds already
    running; a new flow should not have to rediscover either. */
+/* Big-endian UTF-16 swapped to little-endian, which is the only one SheetJS
+   reads. Rare, but it is the difference between a file importing and a morning
+   spent asking why a perfectly good CSV was refused. Anything else is returned
+   untouched, so the common paths are not disturbed. */
+function normalizeUtf16(buffer) {
+  if (!buffer || buffer.length < 4) return buffer;
+  if (buffer[0] !== 0xFE || buffer[1] !== 0xFF) return buffer;
+  const even = buffer.length % 2 ? buffer.slice(0, buffer.length - 1) : buffer;
+  const swapped = Buffer.from(even);
+  swapped.swap16();
+  return swapped;
+}
+
 function flowAttachment(b64) {
-  return unwrapDoubleBase64(decodeWorkbookBody(b64));
+  return normalizeUtf16(unwrapDoubleBase64(decodeWorkbookBody(b64)));
 }
 
 async function readRawFile(type) {

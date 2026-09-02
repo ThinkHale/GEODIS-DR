@@ -275,6 +275,19 @@ const candAoa = [
   t('and a DOUBLE-encoded one is too', (await pushRaw(enc(enc(csvText)), 'reqs.csv')).code === 200);
   t('with the same requests either way', reqs().some(r => r.beelineReq === 'REQ-7001'));
   t('a single-encoded xlsx still works', (await push(reqAoa, 'reqs.xlsx')).code === 200);
+
+  /* UTF-16 is half NUL bytes, so a rule that calls any NUL "binary" throws away
+     a perfectly good CSV. Some systems export exactly that, and big-endian
+     needs swapping because it is the one encoding SheetJS will not read. */
+  const encBuf = b => b.toString('base64');
+  const dblBuf = b => Buffer.from(b.toString('base64'), 'utf8').toString('base64');
+  const le = Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from(csvText, 'utf16le')]);
+  const beBody = Buffer.from(Buffer.from(csvText, 'utf16le')); beBody.swap16();
+  const be = Buffer.concat([Buffer.from([0xFE, 0xFF]), beBody]);
+  t('UTF-16LE is read', (await pushRaw(encBuf(le), 'reqs.csv')).code === 200);
+  t('UTF-16LE double-encoded is read', (await pushRaw(dblBuf(le), 'reqs.csv')).code === 200);
+  t('UTF-16BE is read', (await pushRaw(encBuf(be), 'reqs.csv')).code === 200);
+  t('UTF-16BE double-encoded is read', (await pushRaw(dblBuf(be), 'reqs.csv')).code === 200);
   /* Erring toward unwrapping is safe: a wrong guess produces a 400 and the
      previous export is kept. Erring the other way is what cost a morning. */
   const junk = Buffer.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]).toString('base64');

@@ -385,7 +385,7 @@ body.suite-active{margin:0;background:var(--suite-bg)}
 .suite-account-menu a:hover,.suite-account-menu button:hover{background:var(--suite-soft)}
 
 /* Main scale and shared surfaces */
-.suite-content{width:100%;max-width:1230px;margin:0;padding:36px 30px 52px}
+.suite-content{width:100%;max-width:none;margin:0;padding:36px clamp(22px,2vw,38px) 52px}
 .suite-panel{border:1px solid var(--suite-line);border-radius:var(--suite-radius);background:var(--suite-surface);overflow:hidden;box-shadow:none}
 .suite-panel-head{min-height:56px;padding:12px 17px;border-bottom-color:var(--suite-line)}
 .suite-panel-head h2{font-size:15px;line-height:1.15;letter-spacing:.035em}

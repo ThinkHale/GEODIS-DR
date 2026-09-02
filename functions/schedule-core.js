@@ -128,6 +128,68 @@
     return [first, last].filter(Boolean).sort().join(' ');
   }
 
+  /* ---------- every key a name could reasonably be filed under ----------
+
+     rosterKey() above is not symmetric, and cannot be. From "Alexander Gomez
+     Amarales" it takes the FIRST and LAST token; from "Gomez Amarales,
+     Alexander" it takes the given name and the FIRST surname token. Those agree
+     only when the surname is a single word -- so every compound surname, which
+     on this roster is a large share of the floor, produced two different keys
+     for one person and joined to nothing.
+
+     There is no single key that fixes it, because "Alexander Gomez Amarales"
+     genuinely does not say whether Gomez is a middle name or half the surname.
+     So a name gets a SET of candidates instead: the given name paired with each
+     surname token in turn. Two spellings of one person overlap on at least one:
+
+       Alexander Gomez Amarales  -> alexander gomez, alexander amarales
+       Gomez Amarales, Alexander -> alexander gomez, alexander amarales
+
+     rosterKey()'s own answer is always first in the list, so anything matching
+     today keeps matching by exactly the route it takes now, and the widened keys
+     only ever add. The keys derive from the stored NAME, never from a stored
+     key, so no re-import is needed to pick up the fix.
+
+     Accents fold (Nuñez == Nunez) and hyphens split (Ramirez-Campos ==
+     Ramirez Campos), because both spellings turn up across the two systems. */
+  var NAME_SUFFIXES = { jr: 1, jnr: 1, sr: 1, snr: 1, ii: 1, iii: 1, iv: 1 };
+
+  function foldAccents(v) {
+    var s = String(v == null ? '' : v);
+    // "Nuñez" -> "Nunez". Without this the tilde is simply deleted, leaving
+    // "nuez", which matches nothing on the other side.
+    return s.normalize ? s.normalize('NFD').replace(/[\u0300-\u036f]/g, '') : s;
+  }
+  function nameTokens(v) {
+    return String(v || '').split(/\s+/).filter(Boolean);
+  }
+  function rosterKeys(v) {
+    var out = [], seen = {};
+    var add = function (k) { if (k && !seen[k]) { seen[k] = 1; out.push(k); } };
+    add(rosterKey(v));                       // what today already matches on
+
+    // Punctuation becomes a separator here, unlike rosterKey which deletes it.
+    var s = foldAccents(v).toLowerCase().replace(/[^a-z,]+/g, ' ');
+    var given, family;
+    if (s.indexOf(',') !== -1) {
+      var parts = s.split(',');
+      family = nameTokens(parts[0]);
+      given = nameTokens(parts.slice(1).join(' '));
+    } else {
+      var toks = nameTokens(s);
+      given = toks.slice(0, 1);
+      // Everything after the given name is a possible surname. A middle name
+      // among them costs an extra candidate, never a wrong one on its own.
+      family = toks.slice(1);
+    }
+    // "Gordon jr" is Gordon. A suffix is never the name somebody is filed under.
+    family = family.filter(function (x) { return x.length > 1 && !NAME_SUFFIXES[x]; });
+    var g = given.filter(function (x) { return x.length > 1; })[0] || given[0] || '';
+    if (!g) return out;
+    family.forEach(function (f) { add([g, f].sort().join(' ')); });
+    return out;
+  }
+
   // "Ortiz, Brysin (80-BORTIZ9517)" -> { name: 'Ortiz, Brysin', id: '80-BORTIZ9517' }
   function splitNameAndId(v) {
     var s = String(v == null ? '' : v).trim();
@@ -1119,6 +1181,7 @@
     STATUS_ORDER: STATUS_ORDER,
     nameKey: nameKey,
     rosterKey: rosterKey,
+    rosterKeys: rosterKeys,
     splitNameAndId: splitNameAndId,
     idSuffix: idSuffix,
     isoDate: isoDate,

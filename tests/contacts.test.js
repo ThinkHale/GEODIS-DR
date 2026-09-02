@@ -120,13 +120,13 @@ console.log('— the timeclock id reaches a profile —');
     action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago' }];
   const withShift = SD.buildProfiles(recs, {
     shifts: [{ nameKey: SC.rosterKey('Ada Away'), eid: '80-AAWAY1', shift: '1st' }],
-    shiftKeyOf: SC.rosterKey
+    shiftKeysOf: SC.rosterKeys
   });
   t('it comes off the shift tag', withShift.get('b9').timeclockId === '80-AAWAY1');
   t('and is kept apart from the EID', withShift.get('b9').empNumber === '20750899');
   const linked = SD.buildProfiles(recs, {
     shifts: [{ nameKey: SC.rosterKey('Ada Away'), eid: '80-WRONG', shift: '1st' }],
-    shiftKeyOf: SC.rosterKey,
+    shiftKeysOf: SC.rosterKeys,
     timeclockLinks: [{ badge: 'b9', eid: '80-BYHAND' }]
   });
   t('a link made by hand beats one inferred from a name',

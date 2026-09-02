@@ -179,6 +179,40 @@ const writes = () => posts.filter(p => p.url).length;
   await settle(60);
   t('an admin sees everything', !!$('[data-settings-tab="users"]') && !!$('[data-settings-tab="links"]'));
 
+  /* Where the data came from, when it last arrived, what changed since, which
+     feed has gone quiet -- a manager owns all of that. Somebody working the
+     floor is trying to answer a question about a person, and every line of it
+     sits between them and the answer. */
+  console.log('— a colleague is not shown the plumbing —');
+  w.__setRole('colleague');
+  await settle(60);
+  click($('[data-nav="associates"]'));
+  await settle(40);
+  t('no source disclosure on the roster', !$('.source-disclosure'));
+  t('and no shift-tag tally', !/carry a shift tag/i.test(d.body.textContent));
+  click($('[data-nav="timeoff"]'));
+  await settle(40);
+  t('no tracker sync line on Time Off', !/last pulled/i.test(d.body.textContent));
+  t('but the page is still the page', d.body.textContent.indexOf('PTO') !== -1);
+
+  console.log('— a manager is —');
+  w.__setRole('manager');
+  await settle(60);
+  click($('[data-nav="associates"]'));
+  await settle(40);
+  t('the source disclosure is back', !!$('.source-disclosure'));
+  t('with the shift-tag tally', /carry a shift tag/i.test(d.body.textContent));
+
+  /* The line is drawn at NOTES, not at controls. A colleague may import, so a
+     colleague still gets the button -- just not the commentary around it. */
+  console.log('— the import control is not provenance —');
+  w.__setRole('colleague');
+  await settle(60);
+  click($('[data-nav="associates"]'));
+  await settle(40);
+  t('a colleague can still import', !!$('[data-shift-book]'));
+  t('without the panel of counts around it', !$('.source-disclosure'));
+
   /* Signed out in another tab, or a role taken away mid-session. The server says
      no; the page has to put the gate back rather than quietly stop working. */
   console.log('— refused mid-session —');

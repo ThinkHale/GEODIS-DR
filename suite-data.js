@@ -173,11 +173,38 @@
        namespaces with no overlap. The caller supplies the name-key function
        (ScheduleCore.rosterKey) so this file need not know about that module.
        A name carrying two different shifts is poisoned rather than guessed at. */
+    /* Filed under every key the name could reasonably take, not just the one
+       rosterKey() happened to produce at import -- see rosterKeys() in
+       schedule-core.js for why one key cannot do it.
+
+       The keys are derived from the stored NAME, never from the stored nameKey,
+       so a workbook imported before this existed picks up the wider matching
+       without being re-imported.
+
+       A key that two DIFFERENT tags would answer to is poisoned to null rather
+       than guessed at. Widening the keys widens the chance of a collision --
+       "Carlos Garcia Hernandez" and "Carlos Garcia Lopez" both answer to
+       "carlos garcia" -- and attaching the wrong building and shift to somebody
+       is worse than attaching none. Tags that agree on everything shown are not
+       a collision: either answer is the same answer. */
     var shiftIdx = {};
-    if (stores.shifts && stores.shiftKeyOf) {
+    var tagSignature = function (r) {
+      return [r.shift || '', r.building || '', r.account || ''].join('|');
+    };
+    if (stores.shifts && stores.shiftKeysOf) {
       stores.shifts.forEach(function (r) {
-        if (!r.nameKey) return;
-        shiftIdx[r.nameKey] = (shiftIdx[r.nameKey] && shiftIdx[r.nameKey].shift !== r.shift) ? null : r;
+        if (!r) return;
+        var keys = stores.shiftKeysOf(r.name || '');
+        // A record with no usable name still answers to whatever it was filed
+        // under at import.
+        if (r.nameKey && keys.indexOf(r.nameKey) === -1) keys = keys.concat([r.nameKey]);
+        keys.forEach(function (k) {
+          if (!k) return;
+          if (!(k in shiftIdx)) { shiftIdx[k] = r; return; }
+          var held = shiftIdx[k];
+          if (held === null) return;                       // already poisoned
+          if (tagSignature(held) !== tagSignature(r)) shiftIdx[k] = null;
+        });
       });
     }
 
@@ -294,7 +321,18 @@
         var ph = stores.phoneOf(p);
         if (ph) { p.phone = ph.phone || ''; p.phoneSource = ph.source || ''; p.phoneUpdatedAt = ph.updatedAt || ''; }
       }
-      var sr = stores.shiftKeyOf ? shiftIdx[stores.shiftKeyOf(p.name)] : null;
+      /* Candidates in confidence order: rosterKey()'s own answer first, so a
+         person who matches today matches by exactly the route they take now.
+         The first key the index KNOWS about settles it -- including when what it
+         knows is that the key is ambiguous, which stops there rather than
+         falling through to a looser key and guessing. */
+      var sr = null;
+      if (stores.shiftKeysOf) {
+        var cand = stores.shiftKeysOf(p.name);
+        for (var ci = 0; ci < cand.length; ci++) {
+          if (cand[ci] in shiftIdx) { sr = shiftIdx[cand[ci]]; break; }
+        }
+      }
       if (sr && sr.eid) p.timeclockId = sr.eid;
       // A link somebody made by hand beats one inferred from a name.
       if (linkByBadge[p.badge]) p.timeclockId = linkByBadge[p.badge];

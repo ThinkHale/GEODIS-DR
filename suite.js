@@ -338,7 +338,7 @@
       shifts: state.stores.shifts,
       locations: state.stores.locations,
       associatePto: state.stores.associatePto,
-      shiftKeyOf: ScheduleCore.rosterKey,
+      shiftKeysOf: ScheduleCore.rosterKeys,
       timeclockLinks: state.stores.timeclockLinks,
       phoneOf: (function () {
         var ix = ContactsCore.index(state.stores.contacts, SuiteData.normBadge);
@@ -655,6 +655,10 @@
       esc(label) + '<span class="ext-mark" aria-hidden="true">\u2197</span></a>';
   }
   function sourceDisclosure(title, summary, content, open) {
+    /* For a colleague this collapses to just whatever inside it can be ACTED on
+       -- in practice an import button. The title, the counts and the "last
+       received" line are the manager's view of the plumbing. */
+    if (!showsProvenance()) return mayImport() ? content : '';
     return '<details class="source-disclosure"' + (open ? ' open' : '') + '><summary>' +
       '<span class="source-dot" aria-hidden="true"></span><span><b>' + esc(title) + '</b><small>' +
       esc(summary) + '</small></span><span class="source-toggle">Details</span></summary>' +
@@ -696,17 +700,24 @@
       (mayImport() ? '<label class="suite-btn cov-pick' + (tagged ? '' : ' primary') + '">Import PLX workbook' +
       '<input type="file" accept=".xlsx,.xls" data-shift-book aria-label="Import PLX workbook"></label>' : '') +
       '</div></div>' +
-      '<p class="perf-note"><b>' + tagged + '</b> of ' + total + ' associates in this view carry a shift tag. ' +
-      'The weekly WFM schedule only covers people rostered that week, so a tag is what puts everyone else in the ' +
-      'right headcount block. Import the workbook once, then set the shift on new associates as they start.</p>' +
+      (showsProvenance()
+        ? '<p class="perf-note"><b>' + tagged + '</b> of ' + total + ' associates in this view carry a shift tag. ' +
+          'The weekly WFM schedule only covers people rostered that week, so a tag is what puts everyone else in the ' +
+          'right headcount block. Import the workbook once, then set the shift on new associates as they start.</p>'
+        : '') +
       (imp ? shiftImportReport(imp) : '') + '</section>';
   }
+  /* What an import just did. The headline stays for whoever ran it -- silence
+     after uploading a file is worse than any amount of detail -- but the list of
+     what changed, what the Key disagreed about and which rows were skipped is
+     for the person who maintains the workbook. */
   function shiftImportReport(imp) {
+    var warnings = showsProvenance() && imp.warnings && imp.warnings.length ? imp.warnings : [];
     return '<div class="import-report' + (imp.failed ? ' bad' : '') + '">' +
       '<strong>' + esc(imp.headline) + '</strong>' +
-      (imp.warnings && imp.warnings.length
-        ? '<ul>' + imp.warnings.slice(0, 8).map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') +
-          (imp.warnings.length > 8 ? '<li>…and ' + (imp.warnings.length - 8) + ' more.</li>' : '') + '</ul>'
+      (warnings.length
+        ? '<ul>' + warnings.slice(0, 8).map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') +
+          (warnings.length > 8 ? '<li>…and ' + (warnings.length - 8) + ' more.</li>' : '') + '</ul>'
         : '') + '</div>';
   }
 
@@ -1500,8 +1511,11 @@
 
   function covSaveNote() {
     var c = state.coverage;
-    if (c.saving) return '<div class="cov-saved saving">Saving ' + esc(c.saving) + ' to Firebase…</div>';
-    if (c.savedAt) return '<div class="cov-saved">Saved to Firebase at ' + esc(c.savedAt) + '</div>';
+    /* Confirmation that the upload stuck is for whoever just did it -- silence
+       there is worse than any note. It stops naming Firebase, which tells the
+       person at the keyboard nothing they can use. */
+    if (c.saving) return '<div class="cov-saved saving">Saving ' + esc(c.saving) + '…</div>';
+    if (c.savedAt) return '<div class="cov-saved">Saved and shared at ' + esc(c.savedAt) + '</div>';
     return '';
   }
   function plxMeta() {
@@ -1732,12 +1746,19 @@
       '</div>';
   }
 
+  /* Where the schedule came from is provenance; the people it could not cover
+     are work. A colleague sees only the second half, and only when there is
+     one -- on a clean day the line disappears entirely. */
   function scheduleSourceNote(res) {
     if (res.scheduleSource !== 'workbook') return '';
     var gaps = res.scheduleGaps || [];
+    var gapText = gaps.length ? gaps.length + ' associate(s) have a shift the Key ' +
+      'gives no single set of hours for, so they cannot be scheduled' : '';
+    if (!showsProvenance()) {
+      return gapText ? '<div class="sched-source"><span class="warn-text">' + esc(gapText) + '</span></div>' : '';
+    }
     return '<div class="sched-source">Scheduled from the <b>PLX workbook</b>' +
-      (gaps.length ? ' · <span class="warn-text">' + gaps.length + ' associate(s) have a shift the Key ' +
-        'gives no single set of hours for, so they cannot be scheduled</span>' : '') +
+      (gapText ? ' · <span class="warn-text">' + esc(gapText) + '</span>' : '') +
       '</div>';
   }
 
@@ -2304,7 +2325,7 @@
       '<span>Occurrences and points are recorded on the workbook\u2019s attendance tab, not in this ' +
       'tool. This page reads that sheet, so anything typed here would never reach it \u2014 log it ' +
       'on the workbook and it appears here on the next upload.</span>' +
-      (sync && sync.syncedAt
+      (showsProvenance() && sync && sync.syncedAt
         ? '<span>Last read from the workbook ' + esc(shortWhen(sync.syncedAt)) +
           ' (' + esc(ageLabel(sync.syncedAt)) + ').</span>'
         : '<span class="warn-text">No workbook has been uploaded yet, so nothing has been read from ' +
@@ -2587,6 +2608,8 @@
      current. Until an automation exists at all this is what says the import is
      still a manual job. */
   function ptoSyncNote() {
+    // How the tracker gets here, and when it last did.
+    if (!showsProvenance()) return '';
     var s = state.ilPto.sync;
     if (!s || !s.syncedAt) {
       return '<div class="overview-req-note">No automated pull has run yet — ' +
@@ -4087,6 +4110,8 @@
     ['combined', 'Combined export', 'both halves in one file']
   ];
   function reqSyncBar() {
+    // Which emailed export arrived when, and whether a flow has gone quiet.
+    if (!showsProvenance()) return '';
     var s = state.reqSync;
     if (!s || !s.syncedAt) {
       return '<section class="suite-panel plx-bar"><div class="plx-info">' +
@@ -4689,6 +4714,9 @@
      four, where 20 hours would be five. A threshold that fits one feed says
      nothing useful about the other. */
   function staleNote(iso, what, opts) {
+    // Nobody on the floor can restart a Power Automate flow, and a red banner
+    // about one is noise between them and the roster.
+    if (!showsProvenance()) return '';
     opts = opts || {};
     var after = opts.after || STALE_AFTER_HOURS;
     var h = hoursSince(iso);
@@ -4700,6 +4728,8 @@
   }
 
   function plxBar() {
+    // When the workbook last landed and what came out of it. Plumbing.
+    if (!showsProvenance()) return '';
     var p = state.plx, sync = p.sync;
     var when = sync && sync.syncedAt ? shortWhen(sync.syncedAt) : '';
     return '<section class="suite-panel plx-bar"><div class="plx-info">' +
@@ -4738,6 +4768,18 @@
   function account() { return state.auth.account; }
   function may(action) { return AuthCore.can(account(), action); }
   function mayEdit() { return may('edit'); }
+  /* Provenance: where this data came from, when it last arrived, what changed
+     since, which feed has gone quiet. A manager owns those; somebody working the
+     floor is trying to answer a question about a person and every line of it is
+     between them and the answer.
+
+     The line is drawn at NOTES, not at controls. A colleague who may import
+     still gets the import button -- they just do not get the commentary around
+     it. And anything ACTIONABLE stays for everyone: "this person is not
+     connected", "these numbers may be wrong" are not provenance, they are work.
+
+     'roles' is the manager-and-above permission; see auth-core.js. */
+  function showsProvenance() { return may('roles'); }
   function mayImport() { return may('import'); }
   function mayAdmin() { return may('admin'); }
 
@@ -4824,6 +4866,16 @@
       (a.error ? '<div class="warn-banner">' + esc(a.error) + '</div>' : '') +
       (a.denied ? '<div class="warn-banner">' + esc(a.denied) + '</div>' : '') +
       '<div class="signin-actions"><button class="suite-btn" data-sign-out>Sign out</button></div>');
+  }
+
+  /* The server refused something while this page was open -- signed out in
+     another tab, or a role taken away underneath somebody. It used to appear
+     only on Settings, which is the one page they are least likely to be on when
+     it happens. A page that has quietly stopped saving needs to say so where
+     they are standing. */
+  function deniedBanner() {
+    if (!state.auth.denied) return '';
+    return '<div class="warn-banner">' + esc(state.auth.denied) + '</div>';
   }
 
   /* Said once, at the top, rather than by every control that quietly is not
@@ -4925,7 +4977,7 @@
        cannot ask mayEdit() the way this file does. The class is how it finds
        out -- see body.suite-readonly in suite.css and GEODISSuite.can() below. */
     document.body.classList.toggle('suite-readonly', !mayEdit());
-    var body = dataStateBanner() + readOnlyBanner() + (VIEWS[state.view] || overview)();
+    var body = deniedBanner() + dataStateBanner() + readOnlyBanner() + (VIEWS[state.view] || overview)();
     root.innerHTML = '<div class="suite-layout" data-view="' + esc(state.view) + '">' + navHtml() +
       '<div class="suite-main">' + headerHtml() +
       '<main class="suite-content" id="suite-main" tabindex="-1">' + body + '</main></div></div>' +

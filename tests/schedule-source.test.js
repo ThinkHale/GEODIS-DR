@@ -82,6 +82,11 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
 
   console.log('— the workbook is the schedule —');
   const txt = () => d.body.textContent;
+  /* Naming the source is provenance, so it is a manager-and-above line now. The
+     gap beside it -- people the Key cannot give hours for -- is work, and stays
+     for everyone; that is checked at the end. */
+  w.__setRole('manager');
+  await settle(40);
   t('the page says which source it used', txt().indexOf('Scheduled from the') !== -1);
   t('and names the workbook', txt().indexOf('PLX workbook') !== -1);
   t('somebody off the workbook is not reported as scheduled',
@@ -115,6 +120,15 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
     garyRow && garyRow.textContent.indexOf('Not scheduled') !== -1);
   t('and the workbook is still named as the source',
     d.body.textContent.indexOf('Scheduled from the') !== -1);
+
+  /* A colleague is not told which file the schedule came from -- they cannot
+     change it and it is between them and the floor. Anything they can act on
+     stays. */
+  console.log('— a colleague is not told where it came from —');
+  w.__setRole('colleague');
+  await settle(60);
+  t('no source line', txt().indexOf('Scheduled from the') === -1);
+  t('but the coverage table is still there', !!d.querySelector('.suite-table'));
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

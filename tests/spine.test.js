@@ -110,9 +110,11 @@ const shiftRows = [
   { id: 's3', nameKey: 'cleo nash', shift: 'A', building: '1519', account: '' },
   { id: 's4', nameKey: 'eve kim', shift: '1st', building: '9999', account: '' }
 ];
-const rosterKey = n => String(n||'').toLowerCase().replace(/[^a-z\s,]/g,'')
-  .replace(/,/g,' ').trim().split(/\s+/).filter(Boolean).sort().join(' ');
-const P2 = SuiteData.buildProfiles(records, { shifts: shiftRows, shiftKeyOf: rosterKey, locations: locs });
+/* The real key function, not a copy: these fixtures carry a stored nameKey and
+   no name, which is exactly the shape a workbook imported before the wider
+   matching existed leaves behind. It has to keep joining. */
+const SC2 = require('../schedule-core.js');
+const P2 = SuiteData.buildProfiles(records, { shifts: shiftRows, shiftKeysOf: SC2.rosterKeys, locations: locs });
 t('a bare site gets the default name', P2.get('1001').account === 'Post');
 t('and reads as site · account', P2.get('1001').locationLabel === '1559 · Post');
 t('the Key still wins where it has one', P2.get('1002').account === 'REDBULL SPECIFIC');
@@ -120,7 +122,80 @@ t('an INACTIVE location supplies no default', P2.get('1003').account === '');
 t('but the site number still shows', P2.get('1003').locationLabel === '1519');
 t('a site with no entry at all is left alone', P2.get('1005').account === '');
 t('no locations list is safe',
-  SuiteData.buildProfiles(records, { shifts: shiftRows, shiftKeyOf: rosterKey }).get('1001').account === '');
+  SuiteData.buildProfiles(records, { shifts: shiftRows, shiftKeysOf: SC2.rosterKeys }).get('1001').account === '');
+
+/* The roster spells a name "First Last"; the PLX workbook spells it
+   "Last, First". One key could not span both once a surname had two words, so
+   every compound surname joined to nothing -- no site, no shift, on a large
+   share of a Chicago floor. */
+console.log('— compound surnames reach their shift tag —');
+const compound = [
+  ['Alexander Gomez Amarales', 'Gomez Amarales, Alexander'],
+  ['Anali De Leon campos', 'De Leon campos, Anali'],
+  ['Angie Nuñez Garnica', 'Nunez Garnica, Angie'],
+  ['Bryan Antonio Zapata Rodriguez', 'Zapata Rodriguez, Bryan Antonio'],
+  ['Carlos Garcia Hernandez', 'Garcia Hernandez, Carlos'],
+  ['Antwoin Gordon jr', 'Gordon jr, Antwoin'],
+  ['Alexander Ramirez-Campos', 'Ramirez Campos, Alexander'],
+  ['Ahmad Willingham', 'Willingham, Ahmad']
+];
+const cRecords = compound.map(([person], i) => ({
+  badge: 'C' + i, person, action: 'matched', actionLabel: 'M', reason: '', market: 'Chicago'
+}));
+const cShifts = compound.map(([, book], i) => ({
+  id: 'cs' + i, name: book, nameKey: SC2.rosterKey(book), shift: '1st', building: '150' + i, account: ''
+}));
+const CP = SuiteData.buildProfiles(cRecords, { shifts: cShifts, shiftKeysOf: SC2.rosterKeys });
+compound.forEach(([person], i) => {
+  t(person + ' finds a site', CP.get('C' + i).location === '150' + i);
+});
+t('and a shift with it', compound.every((x, i) => CP.get('C' + i).shift === '1st'));
+
+/* Widening the keys widens the chance of a collision. Attaching the wrong
+   building to somebody is worse than attaching none, so an ambiguous key is
+   refused rather than guessed at. */
+console.log('— but it still refuses to guess —');
+const twoCarlos = [
+  { id: 'x1', name: 'Garcia Hernandez, Carlos', nameKey: 'carlos garcia', shift: '1st', building: '1502', account: '' },
+  { id: 'x2', name: 'Garcia Lopez, Carlos', nameKey: 'carlos garcia', shift: '2nd', building: '1519', account: '' }
+];
+/* Both answer to "carlos garcia", so that key is poisoned. But the roster name
+   carries the second surname, and the candidate list is tried in order -- so the
+   distinguishing key is reached first and settles it. Widening the keys does not
+   only add matches; it lets a fuller name pick between two similar ones. */
+const distinct = SuiteData.buildProfiles(
+  [{ badge: 'D1', person: 'Carlos Garcia Hernandez', action: 'matched', actionLabel: 'M', reason: '', market: 'Chicago' }],
+  { shifts: twoCarlos, shiftKeysOf: SC2.rosterKeys });
+t('a fuller name picks the right one of two similar tags',
+  distinct.get('D1').shift === '1st' && distinct.get('D1').location === '1502');
+
+/* When the roster name genuinely cannot tell them apart, nothing is attached.
+   Putting the wrong building and shift on somebody is worse than putting none. */
+const twins = SuiteData.buildProfiles(
+  [{ badge: 'T1', person: 'Carlos Garcia', action: 'matched', actionLabel: 'M', reason: '', market: 'Chicago' }],
+  { shifts: twoCarlos, shiftKeysOf: SC2.rosterKeys });
+t('a name that cannot tell them apart attaches nothing', !twins.get('T1').shift);
+t('and no site either', !twins.get('T1').location);
+
+// Tags that agree on everything shown are not a collision: either is the same answer.
+const same = SuiteData.buildProfiles(
+  [{ badge: 'S1', person: 'Carlos Garcia Hernandez', action: 'matched', actionLabel: 'M', reason: '', market: 'Chicago' }],
+  { shifts: [
+    { id: 'y1', name: 'Garcia Hernandez, Carlos', nameKey: 'carlos garcia', shift: '1st', building: '1502', account: '' },
+    { id: 'y2', name: 'Garcia Herrera, Carlos', nameKey: 'carlos garcia', shift: '1st', building: '1502', account: '' }
+  ], shiftKeysOf: SC2.rosterKeys });
+t('duplicates that say the same thing still match', same.get('S1').shift === '1st');
+
+/* The fix has to reach data already stored. Shift records written before it
+   existed carry a nameKey computed by the OLD rule and no widened keys, so the
+   candidates are derived from the stored name instead. */
+console.log('— and it works on a workbook imported before the fix —');
+const legacy = SuiteData.buildProfiles(
+  [{ badge: 'L1', person: 'Alexander Gomez Amarales', action: 'matched', actionLabel: 'M', reason: '', market: 'Chicago' }],
+  { shifts: [{ id: 'z1', name: 'Gomez Amarales, Alexander',
+      nameKey: 'alexander gomez', shift: '3rd', building: '1541', account: '' }],
+    shiftKeysOf: SC2.rosterKeys });
+t('no re-import needed', legacy.get('L1').shift === '3rd' && legacy.get('L1').location === '1541');
 
 console.log('\n'+pass+' passed, '+fail+' failed');
 process.exit(fail?1:0);

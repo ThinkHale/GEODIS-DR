@@ -85,6 +85,10 @@ const shiftCellFor = name => {
 (async () => {
   await settle(40);
   d.dispatchEvent(new w.CustomEvent('geodis:records', { detail: { records } }));
+  /* The source panel around the import control -- the counts, the last-import
+     diff -- is a manager's view of the plumbing. The control itself is not, and
+     is checked for a colleague at the end. */
+  w.__setRole('manager');
   click($('[data-nav="associates"]'));
 
   console.log('— before any import —');

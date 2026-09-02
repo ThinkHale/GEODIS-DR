@@ -39,6 +39,11 @@ const send = updatedAt => d.dispatchEvent(new w.CustomEvent('geodis:records', { 
 
 (async () => {
   await settle(60);
+  /* Staleness is a message for whoever can chase a stopped Power Automate flow.
+     Nobody on the floor can, so it is a manager-and-above note now -- these
+     assertions are about what a manager sees. */
+  w.__setRole('manager');
+  await settle(40);
 
   console.log('— a fresh roster says nothing alarming —');
   send(hoursAgo(3));
@@ -134,6 +139,15 @@ const send = updatedAt => d.dispatchEvent(new w.CustomEvent('geodis:records', { 
   await showReqs();
   t('named as never having arrived', txt().indexOf('has never arrived') !== -1);
   t('rather than being left off the list entirely', txt().indexOf('Candidate Status per Req') !== -1);
+
+  /* The same page, for somebody working it. A red banner about an automation
+     they cannot restart is between them and the answer they came for. */
+  console.log('— and a colleague is not shown any of it —');
+  w.__setRole('colleague');
+  await settle(60);
+  t('no staleness banner', !/has not refreshed|has not arrived/i.test(d.body.textContent));
+  t('no flow named at them', !/Power Automate/i.test(d.body.textContent));
+  t('but the page itself still works', !!$('.suite-nav-btn'));
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

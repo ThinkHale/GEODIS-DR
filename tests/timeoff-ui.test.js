@@ -174,7 +174,8 @@ const rowFor = name => $$('.suite-table tbody tr').find(tr => tr.textContent.ind
   t('a colleague gets the controls back', $$('.status-select').length > 0);
 
   console.log('— completed requests are out of the way by default —');
-  t('the finished request is not listed', !rowFor('2026-07-01'));
+  const completedRow = () => rowFor('IL Shared PTO Tracker');
+  t('the finished request is not listed', !completedRow());
   t('the ones still moving are', $$('.status-select').length === 3);
   const done = $('#timeoff-completed');
   t('a Show completed box is offered', !!done);
@@ -185,9 +186,9 @@ const rowFor = name => $$('.suite-table tbody tr').find(tr => tr.textContent.ind
   done.checked = true;
   done.dispatchEvent(new w.Event('change', { bubbles: true }));
   await settle(20);
-  t('the finished request is listed', !!rowFor('2026-07-01'));
+  t('the finished request is listed', !!completedRow());
   t('alongside the rest', $$('.status-select').length === 4);
-  t('showing where it stands', rowFor('2026-07-01').querySelector('.status-select').value === 'Completed');
+  t('showing where it stands', completedRow().querySelector('.status-select').value === 'Completed');
   t('the box stays ticked', $('#timeoff-completed').checked);
 
   console.log('— and unticking hides them again —');
@@ -195,7 +196,7 @@ const rowFor = name => $$('.suite-table tbody tr').find(tr => tr.textContent.ind
   done2.checked = false;
   done2.dispatchEvent(new w.Event('change', { bubbles: true }));
   await settle(20);
-  t('back out of the way', !rowFor('2026-07-01'));
+  t('back out of the way', !completedRow());
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

@@ -372,6 +372,124 @@
      is the hardest kind of bug to see. */
   function url(name) { return API + '?' + name + '=1'; }
 
+  /* ---------- load state + last-good values ----------
+     A failed refresh is not an empty collection. An empty collection is a fact
+     returned successfully by the server; a failed refresh means the browser does
+     not know what is there now. Keep the last successful value in memory and put
+     the failure beside it, so callers can keep rendering trusted data while also
+     labelling it stale.
+
+     The cache is deliberately memory-only. These collections contain workforce
+     data and must not be copied into localStorage merely to survive a reload. */
+  var LOAD_STATE = Object.create(null);
+  var LAST_GOOD = Object.create(null);
+
+  function nowIso() { return new Date().toISOString(); }
+  function owns(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
+  function copyData(value) {
+    if (value == null || typeof value !== 'object') return value;
+    return JSON.parse(JSON.stringify(value));
+  }
+  function publicError(err, at) {
+    return {
+      name: (err && err.name) || 'Error',
+      message: (err && err.message) || 'The source could not be loaded.',
+      status: err && (err.status || err.denied) ? Number(err.status || err.denied) : null,
+      denied: !!(err && err.denied),
+      at: at
+    };
+  }
+  function publicLoadState(source) {
+    var s = LOAD_STATE[source];
+    if (!s) {
+      return { source: source, status: 'idle', hasData: false, attemptedAt: '', loadedAt: '',
+        failedAt: '', error: null };
+    }
+    return {
+      source: s.source,
+      status: s.status,
+      hasData: !!s.hasData,
+      attemptedAt: s.attemptedAt || '',
+      loadedAt: s.loadedAt || '',
+      failedAt: s.failedAt || '',
+      error: s.error ? Object.assign({}, s.error) : null
+    };
+  }
+  function getSourceState(source) { return publicLoadState(String(source || '')); }
+  function getSourceStates() {
+    var out = {};
+    Object.keys(LOAD_STATE).forEach(function (source) { out[source] = publicLoadState(source); });
+    return out;
+  }
+  function announceSourceState(source) {
+    if (typeof document === 'undefined' || !document.dispatchEvent) return;
+    var EventCtor = root.CustomEvent || (typeof CustomEvent !== 'undefined' ? CustomEvent : null);
+    if (!EventCtor) return;
+    document.dispatchEvent(new EventCtor('geodis:data-state', {
+      detail: publicLoadState(source)
+    }));
+  }
+  function beginLoad(source) {
+    var prior = LOAD_STATE[source] || {};
+    var attempt = (prior.attempt || 0) + 1;
+    var cached = LAST_GOOD[source];
+    LOAD_STATE[source] = {
+      source: source,
+      attempt: attempt,
+      status: cached ? 'refreshing' : 'loading',
+      hasData: !!cached,
+      attemptedAt: nowIso(),
+      loadedAt: cached ? cached.loadedAt : '',
+      failedAt: '',
+      error: null
+    };
+    announceSourceState(source);
+    return attempt;
+  }
+  function loadSource(source, request) {
+    var attempt = beginLoad(source);
+    var work;
+    try { work = request(); } catch (err) { work = Promise.reject(err); }
+    return Promise.resolve(work).then(function (value) {
+      /* A slower, older request must not overwrite a newer result. It may still
+         answer its own caller, but it no longer owns the shared source state. */
+      if (!LOAD_STATE[source] || LOAD_STATE[source].attempt !== attempt) return copyData(value);
+      var loadedAt = nowIso();
+      LAST_GOOD[source] = { value: copyData(value), loadedAt: loadedAt };
+      LOAD_STATE[source] = {
+        source: source, attempt: attempt, status: 'ready', hasData: true,
+        attemptedAt: LOAD_STATE[source].attemptedAt, loadedAt: loadedAt,
+        failedAt: '', error: null
+      };
+      announceSourceState(source);
+      return copyData(value);
+    }).catch(function (err) {
+      var failedAt = nowIso();
+      var cached = LAST_GOOD[source];
+      if (LOAD_STATE[source] && LOAD_STATE[source].attempt === attempt) {
+        LOAD_STATE[source] = {
+          source: source,
+          attempt: attempt,
+          /* A denied request never serves cached workforce data back into the
+             app. The auth gate owns that transition. The cache stays in memory
+             only so a successful re-authenticated retry can supersede it. */
+          status: err && err.denied ? 'denied' : cached ? 'stale' : 'error',
+          hasData: !!cached,
+          attemptedAt: LOAD_STATE[source].attemptedAt,
+          loadedAt: cached ? cached.loadedAt : '',
+          failedAt: failedAt,
+          error: publicError(err, failedAt)
+        };
+        announceSourceState(source);
+      }
+      if (cached && !(err && err.denied)) return copyData(cached.value);
+      err = err || new Error('The source could not be loaded.');
+      err.source = source;
+      err.sourceState = publicLoadState(source);
+      throw err;
+    });
+  }
+
   function authHeaders(base) {
     var headers = Object.assign({}, base || {});
     var auth = root.SuiteAuth;
@@ -402,20 +520,37 @@
       announceDenied(res.status);
       var err = new Error(res.status === 401 ? 'Not signed in.' : 'Not allowed.');
       err.denied = res.status;
+      err.status = res.status;
       throw err;
     }
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (!res.ok) {
+      var httpErr = new Error('HTTP ' + res.status);
+      httpErr.status = res.status;
+      throw httpErr;
+    }
     return res.json();
   }
 
   function loadCollection(name) {
-    return authedFetch(url(name), { cache: 'no-store' })
-      .then(checked)
-      .then(function (data) { return data[COLLECTIONS[name]] || []; })
-      .catch(function (err) {
-        if (!err.denied) console.warn('Could not load the shared "' + name + '" collection.', err);
-        return [];
-      });
+    return loadSource(name, function () {
+      if (!COLLECTIONS[name]) throw new Error('Unknown shared collection "' + name + '".');
+      return authedFetch(url(name), { cache: 'no-store' })
+        .then(checked)
+        .then(function (data) {
+          var key = COLLECTIONS[name];
+          /* Older deployments and several offline fixtures answer `{}` for a
+             collection that has never been created. That is still a successful
+             server answer, and is the only circumstance in which an absent key
+             becomes an empty collection. Network, HTTP, auth and JSON failures
+             have already thrown above and can never reach this line. */
+          return data && owns(data, key) && Array.isArray(data[key]) ? data[key] : [];
+        });
+    }).catch(function (err) {
+      /* A cache-backed failure has already resolved in loadSource(). Reaching
+         this catch means there was no trustworthy value to return. */
+      if (!err.denied) console.warn('Could not load the shared "' + name + '" collection.', err);
+      throw err;
+    });
   }
 
   // `name` is either a collection name or a ready-made query string.
@@ -465,14 +600,26 @@
   function getJson(u) {
     return authedFetch(u, { cache: 'no-store' }).then(checked);
   }
+  function getJsonSource(source, u, select) {
+    return loadSource(source, function () {
+      return getJson(u).then(select || function (d) { return d; });
+    }).catch(function (err) {
+      /* loadSource resolves cache-backed failures. Only a source with no trusted
+         value (or a denied request) reaches here. Keep the error observable. */
+      if (!err.denied) console.warn('Could not load the shared "' + source + '" source.', err);
+      throw err;
+    });
+  }
   /* The reconciliation snapshot -- the roster. Fetched through the function so
      it is behind the same account gate as everything else, rather than straight
      off a public Storage URL that needed no sign-in at all. */
-  function loadSnapshot() { return getJson(API + '?snapshot=1'); }
+  function loadSnapshot() {
+    return getJsonSource('snapshot', API + '?snapshot=1');
+  }
   function loadSchedule(period) {
-    return getJson(API + '?schedule=1&period=' + encodeURIComponent(period))
-      .then(function (d) { return d.schedule && d.schedule.people ? d.schedule : null; })
-      .catch(function (err) { console.warn('Could not load the stored schedule.', err); return null; });
+    return getJsonSource('schedule:' + period,
+      API + '?schedule=1&period=' + encodeURIComponent(period),
+      function (d) { return d.schedule && d.schedule.people ? d.schedule : null; });
   }
   // Which days have stored checks, for the review picker.
   /* Admin collections, loaded only when the Settings page is opened -- most
@@ -486,18 +633,14 @@
      It lives in another Microsoft tenant, so nothing here can go and fetch it:
      somebody uploads it, and loadPlxSync() reports what that upload produced. */
   function loadPlxSync() {
-    return getJson(API + '?plx=1')
-      .then(function (d) { return d.sync || {}; })
-      .catch(function (err) { console.warn('Could not read the PLX sync state.', err); return {}; });
+    return getJsonSource('plxSync', API + '?plx=1', function (d) { return d.sync || {}; });
   }
   /* ---------- the shared IL PTO tracker ----------
      Watched on SharePoint by a flow that fires when the file changes, so unlike
      the PLX workbook nobody has to remember to upload it. This reports what that
      flow last did. */
   function loadIlPtoSync() {
-    return getJson(API + '?ilPto=1')
-      .then(function (d) { return d.sync || {}; })
-      .catch(function (err) { console.warn('Could not read the IL PTO tracker sync state.', err); return {}; });
+    return getJsonSource('ilPtoSync', API + '?ilPto=1', function (d) { return d.sync || {}; });
   }
 
   // Uploading the workbook from the browser. Everything it carries -- shift tags,
@@ -509,35 +652,32 @@
      The browser only ever READS what those pushes produced; the manual import on
      the Beeline Requests page writes the collections directly, as it always has. */
   function loadReqSync() {
-    return getJson(API + '?reqSync=1')
-      .then(function (d) { return d.sync || {}; })
-      .catch(function (err) { console.warn('Could not read the Beeline sync state.', err); return {}; });
+    return getJsonSource('reqSync', API + '?reqSync=1', function (d) { return d.sync || {}; });
   }
 
   /* ---------- payroll periods ---------- */
   function loadPayrollPeriods() {
-    return getJson(API + '?payroll=1')
-      .then(function (d) { return d.periods || []; })
-      .catch(function (err) { console.warn('Could not list payroll periods.', err); return []; });
+    return getJsonSource('payrollPeriods', API + '?payroll=1', function (d) { return d.periods || []; });
   }
   function loadPayrollPeriod(week) {
-    return getJson(API + '?payroll=1&week=' + encodeURIComponent(week))
-      .then(function (d) { return d.period || {}; })
-      .catch(function (err) { console.warn('Could not load the payroll period.', err); return {}; });
+    return getJsonSource('payrollPeriod:' + week,
+      API + '?payroll=1&week=' + encodeURIComponent(week),
+      function (d) { return d.period || {}; });
   }
   function savePayrollClose(week, closesAt) {
     return post('payroll=1&week=' + encodeURIComponent(week), { closesAt: closesAt });
   }
+  function savePayrollReview(week, review) {
+    return post('payroll=1&week=' + encodeURIComponent(week), { review: review });
+  }
 
   function loadCoverageDates() {
-    return getJson(API + '?coverage=1')
-      .then(function (d) { return d.dates || []; })
-      .catch(function (err) { console.warn('Could not list stored coverage.', err); return []; });
+    return getJsonSource('coverageDates', API + '?coverage=1', function (d) { return d.dates || []; });
   }
   function loadCoverage(date) {
-    return getJson(API + '?coverage=1&date=' + encodeURIComponent(date))
-      .then(function (d) { return d.coverage || {}; })
-      .catch(function (err) { console.warn('Could not load stored coverage.', err); return {}; });
+    return getJsonSource('coverage:' + date,
+      API + '?coverage=1&date=' + encodeURIComponent(date),
+      function (d) { return d.coverage || {}; });
   }
   function saveCheck(date, check) {
     return post('coverage=1&date=' + encodeURIComponent(date), { check: check });
@@ -546,8 +686,9 @@
     return post('coverage=1&date=' + encodeURIComponent(date), { document: document });
   }
 
-  // Load every shared collection at once. Individual failures degrade to an
-  // empty list rather than taking the whole suite down.
+  // Load every shared collection at once. A source with a last-good value returns
+  // that value and marks itself stale. A first-load failure rejects the bundle,
+  // because manufacturing an empty array would claim the collection was empty.
   function loadAll() {
     return Promise.all(['attendance', 'timeoff', 'requisitions', 'performance', 'shifts',
       'discrepancies', 'associatePto', 'locations', 'appConfig', 'timeclockLinks', 'tasks',
@@ -576,6 +717,8 @@
     bandFor: bandFor,
     scoreOf: scoreOf,
     loadCollection: loadCollection,
+    getSourceState: getSourceState,
+    getSourceStates: getSourceStates,
     loadSnapshot: loadSnapshot,
     authedFetch: authedFetch,
     loadAll: loadAll,
@@ -594,6 +737,7 @@
     loadPayrollPeriods: loadPayrollPeriods,
     loadPayrollPeriod: loadPayrollPeriod,
     savePayrollClose: savePayrollClose,
+    savePayrollReview: savePayrollReview,
     saveCheck: saveCheck,
     saveDocumentation: saveDocumentation
   };

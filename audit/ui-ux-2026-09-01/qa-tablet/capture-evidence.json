@@ -1,0 +1,119 @@
+{
+  "capturedAt": "2026-09-02T13:48:17.437Z",
+  "viewport": {
+    "width": 1440,
+    "height": 1000
+  },
+  "screenshots": [
+    "01-overview.png",
+    "02-tasks.png",
+    "03-associates.png",
+    "04-associate-profile.png",
+    "05-on-premise.png",
+    "06-attendance.png",
+    "07-time-off.png",
+    "08-payroll-discrepancies.png",
+    "09-payroll-hours.png",
+    "10-beeline-requests.png",
+    "11-assignment-reconciliation.png",
+    "12-settings-account.png",
+    "13-settings-users.png",
+    "14-settings-connections.png",
+    "15-settings-locations.png",
+    "16-settings-shifts.png",
+    "17-settings-app.png",
+    "18-add-task-modal.png",
+    "19-sign-in.png",
+    "20-mobile-overview.png"
+  ],
+  "keyboard": [
+    {
+      "selector": ".suite-nav-btn",
+      "present": true,
+      "outline": "color(srgb 0.350588 0.613176 0.872941) solid 3px",
+      "boxShadow": "none",
+      "focused": true
+    },
+    {
+      "selector": ".suite-add",
+      "present": true,
+      "outline": "rgb(36, 103, 196) solid 3px",
+      "boxShadow": "none",
+      "focused": true
+    },
+    {
+      "selector": ".suite-select",
+      "present": true,
+      "outline": "rgb(29, 74, 122) solid 2px",
+      "boxShadow": "none",
+      "focused": true
+    },
+    {
+      "selector": ".suite-btn",
+      "present": false
+    }
+  ],
+  "mobileNav": [
+    {
+      "nav": "overview",
+      "top": 111,
+      "bottom": 151,
+      "visible": true
+    },
+    {
+      "nav": "tasks",
+      "top": 187,
+      "bottom": 227,
+      "visible": true
+    },
+    {
+      "nav": "associates",
+      "top": 229,
+      "bottom": 269,
+      "visible": true
+    },
+    {
+      "nav": "coverage",
+      "top": 271,
+      "bottom": 311,
+      "visible": true
+    },
+    {
+      "nav": "attendance",
+      "top": 313,
+      "bottom": 353,
+      "visible": true
+    },
+    {
+      "nav": "timeoff",
+      "top": 355,
+      "bottom": 395,
+      "visible": true
+    },
+    {
+      "nav": "payroll",
+      "top": 431,
+      "bottom": 471,
+      "visible": true
+    },
+    {
+      "nav": "requisitions",
+      "top": 473,
+      "bottom": 513,
+      "visible": true
+    },
+    {
+      "nav": "reconciliation",
+      "top": 515,
+      "bottom": 555,
+      "visible": true
+    },
+    {
+      "nav": "settings",
+      "top": 557,
+      "bottom": 597,
+      "visible": true
+    }
+  ],
+  "problems": []
+}

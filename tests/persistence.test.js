@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const SC = require('../schedule-core.js');
+const MarketAccess = require('../functions/market-access-core.js');
 
 let pass = 0, fail = 0;
 const t = (n, c) => { if (c) pass++; else { fail++; console.log('  FAIL: ' + n); } };
@@ -123,9 +124,9 @@ const NOTES_ORIGIN = 'https://geodis.ebtools.pro';
 async function readJsonFile(p) { return files[p] ? JSON.parse(files[p]) : {}; }
 function setKvCors() {}
 const { handleSchedule, handleCoverage, dateKeyOf } = new Function(
-  'bucket', 'NOTES_ORIGIN', 'readJsonFile', 'setKvCors', 'console', 'requireUser',
+  'bucket', 'NOTES_ORIGIN', 'readJsonFile', 'setKvCors', 'console', 'requireUser', 'MarketAccess',
   consts + handlers + '\nreturn {handleSchedule,handleCoverage,dateKeyOf};'
-)(bucket, NOTES_ORIGIN, readJsonFile, setKvCors, console, auth.requireUser);
+)(bucket, NOTES_ORIGIN, readJsonFile, setKvCors, console, auth.requireUser, MarketAccess);
 
 const mkRes = () => { const r = { code: null, body: null, set() { return r }, status(c) { r.code = c; return r }, json(b) { r.body = b; return r }, send() { return r } }; return r; };
 /* `get` answers each header by name now. It used to answer every header with the
@@ -180,6 +181,9 @@ const call = async (h, method, query, body, origin, token) => {
   t('documentation saved', r.code === 200);
   let doc = JSON.parse(files['coverage/days/2026-08-25.json']);
   t('stored against the person key', doc.documented['b:80-CNASH1003'].reason === 'Called in, car trouble');
+  t('coverage documentation records the authenticated editor',
+    doc.documented['b:80-CNASH1003'].updatedBy === 'Tester' &&
+    doc.documented['b:80-CNASH1003'].updatedById === 'tester@geodis.com');
   t('documenting did not disturb the checks', doc.checks.length === 2);
   await call(handleCoverage, 'POST', { date: '2026-08-25' }, { check: later });
   t('a later check preserves documentation', JSON.parse(files['coverage/days/2026-08-25.json']).documented['b:80-CNASH1003'].disposition === 'Called in');

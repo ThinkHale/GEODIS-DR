@@ -218,6 +218,10 @@
       afterClose: afterClose
     };
   }
+  function changeKey(c) {
+    c = c || {};
+    return 'CHG-' + hashOf([c.badge, c.weekEnding, c.at, c.kind, c.from, c.to].join('|'));
+  }
   function round2(n) { return Math.round(Number(n || 0) * 100) / 100; }
   function summarize(changes, before, after) {
     var added = 0, removed = 0, changed = 0, net = 0;
@@ -247,7 +251,8 @@
     toDiscrepancy: toDiscrepancy,
     normalizeHours: normalizeHours,
     compareHours: compareHours,
-    rowKey: rowKey
+    rowKey: rowKey,
+    changeKey: changeKey
   };
   root.PayrollCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

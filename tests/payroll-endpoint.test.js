@@ -7,6 +7,7 @@ const Intake = require('../form-intake.js');
 const TimeOff = require('../timeoff-core.js');
 const Payroll = require('../payroll-core.js');
 const Core = require('../reconcile-core.js');
+const MarketAccess = require('../functions/market-access-core.js');
 
 let pass = 0, fail = 0;
 const t = (n, c) => { if (c) pass++; else { fail++; console.log('  FAIL: ' + n); } };
@@ -43,10 +44,10 @@ const SYNC_KEY = { value: () => KEY };
 
 const built = new Function(
   'bucket', 'readJsonFile', 'setKvCors', 'SYNC_KEY', 'SNAPSHOT_PATH', 'NOTES_ORIGIN',
-  'Sched', 'Intake', 'TimeOff', 'Payroll', 'console', 'requireUser',
+  'Sched', 'Intake', 'TimeOff', 'Payroll', 'console', 'requireUser', 'MarketAccess',
   consts + helpers + dated + handlers +
   '\nreturn {handleDiscrepancyIntake, handlePayroll, COLLECTIONS, PAYROLL_DIR};'
-)(bucket, readJsonFile, setKvCors, SYNC_KEY, SNAPSHOT_PATH, NOTES_ORIGIN, Sched, Intake, TimeOff, Payroll, console, auth.requireUser);
+)(bucket, readJsonFile, setKvCors, SYNC_KEY, SNAPSHOT_PATH, NOTES_ORIGIN, Sched, Intake, TimeOff, Payroll, console, auth.requireUser, MarketAccess);
 const { handleDiscrepancyIntake, handlePayroll, COLLECTIONS, PAYROLL_DIR } = built;
 
 const mkRes = () => { const r = { code: null, body: null, set() { return r }, status(c) { r.code = c; return r }, json(b) { r.body = b; return r }, send() { return r } }; return r; };
@@ -128,7 +129,24 @@ files[SNAPSHOT_PATH] = JSON.stringify({
   r = await payroll('POST', { week: W }, { closesAt: '2026-09-01T17:00:00Z' }, { origin: NOTES_ORIGIN });
   t('accepted from the app', r.code === 200);
   t('recorded', period(W).closesAt === '2026-09-01T17:00:00Z');
+  t('close change carries the authenticated actor',
+    period(W).closeBy === 'Tester' && period(W).closeById === 'tester@geodis.com' &&
+    !!Date.parse(period(W).closeUpdatedAt));
   t('and the snapshot survived it', period(W).snapshots.length === 1);
+  let beforeWrite = files[PAYROLL_DIR + '/' + W + '.json'];
+  r = await payroll('POST', { week: W }, { closesAt: '2026-02-30T17:00:00Z' }, { origin: NOTES_ORIGIN });
+  t('an impossible close timestamp is rejected without mutation',
+    r.code === 400 && files[PAYROLL_DIR + '/' + W + '.json'] === beforeWrite);
+  r = await payroll('POST', { week: W }, { closesAt: '2026-09-01T17:00:00-05:00' }, { origin: NOTES_ORIGIN });
+  t('a close timestamp must be the browser UTC ISO contract',
+    r.code === 400 && files[PAYROLL_DIR + '/' + W + '.json'] === beforeWrite);
+  r = await payroll('POST', { week: W }, { closesAt: '' }, { origin: NOTES_ORIGIN });
+  t('clearing the close time is explicit and still attributed', r.code === 200 &&
+    period(W).closesAt === '' && period(W).closeBy === 'Tester' &&
+    period(W).closeById === 'tester@geodis.com' && !!Date.parse(period(W).closeUpdatedAt));
+  r = await payroll('POST', { week: W }, { closesAt: '2026-09-01T17:00:00Z' }, { origin: NOTES_ORIGIN });
+  t('close time can be restored after clearing',
+    r.code === 200 && period(W).closesAt === '2026-09-01T17:00:00Z');
 
   console.log('— a later pull, after close —');
   r = await payroll('POST', { week: W },
@@ -142,9 +160,61 @@ files[SNAPSHOT_PATH] = JSON.stringify({
   t('changes accumulate on the period', period(W).changes.length === 3);
   t('every change carries the flag', period(W).changes.every(c => c.afterClose === true));
 
+  console.log('— reviewing a stored hours change —');
+  const reviewedChange = period(W).changes[0];
+  const reviewKey = Payroll.changeKey(reviewedChange);
+  beforeWrite = files[PAYROLL_DIR + '/' + W + '.json'];
+  r = await payroll('POST', { week: W }, { review: {
+    key: reviewKey, reviewed: true, note: 'Bypass attempt'
+  } }, {});
+  t('a review requires the browser origin and leaves storage untouched',
+    r.code === 403 && files[PAYROLL_DIR + '/' + W + '.json'] === beforeWrite);
+  r = await payroll('POST', { week: W }, { review: {
+    key: reviewKey, reviewed: true, note: 'Confirmed against the source.', by: 'Forged client name'
+  } }, { origin: NOTES_ORIGIN });
+  let savedReview = period(W).reviews[reviewKey];
+  t('review saved against the deterministic stored change key',
+    r.code === 200 && r.body.reviewed === true && savedReview.note === 'Confirmed against the source.');
+  t('review attribution comes from the authenticated account, not the body',
+    savedReview.by === 'Tester' && savedReview.byId === 'tester@geodis.com' &&
+    !!Date.parse(savedReview.at));
+
+  auth.as({ email: 'payroll.manager@geodis.com', name: 'Payroll Manager', role: 'admin', markets: [] });
+  r = await payroll('POST', { week: W }, { review: {
+    key: reviewKey, reviewed: true, note: 'Updated decision.'
+  } }, { origin: NOTES_ORIGIN });
+  savedReview = period(W).reviews[reviewKey];
+  t('review update replaces the note and actor metadata', r.code === 200 &&
+    savedReview.note === 'Updated decision.' && savedReview.by === 'Payroll Manager' &&
+    savedReview.byId === 'payroll.manager@geodis.com');
+
+  beforeWrite = files[PAYROLL_DIR + '/' + W + '.json'];
+  r = await payroll('POST', { week: W }, { review: {
+    key: reviewKey, reviewed: true, note: 'x'.repeat(501)
+  } }, { origin: NOTES_ORIGIN });
+  t('a review note over 500 characters is rejected atomically',
+    r.code === 400 && files[PAYROLL_DIR + '/' + W + '.json'] === beforeWrite);
+  r = await payroll('POST', { week: W }, { review: {
+    key: reviewKey, reviewed: false, note: ''
+  } }, { origin: NOTES_ORIGIN });
+  t('clearing a review deletes its keyed record',
+    r.code === 200 && r.body.review === null && period(W).reviews[reviewKey] === undefined);
+
+  r = await payroll('POST', { week: W }, { review: {
+    key: reviewKey, reviewed: true, note: 'Keep through the next sync.'
+  } }, { origin: NOTES_ORIGIN });
+  t('review can be saved again after clearing', r.code === 200 && !!period(W).reviews[reviewKey]);
+  r = await payroll('POST', { week: W }, {
+    rows: [{ badge: '215001', name: 'Luz Grachen', hours: 45 }, { badge: '3', name: 'C', hours: 8 }],
+    takenAt: '2026-09-03T15:00:00Z'
+  }, { 'x-sync-key': KEY });
+  t('automation ingestion preserves reviews and close audit metadata', r.code === 200 &&
+    period(W).reviews[reviewKey].note === 'Keep through the next sync.' &&
+    period(W).closeBy === 'Tester' && period(W).closeById === 'tester@geodis.com');
+
   console.log('— reading it back —');
   r = await payroll('GET', { week: W });
-  t('period read back', r.body.period.snapshots.length === 2);
+  t('period read back', r.body.period.snapshots.length === 3);
   r = await payroll('GET', {});
   t('the week is in the index', r.body.periods.indexOf(W) !== -1);
 
@@ -152,6 +222,12 @@ files[SNAPSHOT_PATH] = JSON.stringify({
   t('bad week refused', (await payroll('POST', { week: '../x' }, { rows: [] }, { 'x-sync-key': KEY })).code === 400);
   t('neither rows nor closesAt refused',
     (await payroll('POST', { week: W }, { junk: 1 }, { 'x-sync-key': KEY })).code === 400);
+  beforeWrite = files[PAYROLL_DIR + '/' + W + '.json'];
+  t('an unknown review key is refused without mutation',
+    (await payroll('POST', { week: W }, { review: {
+      key: 'CHG-notfound', reviewed: true, note: ''
+    } }, { origin: NOTES_ORIGIN })).code === 404 &&
+    files[PAYROLL_DIR + '/' + W + '.json'] === beforeWrite);
   t('oversized pull refused',
     (await payroll('POST', { week: W }, { rows: new Array(20001).fill({ badge: '1', hours: 1 }) }, { 'x-sync-key': KEY })).code === 400);
   t('a week with nothing stored is empty, not an error', (await payroll('GET', { week: '2020-01-05' })).code === 200);

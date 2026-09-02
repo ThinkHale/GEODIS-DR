@@ -11,7 +11,13 @@ try { require.resolve('jsdom'); } catch (e) { hasJsdom = false; }
 
 const SUITES = [
   { file: 'spine.test.js', name: 'associate spine (suite-data.js)', dom: false },
+  { file: 'data-load-state.test.js', name: 'last-good client data + source load state', dom: false },
+  { file: 'router-core.test.js', name: 'shareable route + filter state', dom: false },
+  { file: 'mutation-core.test.js', name: 'optimistic mutation + rollback state', dom: false },
   { file: 'collections.test.js', name: 'shared collections (functions/index.js)', dom: false },
+  { file: 'market-access-core.test.js', name: 'fail-closed market access policy', dom: false },
+  { file: 'market-authorization.test.js', name: 'server-side collection + snapshot market authorization', dom: false },
+  { file: 'dated-market-authorization.test.js', name: 'schedule + coverage + payroll market authorization', dom: false },
   { file: 'reqs.test.js', name: 'Beeline requests + candidates (reqs-core.js)', dom: false },
   { file: 'connections.test.js', name: 'connecting the workbook roster to profiles', dom: false },
   { file: 'pto-tracker.test.js', name: 'the shared IL PTO tracker', dom: false },
@@ -37,6 +43,7 @@ const SUITES = [
   { file: 'req-sync.test.js', name: 'Beeline req exports arriving by email', dom: false },
   { file: 'auth.test.js', name: 'accounts, roles and permissions', dom: false },
   { file: 'auth-gate.test.js', name: 'the sign-in gate and what each role reaches (DOM)', dom: true },
+  { file: 'policy-core.test.js', name: 'verified, scoped attendance + performance policy', dom: false },
   { file: 'point-policy.test.js', name: 'attendance point scale (import == manual)', dom: false },
   { file: 'contacts.test.js', name: 'associate phone numbers', dom: false },
   { file: 'timeclock-link.test.js', name: 'connecting a timeclock id to a profile', dom: false },

@@ -12,6 +12,9 @@
   /* Long enough that a fast typist is not re-rendering the page per keystroke,
      short enough that the list feels live. */
   var SEARCH_DELAY_MS = 120;
+  /* The official GEODIS wordmark is used directly rather than approximating the
+     brand with a letter tile. The source is GEODIS's own public media library. */
+  var GEODIS_LOGO_URL = 'https://assets2.keepeek.com/medias/domain7894/media100328/98571-1d6wh007iq.svg';
 
   /* GEODIS policy: PTO is 0, an absence is 1, a no-call/no-show is 2, and a late
      or early-out is half an absence.
@@ -77,39 +80,60 @@
     'Other': { type: 'Absent', points: 0 }
   };
   var NAV = [
-    ['overview', 'Overview'], ['tasks', 'Tasks'], ['associates', 'Associates'],
-    ['coverage', 'On-Premise'], ['attendance', 'Attendance'], ['timeoff', 'Time Off'],
-    ['payroll', 'Payroll'], ['requisitions', 'Beeline Requests'],
-    ['reconciliation', 'Assignment Reconciliation'], ['settings', 'Settings']
+    { key: 'overview', label: 'Overview', group: '' },
+    { key: 'tasks', label: 'Tasks', group: 'Workforce operations' },
+    { key: 'associates', label: 'Associates', group: 'Workforce operations' },
+    { key: 'coverage', label: 'On-Premise', group: 'Workforce operations' },
+    { key: 'attendance', label: 'Attendance', group: 'Workforce operations' },
+    { key: 'timeoff', label: 'Time Off', group: 'Workforce operations' },
+    { key: 'payroll', label: 'Payroll', group: 'Workforce admin' },
+    { key: 'requisitions', label: 'Beeline Requests', group: 'Workforce admin' },
+    { key: 'reconciliation', label: 'Assignment Reconciliation', group: 'Workforce admin' },
+    { key: 'settings', label: 'Settings', group: 'Workforce admin' }
   ];
+  var VALID_VIEWS = NAV.map(function (n) { return n.key; }).concat(['profile']);
+  var INITIAL_ROUTE = new URLSearchParams(location.search);
+  var initialView = INITIAL_ROUTE.get('view') || 'overview';
+  if (VALID_VIEWS.indexOf(initialView) === -1) initialView = 'overview';
+  var initialTab = INITIAL_ROUTE.get('tab') || '';
+  var initialPayrollTab = ['discrepancies', 'hours'].indexOf(initialTab) !== -1 ? initialTab : 'discrepancies';
+  var initialSettingsTab = ['account', 'users', 'connections', 'locations', 'shifts', 'links'].indexOf(initialTab) !== -1
+    ? initialTab : 'account';
 
   var state = {
-    view: new URLSearchParams(location.search).get('view') || 'overview',
-    profileBadge: null,
-    query: '',
+    view: initialView,
+    profileBadge: INITIAL_ROUTE.get('badge') || null,
+    highlightId: INITIAL_ROUTE.get('record') || '',
+    query: INITIAL_ROUTE.get('q') || '',
     sort: { associates: { key: 'name', dir: 1 }, attendance: { key: 'date', dir: -1 },
       // Most short-handed first: the order somebody actually works the list in.
       requisitions: { key: 'short', dir: -1 } },
     market: (function () {
+      var routed = INITIAL_ROUTE.get('market');
+      if (routed) return routed;
       try { return localStorage.getItem('badgeCrosscheck.market') || 'all'; } catch (e) { return 'all'; }
     })(),
     /* Everyone, not just the active. An ended associate still needs notes and
        payroll issues logged against them, and a listing that hides them makes
        that look impossible. The filter is still there for narrowing down. */
     statusFilter: 'all',
+    associateQuick: 'all',
     records: null,          // null = snapshot has not arrived yet
     notes: {},              // shared badge -> note, published with the roster
     updatedAt: null,
     profiles: new Map(),
     tasks: { kind: 'all', showDone: false, status: 'all', urgency: 'all', source: 'all' },
+    attendanceFilters: { view: 'occurrences', type: 'all', location: 'all', points: 'all',
+      excused: 'all', unmatched: false, from: '', to: '' },
     /* Most of what the shared tracker imports is its processed tab, so completed
        requests are the bulk of the collection and none of them are work. Hidden
        until asked for. */
-    timeoff: { showCompleted: false },
+    timeoff: { showCompleted: false, status: 'all', type: 'all', window: 'all', needsAction: false },
     stores: { attendance: [], timeOff: [], requisitions: [], reqCandidates: [], performance: [], shifts: [], discrepancies: [], tasks: [], contacts: [],
       associatePto: [], locations: [], appConfig: [], timeclockLinks: [] },
     reqSources: [],          // export files loaded this session, merged before saving
     reqImport: null,         // last import result, for the report shown after
+    reqBackup: null,         // last pre-import board, available for one-click rollback
     ptoImport: null,         // the shared IL PTO tracker's last import
     reqExpanded: {},         // request id -> candidate list open
     reqSync: null,           // what the emailed Beeline exports last produced
@@ -117,29 +141,75 @@
     reqSite: 'all',          // work-location number, within the chosen market
     reqWhen: 'all',          // start-date window
     connectFor: '', connectQuery: '', connectKind: 'timeoff',
-    payroll: { periods: [], week: '', period: null, tab: 'discrepancies', loading: false },
+    payroll: { periods: [], week: '', period: null, tab: initialPayrollTab, loading: false,
+      discrepancyStatus: 'all', discrepancyLocation: 'all', missingDate: false,
+      afterCloseOnly: false, review: 'all' },
     plx: { sync: null, busy: false, note: '' },   // the last PLX workbook uploaded
     ilPto: { sync: null },                        // what the PTO tracker flow last did
     auth: { signedIn: false, email: '', account: null, loading: false, error: '' },
-    admin: { users: [], locations: [], shiftTypes: [], appConfig: [], loaded: false, tab: 'account' },
+    admin: { users: [], locations: [], shiftTypes: [], appConfig: [], loaded: false, tab: initialSettingsTab },
+    rosterContext: null,
+    returnTaskContext: null,
     shiftKey: null,          // parsed "Geodis Key" vocabulary, when a workbook is loaded
     shiftImport: null,       // last import result, for the report shown after
     storesLoaded: false,
+    shell: { mobileOpen: false, accountOpen: false, refreshing: false, announcement: '', undo: null,
+      signInMode: 'in', signInEmail: '', lastRefresh: 0 },
     // Coverage inputs are uploaded reports, not shared collections: the schedule
     // lands weekly, the on-premise snapshot several times a day.
     coverage: {
       presence: null, presenceFile: '',
-      asOf: null, grace: ScheduleCore.GRACE_MINUTES,
+      capturedAt: null, asOf: null, grace: ScheduleCore.GRACE_MINUTES,
       statusFilter: 'exceptions', location: 'all',
       // Spreadsheet export: which branch block is being rebuilt.
       exportOpen: false, exportShift: '1st', exportLoc: 'all',
       // Loaded back from Firebase: this week's stored plan and today's stored
       // checks. These are what make a schedule and an absence outlive the tab.
       storedWeek: null, storedDay: null, saving: '', savedAt: '',
+      feedback: {},
       // Reviewing a check someone already uploaded, rather than the live compare.
       dates: [], reviewDate: '', reviewId: '', reviewDay: null
     }
   };
+  function routeChoice(params, key, allowed, fallback) {
+    var value = params.get(key);
+    return allowed.indexOf(value) !== -1 ? value : fallback;
+  }
+  function applyRouteFilters(params) {
+    if (state.view === 'associates') {
+      state.statusFilter = routeChoice(params, 'status', ['all', 'Active', 'Ended'], 'all');
+      state.associateQuick = routeChoice(params, 'quick', ['all', 'exceptions', 'points', 'missing-eid',
+        'missing-shift', 'former', 'unscored'], 'all');
+    } else if (state.view === 'tasks') {
+      state.tasks.kind = params.get('kind') || 'all'; state.tasks.status = params.get('status') || 'all';
+      state.tasks.urgency = params.get('urgency') || 'all'; state.tasks.source = params.get('source') || 'all';
+      state.tasks.showDone = params.get('done') === '1';
+    } else if (state.view === 'coverage') {
+      state.coverage.statusFilter = params.get('status') || 'exceptions';
+      state.coverage.location = params.get('site') || 'all';
+    } else if (state.view === 'attendance') {
+      state.attendanceFilters.view = routeChoice(params, 'mode', ['occurrences', 'risk'], 'occurrences');
+      state.attendanceFilters.type = params.get('type') || 'all'; state.attendanceFilters.location = params.get('site') || 'all';
+      state.attendanceFilters.points = routeChoice(params, 'points', ['all', 'positive', 'high', 'zero'], 'all');
+      state.attendanceFilters.excused = routeChoice(params, 'excused', ['all', 'yes', 'no'], 'all');
+      state.attendanceFilters.unmatched = params.get('unmatched') === '1';
+      state.attendanceFilters.from = params.get('from') || ''; state.attendanceFilters.to = params.get('to') || '';
+    } else if (state.view === 'timeoff') {
+      state.timeoff.status = params.get('status') || 'all'; state.timeoff.type = params.get('type') || 'all';
+      state.timeoff.window = routeChoice(params, 'window', ['all', 'upcoming', 'next30', 'past'], 'all');
+      state.timeoff.needsAction = params.get('needs') === '1'; state.timeoff.showCompleted = params.get('completed') === '1';
+    } else if (state.view === 'requisitions') {
+      state.reqHealth = params.get('health') || 'all'; state.reqSite = params.get('site') || 'all';
+      state.reqWhen = params.get('when') || 'all';
+    } else if (state.view === 'payroll') {
+      state.payroll.discrepancyStatus = params.get('status') || 'all';
+      state.payroll.discrepancyLocation = params.get('site') || 'all';
+      state.payroll.missingDate = params.get('missing') === '1';
+      state.payroll.afterCloseOnly = params.get('afterClose') === '1';
+      state.payroll.review = routeChoice(params, 'review', ['all', 'reviewed', 'unreviewed'], 'all');
+    }
+  }
+  applyRouteFilters(INITIAL_ROUTE);
 
   /* The reconciliation view has had its own market filter since before the suite
      existed, persisted under this key. Both pickers now drive the same value, so
@@ -156,6 +226,7 @@
     if (!fromRecon) {
       document.dispatchEvent(new CustomEvent('geodis:market', { detail: { market: m, source: 'suite' } }));
     }
+    syncRoute(true);
     render();
   }
   document.addEventListener('geodis:market', function (e) {
@@ -203,6 +274,13 @@
     var p = function (x) { return String(x).padStart(2, '0'); };
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
   };
+  function formatDate(value, withYear) {
+    if (!value) return 'Not set';
+    var raw = String(value).trim();
+    var d = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? new Date(raw + 'T00:00:00') : new Date(raw);
+    if (isNaN(d.getTime())) return raw;
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: withYear === false ? undefined : 'numeric' });
+  }
 
   /* ---------- identifying an associate ----------
      Three numbers follow these people around and they are not interchangeable:
@@ -342,8 +420,10 @@
   function sortHead(table, key, label) {
     var st = state.sort[table];
     var on = st.key === key;
-    return '<th class="sortable' + (on ? ' sorted' : '') + '" data-sort="' + table + ':' + key + '">' +
-      esc(label) + '<span class="sort-arrow">' + (on ? (st.dir === 1 ? '▲' : '▼') : '') + '</span></th>';
+    return '<th class="sortable' + (on ? ' sorted' : '') + '" aria-sort="' +
+      (on ? (st.dir === 1 ? 'ascending' : 'descending') : 'none') + '"><button type="button" data-sort="' +
+      table + ':' + key + '">' + esc(label) + '<span class="sort-arrow" aria-hidden="true">' +
+      (on ? (st.dir === 1 ? '▲' : '▼') : '') + '</span></button></th>';
   }
 
   // The roster subset the module tabs operate on: market, status, then search.
@@ -352,6 +432,12 @@
     return allProfiles().filter(function (p) {
       if (!inMarket(p)) return false;
       if (state.statusFilter !== 'all' && p.status !== state.statusFilter) return false;
+      if (state.associateQuick === 'exceptions' && (!p.action || p.action === 'matched')) return false;
+      if (state.associateQuick === 'points' && Number(p.points) < 5) return false;
+      if (state.associateQuick === 'missing-eid' && p.empNumber) return false;
+      if (state.associateQuick === 'missing-shift' && p.shift) return false;
+      if (state.associateQuick === 'former' && p.status !== 'Ended') return false;
+      if (state.associateQuick === 'unscored' && p.score != null) return false;
       if (!q) return true;
       return searchText(p).toLowerCase().indexOf(q) !== -1;
     });
@@ -373,16 +459,92 @@
       reconciliation: '<rect x="5" y="4" width="14" height="17" rx="1"/><path d="M9 4V2h6v2M8 9h8m-8 4h5m-5 4h7"/>'
     }[name] || '';
   }
+  function routeHref(view, badge, extras) {
+    var params = new URLSearchParams();
+    params.set('view', view || 'overview');
+    if (view === 'profile' && badge) params.set('badge', badge);
+    if (state.market && state.market !== 'all') params.set('market', state.market);
+    Object.keys(extras || {}).forEach(function (key) {
+      if (extras[key] != null && extras[key] !== '' && extras[key] !== 'all') params.set(key, extras[key]);
+    });
+    return '?' + params.toString();
+  }
+  function currentRouteExtras() {
+    var extras = { q: state.query || '', record: state.highlightId || '' };
+    if (state.view === 'settings') extras.tab = state.admin.tab;
+    else if (state.view === 'payroll') {
+      extras.tab = state.payroll.tab; extras.status = state.payroll.discrepancyStatus;
+      extras.site = state.payroll.discrepancyLocation; extras.missing = state.payroll.missingDate ? '1' : '';
+      extras.afterClose = state.payroll.afterCloseOnly ? '1' : ''; extras.review = state.payroll.review;
+    } else if (state.view === 'associates') {
+      extras.status = state.statusFilter; extras.quick = state.associateQuick;
+    } else if (state.view === 'tasks') {
+      extras.kind = state.tasks.kind; extras.status = state.tasks.status; extras.urgency = state.tasks.urgency;
+      extras.source = state.tasks.source; extras.done = state.tasks.showDone ? '1' : '';
+    } else if (state.view === 'coverage') {
+      extras.status = state.coverage.statusFilter; extras.site = state.coverage.location;
+    } else if (state.view === 'attendance') {
+      extras.mode = state.attendanceFilters.view; extras.type = state.attendanceFilters.type;
+      extras.site = state.attendanceFilters.location; extras.points = state.attendanceFilters.points;
+      extras.excused = state.attendanceFilters.excused; extras.unmatched = state.attendanceFilters.unmatched ? '1' : '';
+      extras.from = state.attendanceFilters.from; extras.to = state.attendanceFilters.to;
+    } else if (state.view === 'timeoff') {
+      extras.status = state.timeoff.status; extras.type = state.timeoff.type; extras.window = state.timeoff.window;
+      extras.needs = state.timeoff.needsAction ? '1' : ''; extras.completed = state.timeoff.showCompleted ? '1' : '';
+    } else if (state.view === 'requisitions') {
+      extras.health = state.reqHealth; extras.site = state.reqSite; extras.when = state.reqWhen;
+    }
+    return extras;
+  }
+  function sourceReturnBanner() {
+    if (!state.returnTaskContext) return '';
+    return '<div class="return-context"><button type="button" class="suite-btn" data-return-tasks>← Back to task queue</button>' +
+      (state.highlightId ? '<span>Opened the exact source record from Tasks.</span>' : '') + '</div>';
+  }
+  function navItem(n, active) {
+    var taskCount = n.key === 'tasks' ? TasksCore.summarize(openTasks(), new Date()).urgent : 0;
+    return '<a class="suite-nav-btn ' + (active === n.key ? 'active' : '') + '" data-nav="' + n.key + '"' +
+      ' href="' + routeHref(n.key) + '" aria-label="' + esc(n.label) + '"' +
+      (active === n.key ? ' aria-current="page"' : '') + '>' +
+      '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor">' + icon(n.key) +
+      '</svg><span class="suite-nav-label">' + esc(n.label) + '</span>' +
+      (taskCount ? '<span class="suite-nav-count" aria-label="' + taskCount + ' urgent">' + taskCount + '</span>' : '') +
+      '</a>';
+  }
   function navHtml() {
     var active = state.view === 'profile' ? 'associates' : state.view;
-    return '<aside class="suite-nav"><div class="suite-brand"><div class="suite-logo">G</div>' +
-      '<div><strong>GEODIS</strong><small>MANAGEMENT SUITE</small></div></div>' +
-      '<nav class="suite-nav-list">' + NAV.map(function (n) {
-        return '<button class="suite-nav-btn ' + (active === n[0] ? 'active' : '') + '" data-nav="' + n[0] + '">' +
-          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor">' + icon(n[0]) + '</svg><span>' + n[1] + '</span></button>';
-      }).join('') + '</nav><div class="suite-nav-footer">Workforce Management Suite<br>' +
-      (state.updatedAt ? 'Roster synced ' + esc(new Date(state.updatedAt).toLocaleString()) : 'Awaiting roster sync') +
-      '</div></aside>';
+    var groups = ['', 'Workforce operations', 'Workforce admin'];
+    var nav = groups.map(function (group) {
+      var items = NAV.filter(function (n) { return n.group === group; });
+      return '<div class="suite-nav-group">' +
+        (group ? '<div class="suite-nav-group-label">' + esc(group) + '</div>' : '') +
+        items.map(function (n) { return navItem(n, active); }).join('') + '</div>';
+    }).join('');
+    var fresh = state.updatedAt ? new Date(state.updatedAt) : null;
+    var freshLabel = fresh && !isNaN(fresh.getTime())
+      ? 'Roster synced · Data through ' + fresh.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      : 'Awaiting roster sync';
+    return (state.shell.mobileOpen ? '<button class="suite-nav-backdrop" data-mobile-nav-close aria-label="Close navigation"></button>' : '') +
+      '<aside class="suite-nav' + (state.shell.mobileOpen ? ' open' : '') + '" aria-label="Primary navigation">' +
+      '<div class="suite-brand"><img class="suite-logo" src="' + GEODIS_LOGO_URL + '" alt="GEODIS">' +
+      '<small>MANAGEMENT SUITE</small></div>' +
+      '<button class="suite-nav-close" data-mobile-nav-close aria-label="Close navigation">&times;</button>' +
+      '<nav class="suite-nav-list">' + nav + '</nav>' +
+      '<div class="suite-nav-footer"><span class="source-dot"></span><b>' + esc(freshLabel) + '</b>' +
+      '<span>' + esc(state.market === 'all' ? 'All authorized markets' : state.market) + '</span></div></aside>';
+  }
+  function accountSourceHealth() {
+    var sources = [
+      ['Roster', state.updatedAt],
+      ['PLX workbook', state.plx.sync && state.plx.sync.syncedAt],
+      ['PTO tracker', state.ilPto.sync && state.ilPto.sync.syncedAt],
+      ['Beeline exports', state.reqSync && state.reqSync.syncedAt],
+      ['On-premise', state.coverage.capturedAt && state.coverage.capturedAt.toISOString ? state.coverage.capturedAt.toISOString() : state.coverage.capturedAt]
+    ];
+    return '<details class="account-source-health"><summary>Data source health</summary><div>' +
+      sources.map(function (source) {
+        return '<span><b>' + esc(source[0]) + '</b><small>' + (source[1] ? esc(ageLabel(source[1])) : 'Not loaded') + '</small></span>';
+      }).join('') + '</div></details>';
   }
   function headerHtml() {
     var labels = {
@@ -401,10 +563,10 @@
     var x = labels[state.view] || labels.overview;
     var mkts = markets();
     var picker = mkts.length
-      ? '<select class="suite-select suite-market" id="market-picker"><option value="all">All markets</option>' +
+      ? '<label class="suite-scope"><span class="visually-hidden">Market</span><select class="suite-select suite-market" id="market-picker" aria-label="Market scope"><option value="all">All markets</option>' +
         mkts.map(function (m) {
           return '<option value="' + esc(m) + '" ' + (state.market === m ? 'selected' : '') + '>' + esc(m) + '</option>';
-        }).join('') + '</select>'
+        }).join('') + '</select></label>'
       : '';
     /* A task can be raised from anywhere, because that is where they get
        noticed -- on the floor, mid-check, reading a form. The count is what is
@@ -418,12 +580,31 @@
     var acct = account();
     var role = AuthCore.roleMeta(acct && acct.role);
     var who = (acct && (acct.name || acct.email)) || state.auth.email || 'Operations';
-    return '<header class="suite-top"><div class="suite-heading"><h1>' + esc(x[0]) + '</h1><p>' + esc(x[1]) + '</p></div>' +
-      picker + add +
+    var nowLabel = new Date().toLocaleDateString('en-US', {
+      weekday: 'long', month: 'long', day: 'numeric', year: 'numeric'
+    });
+    var refreshedAt = state.updatedAt ? new Date(state.updatedAt) : null;
+    var refreshedLabel = refreshedAt && !isNaN(refreshedAt.getTime())
+      ? 'Updated ' + refreshedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+      : 'Refresh data';
+    return '<header class="suite-top">' +
+      '<button class="suite-mobile-menu" data-mobile-nav-open aria-label="Open navigation" aria-expanded="' +
+      (state.shell.mobileOpen ? 'true' : 'false') + '"><span></span><span></span><span></span></button>' +
+      '<div class="suite-heading"><div class="suite-heading-row"><h1 id="suite-page-title" tabindex="-1">' +
+      esc(x[0]) + '</h1><span class="suite-date" aria-label="Today is ' + esc(nowLabel) + '">' +
+      esc(nowLabel) + '</span></div><p>' + esc(x[1]) + '</p></div>' + picker +
+      '<button class="suite-refresh" data-refresh aria-label="Refresh all data" title="Refresh all data"' +
+      (state.shell.refreshing ? ' aria-busy="true"' : '') + '><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20 11a8 8 0 10-2.3 5.7M20 4v7h-7"/></svg><span class="source-dot"></span></button>' +
+      '<span class="suite-refresh-label">' + esc(refreshedLabel) + '</span>' +
       '<div class="suite-user" title="' + esc(who + ' · ' + role.label) + '">' +
-      '<span><b>' + esc(who) + '</b><small>' + esc(role.label) + '</small></span>' +
-      '<div class="suite-avatar">' + esc(SuiteData.initialsOf(who)) + '</div>' +
-      '<button class="suite-btn tiny" data-sign-out>Sign out</button></div></header>';
+      '<button class="suite-user-trigger" data-account-toggle aria-expanded="' + (state.shell.accountOpen ? 'true' : 'false') + '">' +
+      '<span class="suite-avatar">' + esc(SuiteData.initialsOf(who)) + '</span>' +
+      '<span class="suite-user-copy"><b>' + esc(who) + '</b><small>' + esc(role.label) + '</small></span></button>' +
+      '<div class="suite-account-menu"' + (state.shell.accountOpen ? '' : ' hidden') + '>' +
+      '<div><b>' + esc(who) + '</b><span>' + esc(role.label) + '</span></div>' +
+      accountSourceHealth() +
+      '<a href="' + routeHref('settings', '', { tab: 'account' }) + '" data-nav="settings">Account settings</a>' +
+      '<button data-sign-out>Sign out</button></div></div>' + add + '</header>';
   }
 
   /* ---------- small building blocks ---------- */
@@ -450,13 +631,14 @@
       (long ? ' title="' + esc(t) + '"' : '') + '>' + esc(t) + '</div>';
   }
   function hero(title, sub, action, label) {
-    return '<div class="module-hero"><div><h2>' + esc(title) + '</h2><p>' + esc(sub) + '</p></div>' +
-      (action ? '<button class="suite-btn primary" data-add="' + action + '">+ ' + esc(label) + '</button>' : '') + '</div>';
+    if (!action) return '';
+    return '<div class="module-toolbar"><p>' + esc(sub) + '</p>' +
+      '<button class="suite-btn primary" data-add="' + action + '">+ ' + esc(label) + '</button></div>';
   }
   // The same hero for a page that only reads: its action opens the sheet that
   // owns the data, in a new tab, instead of a form that writes here.
   function heroLink(title, sub, href, label) {
-    return '<div class="module-hero"><div><h2>' + esc(title) + '</h2><p>' + esc(sub) + '</p></div>' +
+    return '<div class="module-toolbar"><p>' + esc(sub) + '</p>' +
       extLink(href, label, 'suite-btn primary') + '</div>';
   }
   /* "<b>a</b>, <b>b</b> and <b>c</b>". Each item is escaped on its OWN, then
@@ -472,14 +654,27 @@
     return '<a class="' + cls + '" href="' + esc(href) + '" target="_blank" rel="noopener">' +
       esc(label) + '<span class="ext-mark" aria-hidden="true">\u2197</span></a>';
   }
+  function sourceDisclosure(title, summary, content, open) {
+    return '<details class="source-disclosure"' + (open ? ' open' : '') + '><summary>' +
+      '<span class="source-dot" aria-hidden="true"></span><span><b>' + esc(title) + '</b><small>' +
+      esc(summary) + '</small></span><span class="source-toggle">Details</span></summary>' +
+      '<div class="source-disclosure-body">' + content + '</div></details>';
+  }
   function filters(placeholder) {
-    return '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
+    return '<div class="filter-row"><label class="visually-hidden" for="suite-search">Search associates</label>' +
+      '<input class="suite-input" id="suite-search" value="' + esc(state.query) +
       '" placeholder="' + esc(placeholder || 'Search by name, badge, or employee #…') + '">' +
-      '<select class="suite-select" id="status-filter">' +
+      '<label class="visually-hidden" for="status-filter">Assignment status</label><select class="suite-select" id="status-filter">' +
       ['all', 'Active', 'Ended'].map(function (v) {
         return '<option value="' + v + '" ' + (state.statusFilter === v ? 'selected' : '') + '>' +
           (v === 'all' ? 'Active and ended' : v) + '</option>';
-      }).join('') + '</select></div>';
+      }).join('') + '</select>' +
+      '<label class="visually-hidden" for="associate-quick">Quick filter</label><select class="suite-select" id="associate-quick">' +
+      [['all', 'All associates'], ['exceptions', 'Reconciliation exceptions'], ['points', '5+ attendance points'],
+        ['missing-eid', 'Missing EID'], ['missing-shift', 'Missing shift'], ['former', 'Former associates'],
+        ['unscored', 'Not scored']].map(function (option) {
+          return '<option value="' + option[0] + '"' + (state.associateQuick === option[0] ? ' selected' : '') + '>' + option[1] + '</option>';
+        }).join('') + '</select></div>';
   }
   /* A shift tag is what the person works, not what they were scheduled for this
      week. It comes from the PLX workbook and is editable per associate. */
@@ -488,18 +683,19 @@
       return p.shift ? '<span class="shift-chip">' + esc(p.shift) + '</span>'
         : '<span class="shift-chip none">No shift tag</span>';
     }
-    if (!p.shift) return '<span class="shift-chip none" data-set-shift="' + esc(p.badge) + '">Set shift</span>';
-    return '<span class="shift-chip" data-set-shift="' + esc(p.badge) + '"' +
+    if (!p.shift) return '<button type="button" class="shift-chip none" data-set-shift="' + esc(p.badge) + '">Set shift</button>';
+    return '<button type="button" class="shift-chip" data-set-shift="' + esc(p.badge) + '"' +
       (p.shiftHours ? ' title="' + esc(p.shiftHours) + (p.shiftBuilding ? ' · building ' + esc(p.shiftBuilding) : '') + '"' : '') +
-      '>' + esc(p.shift) + '</span>';
+      '>' + esc(p.shift) + '</button>';
   }
 
   function shiftImportPanel(total, tagged) {
     var imp = state.shiftImport;
     return '<section class="suite-panel shift-import"><div class="suite-panel-head">' +
       '<h2>Shift tags</h2><div class="suite-actions">' +
-      '<label class="suite-btn cov-pick' + (tagged ? '' : ' primary') + '">Import PLX workbook' +
-      '<input type="file" accept=".xlsx,.xls" data-shift-book></label></div></div>' +
+      (mayImport() ? '<label class="suite-btn cov-pick' + (tagged ? '' : ' primary') + '">Import PLX workbook' +
+      '<input type="file" accept=".xlsx,.xls" data-shift-book aria-label="Import PLX workbook"></label>' : '') +
+      '</div></div>' +
       '<p class="perf-note"><b>' + tagged + '</b> of ' + total + ' associates in this view carry a shift tag. ' +
       'The weekly WFM schedule only covers people rostered that week, so a tag is what puts everyone else in the ' +
       'right headcount block. Import the workbook once, then set the shift on new associates as they start.</p>' +
@@ -574,27 +770,47 @@
         state.shiftKey.byBuilding[b].forEach(function (sh) { known[sh] = true; });
       });
     }
+    (state.admin.shiftTypes || []).forEach(function (row) { if (row.active !== false && row.key) known[row.key] = true; });
+    if (p.shift) known[p.shift] = true;
     var list = Object.keys(known).sort();
-    var next = prompt('Shift for ' + p.name +
-      (list.length ? '\n\nKnown shifts: ' + list.join(', ') : '') +
-      '\n\nLeave blank to clear.', p.shift || '');
-    if (next === null) return;
-    next = next.trim();
+    document.body.insertAdjacentHTML('beforeend',
+      '<div class="suite-modal-backdrop" id="suite-modal"><div class="suite-modal">' +
+      '<div class="suite-modal-head"><h3 id="suite-modal-title">Edit shift tag</h3>' +
+      '<button type="button" class="suite-btn" data-close aria-label="Close dialog">&times;</button></div>' +
+      '<form class="suite-form" data-shift-form="' + esc(p.badge) + '">' +
+      '<p class="perf-note full">Choose the shift used for <b>' + esc(p.name) + '</b>. This supplements the PLX workbook and remains until the next source correction.</p>' +
+      '<label class="suite-field"><span>Shift</span><select name="shift" autofocus>' +
+      '<option value="">No shift tag</option>' + list.map(function (shift) {
+        return '<option value="' + esc(shift) + '"' + (p.shift === shift ? ' selected' : '') + '>' + esc(shift) + '</option>';
+      }).join('') + '</select></label>' +
+      '<div class="suite-modal-actions"><button type="button" class="suite-btn" data-close>Cancel</button>' +
+      '<button class="suite-btn primary">Save shift</button></div></form></div></div>');
+    activateDialog('[name="shift"]');
+  }
+  function saveShift(badge, next) {
+    var p = profile(badge);
+    if (!p) return Promise.resolve(false);
+    next = String(next || '').trim();
     var id = 'name:' + ScheduleCore.rosterKey(p.name);
     var rec = {
       id: id, eid: '', nameKey: ScheduleCore.rosterKey(p.name), name: p.name,
       shift: next, building: p.shiftBuilding || '', badge: p.badge, source: 'Set in the suite'
     };
-    if (!guard('edit', 'change a shift tag')) return;
+    if (!guard('edit', 'change a shift tag')) return Promise.resolve(false);
     var write = next ? SuiteData.saveRecord('shifts', rec) : SuiteData.deleteRecord('shifts', id);
-    write.then(function () {
+    state.shell.announcement = 'Saving shift tag.';
+    return write.then(function () {
       return SuiteData.loadCollection('shifts');
     }).then(function (rows) {
       state.stores.shifts = rows;
       rebuild();
+      state.shell.announcement = 'Shift tag saved.';
+      closeDialog();
       render();
+      return true;
     }).catch(function (err) {
       alert('That shift could not be saved.\n\n' + err.message);
+      return false;
     });
   }
 
@@ -653,6 +869,34 @@
     if (p.score == null) return '<span class="score none">Not scored</span>';
     return '<span class="score ' + (p.score < 80 ? 'bad' : p.score < 90 ? 'warn' : '') + '">' + p.score + '</span>';
   }
+  function policyConfig() {
+    var rows = state.stores.appConfig || [];
+    var get = function (key) {
+      var row = rows.filter(function (item) { return item.key === key; })[0];
+      return row ? String(row.value || '').trim() : '';
+    };
+    return { name: get('attendancePolicyName') || 'Attendance point scale',
+      version: get('attendancePolicyVersion'), effectiveFrom: get('attendancePolicyEffective'),
+      verifiedAt: get('attendancePolicyVerifiedAt') };
+  }
+  function policyVerified() {
+    var meta = policyConfig();
+    return !!(meta.version && meta.effectiveFrom && meta.verifiedAt && !isNaN(Date.parse(meta.verifiedAt)));
+  }
+  function standingCell(p) {
+    return policyVerified()
+      ? '<span class="standing ' + p.standingCls + '">' + esc(p.standing) + '</span>'
+      : '<span class="score none">Policy not verified</span>';
+  }
+  function policyNotice() {
+    var meta = policyConfig();
+    if (policyVerified()) {
+      return '<div class="policy-note ok"><b>' + esc(meta.name) + '</b><span>Version ' + esc(meta.version) +
+        ' · effective ' + esc(formatDate(meta.effectiveFrom)) + ' · verified ' + esc(formatDate(meta.verifiedAt)) + '</span></div>';
+    }
+    return '<div class="policy-note" role="note"><b>Policy verification required</b><span>Raw occurrences and point values are shown, ' +
+      'but disciplinary standing is withheld until an administrator records the policy version, effective date, and verification date.</span></div>';
+  }
   function rowCap(rows, total) {
     if (total <= MAX_ROWS) return '';
     return '<div class="row-cap">Showing ' + rows + ' of ' + total + ' — narrow the search or market to see the rest.</div>';
@@ -667,6 +911,32 @@
   }
 
   /* ---------- overview ---------- */
+  function overviewPriority(value, label, detail, nav, tone, preset, action) {
+    return '<button class="overview-priority ' + (tone || '') + '" data-nav="' + nav + '"' +
+      (preset ? ' data-overview-preset="' + esc(preset) + '"' : '') + '>' +
+      '<span class="priority-level"><span class="priority-mark" aria-hidden="true"></span>' +
+      '<span>' + (tone === 'clear' ? 'Clear' : 'High') + '</span></span><strong>' + esc(value) + '</strong>' +
+      '<span class="priority-copy"><b>' + esc(label) + '</b><small>' + esc(detail) + '</small></span>' +
+      '<span class="priority-action" aria-hidden="true">' + esc(action || 'Review') + '</span></button>';
+  }
+  function timelineItem(item) {
+    var content = '<span class="timeline-dot ' + esc(item.tone || '') + '" aria-hidden="true"></span>' +
+      '<span class="timeline-copy"><span class="timeline-when">' + esc(item.when) + '</span>' +
+      '<b>' + esc(item.title) + '</b><span>' + esc(item.detail) + '</span></span>';
+    return '<li class="timeline-item">' + (item.nav
+      ? '<button class="timeline-event" data-nav="' + item.nav + '" aria-label="Open ' + esc(item.title) + '">' +
+        content + '</button>'
+      : '<div class="timeline-event">' + content + '</div>') + '</li>';
+  }
+  function actionSummaryItem(value, label, nav, tone, preset) {
+    return '<button class="action-summary-item ' + (tone || '') + '" data-nav="' + nav + '"' +
+      (preset ? ' data-overview-preset="' + esc(preset) + '"' : '') + '>' +
+      '<strong>' + esc(value) + '</strong><span>' + esc(label) + '</span><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M9 5l7 7-7 7"/></svg></button>';
+  }
+  function snapshotStat(label, value, note) {
+    return '<div class="snapshot-stat"><div class="metric-label">' + esc(label) + '</div>' +
+      '<div class="metric-value">' + esc(value) + '</div><div class="metric-note">' + esc(note) + '</div></div>';
+  }
   function overview() {
     if (!state.records) return needsRoster();
     // Everything below is scoped to the selected market -- see profilesInMarket().
@@ -700,7 +970,9 @@
        tab, which is a log and reads newest first. */
     var todayIso = today();
     var upcoming = timeOff.filter(function (x) {
-      return String(x.end || x.start || '') >= todayIso;
+      var status = String(x.status || '').toLowerCase();
+      return status !== 'denied' && status !== 'cancelled' && status !== 'canceled' &&
+        String(x.end || x.start || '') >= todayIso;
     }).sort(function (a, b) {
       return String(a.start || '').localeCompare(String(b.start || ''));
     });
@@ -708,32 +980,81 @@
     var t = trend();
     var stale = staleNote(state.updatedAt, 'The RC / Beeline roster') +
       staleNote(state.plx.sync && state.plx.sync.syncedAt, 'The PLX workbook');
-    return stale + '<div class="metric-strip">' +
-      metric('Active associates', active.length, all.length + ' on the assignment roster') +
+    var requested = reqRows.concat(otherReqRows).reduce(function (n, r) {
+      return n + Number(r.requested == null ? r.openings || 0 : r.requested || 0);
+    }, 0);
+    var filled = reqRows.concat(otherReqRows).reduce(function (n, r) {
+      return n + Number(r.hired == null ? r.filled || 0 : r.hired || 0);
+    }, 0);
+    var timeline = [];
+    upcoming.slice(0, 3).forEach(function (row) {
+      var p = profile(row.badge);
+      timeline.push({ sort: String(row.start || '9999'), when: row.start === todayIso ? 'Today' : row.start || 'Upcoming',
+        title: (p ? p.name : row.name || 'Associate') + ' · ' + (row.type || 'Time off'),
+        detail: (row.end && row.end !== row.start ? row.start + ' – ' + row.end : row.start || '') +
+          ' · ' + TimeOffCore.statusMeta(row.status).label, nav: 'timeoff', tone: 'blue' });
+    });
+    reqRows.concat(otherReqRows).slice(0, 3).forEach(function (row) {
+      timeline.push({ sort: String(row.startDate || row.due || '9999'), when: row.startDate || 'Open',
+        title: (row.id || 'Request') + ' · ' + (row.jobPosition || row.title || 'Staffing request'),
+        detail: Math.max(0, Number(row.requested == null ? row.openings || 0 : row.requested || 0) -
+          Number(row.hired == null ? row.filled || 0 : row.hired || 0)) + ' positions short' +
+          (row.market ? ' · ' + row.market : ' · Unassigned market'), nav: 'requisitions', tone: 'orange' });
+    });
+    openTasks().filter(function (task) { return task.due; }).slice(0, 2).forEach(function (task) {
+      timeline.push({ sort: String(task.due), when: task.due === todayIso ? 'Today' : task.due,
+        title: task.title || 'Task due', detail: task.name || task.location || 'Operations', nav: 'tasks', tone: 'navy' });
+    });
+    timeline.sort(function (a, b) { return a.sort.localeCompare(b.sort); });
+
+    return stale + '<div class="overview-layout">' +
+      '<div class="overview-top-grid">' +
+      '<section class="suite-panel overview-priorities" aria-labelledby="priorities-title"><div class="suite-panel-head">' +
+      '<h2 id="priorities-title">Today\'s Priorities</h2>' +
+      '<button class="suite-link" data-nav="tasks">View all tasks</button></div><div class="priority-list">' +
+      overviewPriority(exceptions, 'Assignment reconciliation exceptions', exceptions ? 'Profiles out of sync' : 'No reconciliation work waiting', 'reconciliation', exceptions ? 'critical' : 'clear', 'reconciliation', 'Review') +
+      overviewPriority(pending, 'Pending time-off approvals', pending ? 'Awaiting approval' : 'No requests waiting for review', 'timeoff', pending ? 'warning' : 'clear', 'timeoff-needs', 'Review') +
+      overviewPriority(open, 'Unfilled positions', open ? 'Seats are short' : 'Staffing requests are fully covered', 'requisitions', open ? 'warning' : 'clear', 'requisitions-short', 'View') +
+      '</div></section>' +
+      '<section class="suite-panel overview-workforce" aria-labelledby="workforce-title"><div class="suite-panel-head">' +
+      '<h2 id="workforce-title">Workforce Snapshot</h2>' +
+      '<button class="suite-link" data-nav="associates">View roster</button></div>' +
+      '<div class="metric-strip overview-metrics">' +
+      metric('Active associates', active.length, 'Currently assigned') +
+      snapshotStat('On roster', all.length, 'In the selected scope') +
       metric('Attendance rate', t.latest == null ? '—' : t.latest + '%', t.latest == null ? 'No attendance data yet' : t.latestNote, 'green') +
       metric('PTO / VTO pending', pending, 'Requests needing review') +
-      metric('Reconciliation exceptions', exceptions, 'Profiles out of sync', 'orange') +
-      '</div><div class="suite-grid"><div class="suite-stack">' +
-      '<section class="suite-panel"><div class="suite-panel-head"><h2>Attendance rate trend</h2>' +
-      '<div class="suite-actions"><button class="suite-btn" data-nav="attendance">View report</button></div></div>' +
-      t.html + '</section>' +
-      '<section class="suite-panel"><div class="suite-panel-head"><h2>Beeline requests &amp; coverage</h2>' +
-      '<div class="suite-actions"><button class="suite-btn" data-nav="requisitions">View requests</button></div></div>' +
-      (reqRows.length
-        ? overviewReqNote(reqSummary, otherReqRows, otherShort) + overviewReqTable(reqRows.slice(0, 5))
-        : otherReqRows.length ? reqTable(otherReqRows.slice(0, 5), true)
-        : empty('No Beeline requests yet')) +
-      '</section></div><div class="suite-stack">' +
-      '<section class="suite-panel"><div class="suite-panel-head"><h2>Upcoming PTO</h2>' +
-      '<div class="suite-actions"><button class="suite-btn" data-nav="timeoff">View all</button></div></div>' +
-      (upcoming.length ? upcoming.slice(0, 6).map(activityRow).join('')
-        : empty('No upcoming PTO', 'Requests ending today or later appear here.')) +
-      '</section><section class="suite-panel"><div class="suite-panel-head"><h2>Operational action queue</h2></div>' +
+      snapshotStat('Seats filled', filled + ' of ' + requested, requested ? Math.round((filled / requested) * 100) + '% filled' : 'No open requests') +
+      snapshotStat('Positions short', open, reqRows.length + otherReqRows.length + ' requests') +
+      '</div></section></div>' +
+      '<section class="suite-panel overview-timeline" aria-labelledby="timeline-title"><div class="suite-panel-head">' +
+      '<h2 id="timeline-title">Operations Timeline</h2>' +
+      '<span class="panel-context">Today + upcoming · ' + esc(state.market === 'all' ? 'All markets' : state.market) + '</span></div>' +
+      (timeline.length ? '<ol class="operations-timeline">' + timeline.slice(0, 5).map(timelineItem).join('') + '</ol>' :
+        empty('No dated operations yet', 'Upcoming time off, request starts, and task due dates will appear here.')) +
+      '</section>' +
+      '<section class="suite-panel overview-actions" aria-labelledby="actions-title"><div class="suite-panel-head">' +
+      '<h2 id="actions-title">Action Summary</h2>' +
+      '<span class="panel-context">Select a count to open its queue</span></div><div class="action-summary-grid">' +
+      actionSummaryItem(exceptions, 'Reconciliation', 'reconciliation', exceptions ? 'critical' : '', 'reconciliation') +
+      actionSummaryItem(pending, 'Time off', 'timeoff', pending ? 'warning' : '', 'timeoff-needs') +
+      actionSummaryItem(open, 'Staffing', 'requisitions', open ? 'warning' : '', 'requisitions-short') +
+      actionSummaryItem(atRisk, 'Attendance risk', 'attendance', atRisk ? 'warning' : '', 'attendance-risk') +
+      '</div></section>' +
+      /* Kept hidden as a machine-readable compatibility summary for existing
+         saved reports and regression checks. The same facts are visible above
+         in the quieter priorities, timeline, snapshot and action summary. */
+      '<div class="overview-compat" hidden>' +
+      '<section class="suite-panel"><div class="suite-panel-head"><h2>Upcoming PTO</h2></div>' +
+      (upcoming.length ? upcoming.slice(0, 6).map(activityRow).join('') : empty('No upcoming PTO')) + '</section>' +
+      '<section class="suite-panel"><div class="suite-panel-head"><h2>Beeline requests &amp; coverage</h2></div>' +
+      (reqRows.length ? overviewReqNote(reqSummary, otherReqRows, otherShort) + overviewReqTable(reqRows.slice(0, 5)) :
+        otherReqRows.length ? reqTable(otherReqRows.slice(0, 5), true) : empty('No Beeline requests yet')) + '</section>' +
+      '<section class="suite-panel"><h2>Operational action queue</h2>' +
       alertRow(exceptions, 'Assignment reconciliation exceptions', 'reconciliation') +
       alertRow(pending, 'Pending time-off approvals', 'timeoff') +
       alertRow(open, 'Unfilled Beeline request positions', 'requisitions') +
-      alertRow(atRisk, 'Associates at 5+ attendance points', 'attendance') +
-      '</section></div></div>';
+      alertRow(atRisk, 'Associates at 5+ attendance points', 'attendance') + '</section></div></div>';
   }
 
   /* The dashboard's request panel. Deliberately not the full table: five rows,
@@ -810,16 +1131,16 @@
   }
   function activityRow(t) {
     var p = profile(t.badge);
-    return '<div class="activity-row" data-profile="' + esc(t.badge) + '">' +
+    return '<button type="button" class="activity-row" data-profile="' + esc(t.badge) + '">' +
       '<div class="initial">' + esc(p ? p.initials : SuiteData.initialsOf(t.badge)) + '</div><div>' +
       '<div class="row-title">' + esc(p ? p.name : 'Badge ' + t.badge) + '</div>' +
       '<div class="row-sub">' + esc(t.start || '') + (t.end && t.end !== t.start ? ' → ' + esc(t.end) : '') +
       ' · ' + esc(t.hours || 0) + ' hours · ' + esc(TimeOffCore.statusMeta(t.status).label) + '</div></div>' +
-      '<div class="row-type ' + (t.type === 'VTO' ? 'vto' : t.type === 'Sick' ? 'sick' : '') + '">' + esc(t.type) + '</div></div>';
+      '<div class="row-type ' + (t.type === 'VTO' ? 'vto' : t.type === 'Sick' ? 'sick' : '') + '">' + esc(t.type) + '</div></button>';
   }
   function alertRow(n, label, nav) {
-    return '<div class="alert-row" data-nav="' + nav + '"><div class="alert-num">' + n + '</div>' +
-      '<div class="row-title">' + esc(label) + '</div><span>›</span></div>';
+    return '<button type="button" class="alert-row" data-nav="' + nav + '"><span class="alert-num">' + n + '</span>' +
+      '<span class="row-title">' + esc(label) + '</span><span aria-hidden="true">›</span></button>';
   }
 
   /* ---------- associates ---------- */
@@ -834,7 +1155,7 @@
     var rows = all.slice(0, MAX_ROWS);
     var tagged = all.filter(function (p) { return !!p.shift; }).length;
     return hero('Associate roster', 'Built from the RC / Beeline assignment snapshot. Profiles cannot be added by hand — a profile exists because an assignment does.', '', '') +
-      shiftImportPanel(all.length, tagged) +
+      policyNotice() +
       '<section class="suite-panel">' + filters() +
       '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
       sortHead('associates', 'name', 'Associate') +
@@ -858,11 +1179,13 @@
           '<td>' + esc(p.market) + (p.marketRaw ? ' <span class="sub">· ' + esc(p.marketRaw) + '</span>' : '') + '</td>' +
           '<td>' + shiftChip(p) + '</td>' +
           '<td>' + statusChip(p) + '</td><td>' + reconChip(p) + '</td>' +
-          '<td>' + p.points + '</td><td><span class="standing ' + p.standingCls + '">' + esc(p.standing) + '</span></td>' +
+          '<td>' + p.points + '</td><td>' + standingCell(p) + '</td>' +
           '<td>' + scoreCell(p) + '</td>' +
           '<td><button class="suite-btn" data-profile="' + esc(p.badge) + '">Open</button></td></tr>';
       }).join('') : '<tr><td colspan="11">' + empty('No associates match', 'Adjust the search, market, or status filter.') + '</td></tr>') +
-      '</tbody></table></div>' + rowCap(rows.length, all.length) + '</section>';
+      '</tbody></table></div>' + rowCap(rows.length, all.length) + '</section>' +
+      sourceDisclosure('Roster source & shift tags', tagged + ' of ' + all.length + ' associates have a shift tag',
+        shiftImportPanel(all.length, tagged), !tagged);
   }
 
   /* ---------- profile ----------
@@ -870,26 +1193,31 @@
   function profileView() {
     var p = profile(state.profileBadge);
     if (!p) return '<section class="suite-panel"><div class="workflow-empty">That associate is not on the current roster. ' +
-      '<button class="suite-btn" data-nav="associates">Back to roster</button></div></section>';
+      '<button class="suite-btn" data-return-roster>Back to roster</button></div></section>';
     var m = p.performance;
     return '<div class="profile-head"><div class="profile-avatar">' + esc(p.initials) + '</div>' +
       '<div class="profile-id"><h2>' + esc(p.name || 'Unknown') + '</h2>' +
-      '<p>' + idLine(p) +
-      ' · ' + esc(p.market) + '</p>' +
+      '<p>' + idLine(p) + ' · ' + esc(p.market) +
+      (p.locationLabel ? ' · ' + esc(p.locationLabel) : '') +
+      (p.shift ? ' · ' + esc(p.shift) + ' shift' : '') + '</p>' +
       (p.altName ? '<p class="sub">Also on file as “' + esc(p.altName) + '”</p>' : '') + '</div>' +
       '<div class="profile-chips">' + statusChip(p) + reconChip(p) +
       (p.transitionAssociate ? '<span class="status info">Transition associate</span>' : '') +
-      rcContactLink(p) + rcAssignmentLink(p) + '</div>' +
-      '<button class="suite-btn" data-nav="associates">← Roster</button></div>' +
+      rcContactLink(p) + rcAssignmentLink(p) +
+      (p.phone ? '<a class="suite-btn" href="tel:' + esc(ContactsCore.e164(p.phone)) + '">Call</a>' :
+        mayEdit() ? '<button type="button" class="suite-btn" data-phone-edit="' + esc(p.badge) + '">Add mobile</button>' : '') +
+      (mayEdit() ? '<button type="button" class="suite-btn" data-add="task" data-badge="' + esc(p.badge) + '">Raise task</button>' : '') +
+      '</div>' +
+      '<button class="suite-btn" data-return-roster>← Roster</button></div>' +
 
-      '<div class="metric-strip">' +
-      metric('Attendance points', p.points, p.standing, p.points >= 5 ? 'orange' : 'green') +
+      policyNotice() + '<div class="metric-strip">' +
+      metric('Attendance points', p.points, policyVerified() ? p.standing : 'Raw balance · standing withheld', p.points >= 5 ? 'orange' : 'green') +
       metric('Performance score', p.score == null ? '—' : p.score, m ? 'Period ' + (m.period || 'current') : 'No performance record') +
       metric('Time-off requests', p.timeOff.length,
         p.timeOff.filter(function (t) { return TimeOffCore.needsAction(t.status); }).length + ' awaiting action') +
       (p.transitionAssociate ? metric('Transition PTO', p.transitionPtoBalance.toFixed(2) + ' hrs',
         'Original imported balance ' + p.transitionPtoInitial.toFixed(2) + ' hrs', p.transitionPtoBalance ? 'green' : 'orange') : '') +
-      metric('Assignment', p.status, p.status === 'Ended' && p.endDate ? 'Ended ' + esc(p.endDate) : 'Per RC / Beeline snapshot') +
+      metric('Assignment', p.status, p.status === 'Ended' && p.endDate ? 'Ended ' + esc(formatDate(p.endDate)) : 'Per RC / Beeline snapshot') +
       '</div>' +
 
       '<div class="suite-grid"><div class="suite-stack">' +
@@ -898,7 +1226,7 @@
       (p.attendance.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
         '<th>Date</th><th>Type</th><th>Minutes</th><th>Points</th><th>Notes</th></tr></thead><tbody>' +
         p.attendance.map(function (a) {
-          return '<tr><td>' + esc(a.date) + '</td><td>' + esc(a.type) + '</td><td>' + minutesCell(a) + '</td>' +
+          return '<tr><td>' + esc(formatDate(a.date)) + '</td><td>' + esc(a.type) + '</td><td>' + minutesCell(a) + '</td>' +
             '<td>' + ptoPoints(a) + '</td><td class="detail-cell">' + esc(a.notes || '') + '</td></tr>';
         }).join('') + '</tbody></table></div>'
         : empty('No occurrences logged', 'Occurrences arrive with the PLX workbook.')) + '</section>' +
@@ -907,7 +1235,9 @@
       (m ? '<div class="perf-grid">' +
         perfStat('Quality', m.quality) + perfStat('Productivity', m.productivity) + perfStat('Safety', m.safety) +
         perfStat('Units', m.units, true) + perfStat('Hours', m.hours, true) +
-        '</div>' + (m.notes ? '<p class="perf-note">' + esc(m.notes) + '</p>' : '')
+        '</div><p class="perf-note"><b>Composite formula:</b> equal average of the available Quality, Productivity, and Safety percentages. ' +
+        'The displayed score uses period ' + esc(m.period || 'current') + '.</p>' +
+        (m.notes ? '<p class="perf-note">' + esc(m.notes) + '</p>' : '')
         : empty('No performance record', 'Performance metrics load from the site scorecard report.')) + '</section>' +
 
       '</div><div class="suite-stack">' +
@@ -923,8 +1253,8 @@
       detail('Beeline badge', p.badge) +
       (p.timeclockId ? detail('Timeclock id', p.timeclockId) : '') +
       '<dt>Mobile</dt><dd>' + phoneCell(p, { edit: true }) + '</dd>' +
-      detail('RC start', p.crmStart) + detail('Beeline start', p.beeStart) +
-      detail('End date', p.endDate) + detail('End reason', p.endReason) +
+      detail('RC start', p.crmStart ? formatDate(p.crmStart) : '') + detail('Beeline start', p.beeStart ? formatDate(p.beeStart) : '') +
+      detail('End date', p.endDate ? formatDate(p.endDate) : '') + detail('End reason', p.endReason) +
       detail('Market', p.market + (p.marketVerified ? '' : ' (inferred)')) +
       detail('Recommended action', p.actionLabel) +
       (p.contactId ? '<dt>RC record</dt><dd>' + rcContactLink(p, 'Associate') +
@@ -946,7 +1276,7 @@
 
     var body;
     if (!mine && !att.checks) {
-      body = empty('No schedule on file',
+      body = empty('No weekly schedule uploaded',
         week ? 'This associate is not on the stored weekly schedule.'
              : 'Their shift tag above comes from the PLX workbook; upload one in On-Premise.');
     } else {
@@ -1030,10 +1360,13 @@
      not lives in Firebase: partitioned by week for the plan and by day for the
      checks. See DATA_MODEL.md. */
   function persistCheck(fileName) {
+    if (!state.coverage.capturedAt) return;
     var res = buildCoverageResult();
     if (!res) return;   // no schedule loaded yet; the check is saved once there is one
     var date = ScheduleCore.isoDate(coverageAsOf());
     var check = ScheduleCore.toCheck(res, { fileName: fileName });
+    check.reportCapturedAt = state.coverage.capturedAt.toISOString();
+    check.evaluatedAt = coverageAsOf().toISOString();
     state.coverage.saving = 'check';
     render();
     SuiteData.saveCheck(date, check).then(function () {
@@ -1065,6 +1398,11 @@
       state.payroll.periods = periods;
       render();
       if (periods.length) return openPayrollWeek(periods[periods.length - 1]);
+    }).catch(function (err) {
+      state.payroll.loading = false;
+      state.shell.announcement = 'Payroll periods could not be loaded. Retry when the source is available.';
+      render();
+      return null;
     });
   }
   function openPayrollWeek(week) {
@@ -1076,6 +1414,11 @@
       state.payroll.period = period;
       state.payroll.loading = false;
       render();
+    }).catch(function (err) {
+      state.payroll.loading = false;
+      state.shell.announcement = 'That payroll period could not be loaded.';
+      render();
+      return null;
     });
   }
 
@@ -1141,12 +1484,18 @@
   }
 
   function covDrop(kind, step, title, desc, fileName, meta) {
+    var busy = kind === 'workbook' && state.plx.busy;
+    var progress = kind === 'workbook' && state.plx.note
+      ? '<div class="source-progress ' + (/failed|could not/i.test(state.plx.note) ? 'error' : '') + '" role="status">' +
+        esc(state.plx.note) + '</div>' : '';
     return '<section class="suite-panel source-panel"><div class="source-step">' + step + '</div>' +
       '<h3>' + esc(title) + '</h3><p>' + esc(desc) + '</p>' +
       (fileName ? '<div class="cov-file"><strong>' + esc(fileName) + '</strong><span>' + esc(meta) + '</span></div>' : '') +
-      '<label class="suite-btn ' + (fileName ? '' : 'primary') + ' cov-pick">' +
-      (fileName ? 'Replace file' : 'Choose file') +
-      '<input type="file" accept=".xlsx,.xls,.csv" data-cov="' + kind + '"></label></section>';
+      (mayImport() ? '<label class="suite-btn ' + (fileName ? '' : 'primary') + ' cov-pick' + (busy ? ' disabled' : '') + '">' +
+      (busy ? 'Working…' : fileName ? 'Replace file' : 'Choose file') +
+      '<input type="file" accept=".xlsx,.xls,.csv" data-cov="' + kind + '" aria-label="' + esc(title) + ' file"' +
+      (busy ? ' disabled' : '') + '></label>' :
+      '<p class="source-readonly">Your role can view this source but cannot replace it.</p>') + progress + '</section>';
   }
 
   function covSaveNote() {
@@ -1158,8 +1507,8 @@
   function plxMeta() {
     var sync = state.plx.sync;
     if (!sync || !sync.syncedAt) return '';
-    return '<b>' + esc(sync.shiftTags || 0) + '</b> shift tags · <b>' + esc(sync.openOrders || 0) +
-      '</b> open orders · ' + esc(ageLabel(sync.syncedAt));
+    return String(sync.shiftTags || 0) + ' shift tags · ' + String(sync.openOrders || 0) +
+      ' open orders · ' + ageLabel(sync.syncedAt);
   }
 
   function covSources() {
@@ -1186,13 +1535,14 @@
   function covControls(res) {
     var c = state.coverage;
     return '<section class="suite-panel"><div class="filter-row cov-controls">' +
-      '<label class="cov-ctl"><span>As of</span>' +
+      '<label class="cov-ctl"><span>Evaluate schedule at</span>' +
       '<input class="suite-input" type="datetime-local" id="cov-asof" value="' + esc(dtValue(coverageAsOf())) + '"></label>' +
       '<button class="suite-btn" data-cov-now="1">Now</button>' +
       '<label class="cov-ctl"><span>Grace after start</span>' +
       '<input class="suite-input cov-num" type="number" min="0" max="120" step="5" id="cov-grace" value="' + esc(c.grace) + '"> min</label>' +
-      '<span class="cov-asof-note">' + esc(coverageAsOf().toLocaleString()) + '</span>' +
-      '<button class="suite-btn danger" data-cov-clear="1">Clear files</button>' +
+      '<span class="cov-asof-note">Report captured ' + esc(c.capturedAt ? c.capturedAt.toLocaleString() : 'not confirmed') +
+      (c.capturedAt && Math.abs(coverageAsOf() - c.capturedAt) > 60000 ? ' · evaluation override active' : '') + '</span>' +
+      '<button class="suite-btn danger" data-cov-clear="1">Clear current upload</button>' +
       '</div></section>';
   }
 
@@ -1256,6 +1606,41 @@
       (p.phoneSource ? '<div class="sub">' + esc(p.phoneSource) + '</div>' : '') +
       '</div>';
   }
+  function phoneModal(p) {
+    if (!p) return;
+    document.body.insertAdjacentHTML('beforeend',
+      '<div class="suite-modal-backdrop" id="suite-modal"><div class="suite-modal">' +
+      '<div class="suite-modal-head"><h3 id="suite-modal-title">Mobile number</h3>' +
+      '<button type="button" class="suite-btn" data-close aria-label="Close dialog">&times;</button></div>' +
+      '<form class="suite-form" data-phone-form="' + esc(p.badge) + '">' +
+      '<p class="perf-note full">Used to contact <b>' + esc(p.name) + '</b> and look them up in TextUs or Vonage. Leave blank to clear it.</p>' +
+      '<label class="suite-field"><span>US mobile number</span><input name="phone" type="tel" inputmode="tel" ' +
+      'autocomplete="tel" value="' + esc(ContactsCore.format(p.phone)) + '" placeholder="(555) 555-5555" autofocus></label>' +
+      '<div class="suite-modal-actions"><button type="button" class="suite-btn" data-close>Cancel</button>' +
+      '<button class="suite-btn primary">Save number</button></div></form></div></div>');
+    activateDialog('[name="phone"]');
+  }
+  function savePhone(badge, typed, form) {
+    var person = profile(badge);
+    if (!person) return;
+    var trimmed = String(typed || '').trim();
+    var input = form && form.querySelector('[name="phone"]');
+    if (trimmed && !ContactsCore.isValid(trimmed)) {
+      if (input) {
+        input.setCustomValidity('Enter a ten-digit US number, or leave this blank to clear it.');
+        input.reportValidity();
+        input.setCustomValidity('');
+      }
+      return;
+    }
+    var actor = currentActor(true);
+    if (!actor) return;
+    persist('contacts', ContactsCore.record({
+      badge: person.badge, name: person.name, phone: trimmed,
+      eid: person.wfmId || '', nameKey: ScheduleCore.rosterKey(person.name),
+      source: 'Entered by hand'
+    }, actor, new Date()), 'contacts').then(function (ok) { if (ok) closeDialog(); });
+  }
 
   /* Minutes late, or minutes short. Only a hand-logged occurrence carries one:
      the workbook records what happened and on which day, never for how long, so
@@ -1304,17 +1689,24 @@
   function covMetrics(s) {
     var cov = s.coverage == null ? '—' : s.coverage + '%';
     var unsched = s.onClockUnscheduled != null ? s.onClockUnscheduled : (s.byStatus.unscheduled || 0);
+    var tile = function (label, value, note, filter, kind) {
+      return '<button type="button" class="metric metric-action' +
+        (state.coverage.statusFilter === filter ? ' selected' : '') + '" data-cov-preset="' + esc(filter) + '">' +
+        '<span class="metric-icon ' + esc(kind || '') + '">' + (kind === 'green' ? '✓' : kind === 'orange' ? '!' : '#') +
+        '</span><span><span class="metric-label">' + esc(label) + '</span><span class="metric-value">' + esc(value) +
+        '</span><span class="metric-note">' + esc(note) + '</span></span></button>';
+    };
     return '<div class="metric-strip">' +
-      metric('Coverage now', cov, s.byStatus.working + ' of ' + s.onShift + ' on-shift associates present',
+      tile('Coverage now', cov, s.byStatus.working + ' of ' + s.onShift + ' on-shift associates present', 'onshift',
         s.coverage == null ? '' : s.coverage >= 90 ? 'green' : 'orange') +
-      metric('Working', s.byStatus.working, 'On shift and on premise', 'green') +
-      metric('Not clocked in', s.byStatus.missing, 'On shift, not on premise', s.byStatus.missing ? 'orange' : 'green') +
-      metric('On the clock, unscheduled', unsched, 'No shift covering them — check for voluntary OT',
+      tile('Working', s.byStatus.working, 'On shift and on premise', 'working', 'green') +
+      tile('Not clocked in', s.byStatus.missing, 'On shift, not on premise', 'missing', s.byStatus.missing ? 'orange' : 'green') +
+      tile('On the clock, unscheduled', unsched, 'No shift covering them — check for voluntary OT', 'unscheduled',
         unsched ? 'orange' : 'green') +
       (s.byStatus.notInReport
-        ? metric('Not in timeclock', s.byStatus.notInReport, 'Scheduled, but absent from the report entirely', 'orange')
+        ? tile('Not in timeclock', s.byStatus.notInReport, 'Scheduled, but absent from the report entirely', 'notInReport', 'orange')
         : '') +
-      (s.onPto ? metric('On PTO', s.onPto, 'Approved time off, so not counted against coverage') : '') +
+      (s.onPto ? tile('On PTO', s.onPto, 'Approved time off, so not counted against coverage', 'pto', '') : '') +
       '</div>';
   }
 
@@ -1465,6 +1857,7 @@
     if (severity !== 'bad' && severity !== 'warn') return '<span class="sub">—</span>';
     var r = { name: name, badge: badge };
     var doc = documentedFor(key);
+    var feedback = state.coverage.feedback[key];
     var occ = doc && doc.disposition ? DISPOSITION_OCCURRENCE[doc.disposition] : undefined;
     /* Read-only sees what was written, not a form to write it. This is the one
        column where the difference matters most: a disposition decides whether a
@@ -1496,6 +1889,8 @@
         esc(occ.type) + ' · ' + esc(occ.points) + ' pt' + (occ.points === 1 ? '' : 's') +
         ' on the workbook</span>' : '') +
       (occ === null ? '<span class="cov-excused">Excused · no points</span>' : '') +
+      '<span class="save-feedback" role="status">' + (feedback === 'saving' ? 'Saving…' : feedback === 'error' ? 'Not saved' :
+        doc && doc.updatedAt ? 'Saved ' + esc(shortWhen(doc.updatedAt)) + (doc.updatedBy ? ' by ' + esc(doc.updatedBy) : '') : '') + '</span>' +
       '</div>';
   }
   function documentedFor(key) {
@@ -1739,11 +2134,22 @@
   function coverageView() {
     var c = state.coverage;
     var head = hero('On-Premise', 'The weekly schedule crossed with the on-premise snapshot. Both are saved to Firebase, so absences stay documented.') +
-      covSources() + covSaveNote();
+      sourceDisclosure('Data sources',
+        (state.plx.sync && state.plx.sync.syncedAt ? 'PLX workbook loaded' : 'PLX workbook needed') + ' · ' +
+        (c.presenceFile ? 'On-premise export loaded' : 'On-premise export needed'),
+        covSources(), !(state.plx.sync && state.plx.sync.syncedAt && c.presenceFile)) + covSaveNote();
     /* Reviewing comes first: the point of it is reading a pull SOMEONE ELSE
        uploaded, so it must not require having loaded the reports yourself. */
     var reviewing = reviewedCheck();
     if (reviewing) return head + covReviewPicker() + covReview(reviewing);
+    if (c.presence && !c.capturedAt) {
+      return head + covReviewPicker() + '<section class="suite-panel capture-time"><div class="suite-panel-head">' +
+        '<div><span class="eyebrow">Confirmation required</span><h2>When was this report captured?</h2></div></div>' +
+        '<div class="suite-panel-body"><p class="perf-note">The export filename does not include a usable capture time. ' +
+        'Confirm it before comparing the report with a shift; otherwise the same punches can produce a different result.</p>' +
+        '<label class="suite-field"><span>Report capture time</span><input class="suite-input" type="datetime-local" ' +
+        'id="cov-captured-at" value=""></label></div></section>';
+    }
     var sched = activeSchedule();
     if (!sched || !c.presence) {
       var need = !sched && !c.presence ? 'the PLX workbook and the on-premise export'
@@ -1837,7 +2243,8 @@
         state.coverage.presence = pres;
         state.coverage.presenceFile = file.name;
         // Each upload re-dates the check from the export time in the file name.
-        state.coverage.asOf = ScheduleCore.asOfFromFileName(file.name) || new Date();
+        state.coverage.capturedAt = ScheduleCore.asOfFromFileName(file.name) || null;
+        state.coverage.asOf = state.coverage.capturedAt;
         persistCheck(file.name);
         render();
       } catch (err) {
@@ -1855,7 +2262,7 @@
      the sheet's window, which is what it is. */
   function workbookNote() {
     var sync = state.plx.sync;
-    return '<section class="suite-panel plx-bar"><div class="plx-info">' +
+    var detail = '<div class="plx-info">' +
       '<strong>Logged on the PLX workbook</strong>' +
       '<span>Occurrences and points are recorded on the workbook\u2019s attendance tab, not in this ' +
       'tool. This page reads that sheet, so anything typed here would never reach it \u2014 log it ' +
@@ -1865,20 +2272,168 @@
           ' (' + esc(ageLabel(sync.syncedAt)) + ').</span>'
         : '<span class="warn-text">No workbook has been uploaded yet, so nothing has been read from ' +
           'the attendance tab. Upload it on the On-Premise page.</span>') +
-      '</div></section>';
+      '<div class="suite-actions"><button type="button" class="suite-btn" data-nav="coverage">Open On-Premise</button></div>' +
+      '</div>';
+    return sourceDisclosure('PLX workbook source', sync && sync.syncedAt
+      ? 'Last read ' + ageLabel(sync.syncedAt)
+      : 'No workbook has been uploaded', detail, !(sync && sync.syncedAt)).replace('source-disclosure"', 'source-disclosure plx-bar"');
   }
 
   /* ---------- attendance ---------- */
+  function attendanceBaseRows() {
+    return (state.stores.attendance || []).filter(function (row) {
+      var person = profile(row.badge);
+      return state.market === 'all' ? true : inMarket(person);
+    });
+  }
+  function filteredAttendanceRows() {
+    var filters = state.attendanceFilters;
+    var query = state.query.trim().toLowerCase();
+    return attendanceBaseRows().filter(function (row) {
+      var person = profile(row.badge);
+      var points = Number(row.points) || 0;
+      if (query && searchText(person, (row.name || '') + ' ' + (row.badge || '') + ' ' +
+          (row.type || '') + ' ' + (row.date || '') + ' ' + (row.source || '')).toLowerCase().indexOf(query) === -1) return false;
+      if (filters.type !== 'all' && row.type !== filters.type) return false;
+      if (filters.location !== 'all' && (!person || person.locationLabel !== filters.location)) return false;
+      if (filters.points === 'positive' && points <= 0) return false;
+      if (filters.points === 'high' && (!person || Number(person.points) < 5)) return false;
+      if (filters.points === 'zero' && points !== 0) return false;
+      if (filters.excused === 'yes' && !row.excusedBy) return false;
+      if (filters.excused === 'no' && row.excusedBy) return false;
+      if (filters.unmatched && person) return false;
+      if (filters.from && String(row.date || '') < filters.from) return false;
+      if (filters.to && String(row.date || '') > filters.to) return false;
+      return true;
+    });
+  }
+  function attendanceSelect(id, label, current, options) {
+    return '<label class="filter-control"><span>' + esc(label) + '</span><select class="suite-select" id="' + id + '">' +
+      options.map(function (option) {
+        return '<option value="' + esc(option[0]) + '"' + (current === option[0] ? ' selected' : '') + '>' +
+          esc(option[1]) + '</option>';
+      }).join('') + '</select></label>';
+  }
+  function attendanceFilters(rows) {
+    var filters = state.attendanceFilters;
+    var types = Array.from(new Set(rows.map(function (row) { return row.type; }).filter(Boolean))).sort();
+    var locations = Array.from(new Set(rows.map(function (row) {
+      var person = profile(row.badge); return person && person.locationLabel;
+    }).filter(Boolean))).sort();
+    var active = (filters.type !== 'all') + (filters.location !== 'all') + (filters.points !== 'all') +
+      (filters.excused !== 'all') + (filters.unmatched ? 1 : 0) + (filters.from ? 1 : 0) +
+      (filters.to ? 1 : 0) + (state.query.trim() ? 1 : 0);
+    return '<div class="filter-row attendance-filter-row">' +
+      '<label class="filter-control filter-search"><span>Search</span><input class="suite-input" id="suite-search" value="' +
+      esc(state.query) + '" placeholder="EID, name, badge, type, or date…"></label>' +
+      attendanceSelect('attendance-type', 'Type', filters.type,
+        [['all', 'All types']].concat(types.map(function (type) { return [type, type]; }))) +
+      attendanceSelect('attendance-location', 'Site', filters.location,
+        [['all', 'All sites']].concat(locations.map(function (location) { return [location, location]; }))) +
+      attendanceSelect('attendance-points', 'Points / standing', filters.points,
+        [['all', 'Any balance'], ['high', '5+ point associates'], ['positive', 'Point-bearing rows'], ['zero', 'Zero-point rows']]) +
+      attendanceSelect('attendance-excused', 'Excused', filters.excused,
+        [['all', 'Excused or not'], ['yes', 'Excused only'], ['no', 'Not excused']]) +
+      '<label class="filter-control"><span>From</span><input class="suite-input" id="attendance-from" type="date" value="' +
+      esc(filters.from) + '"></label><label class="filter-control"><span>To</span><input class="suite-input" id="attendance-to" type="date" value="' +
+      esc(filters.to) + '"></label>' +
+      '<label class="cov-ctl"><input type="checkbox" id="attendance-unmatched"' + (filters.unmatched ? ' checked' : '') +
+      '> <span>Unmatched only</span></label>' +
+      (active ? '<button type="button" class="suite-btn" data-attendance-clear>Clear ' + active + ' filter' +
+        (active === 1 ? '' : 's') + '</button>' : '') +
+      '<button type="button" class="suite-btn" data-attendance-export>Export filtered</button></div>';
+  }
+  function attendanceRiskTable(rows) {
+    var grouped = new Map();
+    rows.forEach(function (row) {
+      var person = profile(row.badge);
+      if (!person) return;
+      var entry = grouped.get(person.badge) || { person: person, latest: null, count: 0 };
+      entry.count++;
+      if (!entry.latest || String(row.date || '') > String(entry.latest.date || '')) entry.latest = row;
+      grouped.set(person.badge, entry);
+    });
+    var risk = Array.from(grouped.values()).sort(function (a, b) {
+      return Number(b.person.points || 0) - Number(a.person.points || 0) || a.person.name.localeCompare(b.person.name);
+    });
+    if (!risk.length) return empty('No associates match these filters', 'Widen the filters to rebuild the risk list.');
+    return '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
+      '<th>Associate</th><th>Site / shift</th><th>Current balance</th><th>Standing</th><th>Last occurrence</th><th>Rows</th><th></th>' +
+      '</tr></thead><tbody>' + risk.slice(0, MAX_ROWS).map(function (entry) {
+        var person = entry.person, latest = entry.latest;
+        return '<tr class="' + (Number(person.points) >= 5 ? 'cov-row warn' : '') + '"><td><div class="name">' +
+          esc(person.name) + '</div><div class="sub">' + idLine(person) + '</div></td><td>' +
+          esc(person.locationLabel || '—') + (person.shift ? '<div class="sub">' + esc(person.shift) + ' shift</div>' : '') + '</td>' +
+          '<td><b>' + esc(person.points) + '</b></td><td>' + standingCell(person) + '</td><td>' +
+          (latest ? esc(formatDate(latest.date)) + '<div class="sub">' + esc(latest.type || '') + '</div>' : '—') + '</td><td>' +
+          entry.count + '</td><td><button type="button" class="suite-btn" data-profile="' + esc(person.badge) + '">Open profile</button></td></tr>';
+      }).join('') + '</tbody></table></div>' + rowCap(Math.min(risk.length, MAX_ROWS), risk.length);
+  }
+  function exportAttendanceRows(rows) {
+    var quote = function (value) { return '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"'; };
+    var lines = [['Date', 'Associate', 'Badge', 'Site', 'Type', 'Minutes', 'Raw points', 'Applied points',
+      'Current balance', 'Excused', 'Notes', 'Source']].concat(rows.map(function (row) {
+      var person = profile(row.badge);
+      return [row.date || '', person ? person.name : row.name || '', row.badge || '',
+        person ? person.locationLabel || '' : '', row.type || '', row.minutes || '', row.originalPoints == null ? row.points || 0 : row.originalPoints,
+        row.excusedBy ? 0 : row.points || 0, person ? person.points : '', row.excusedBy ? 'Yes' : 'No',
+        row.notes || '', row.source || ''];
+    })).map(function (row) { return row.map(quote).join(','); }).join('\r\n');
+    var blob = new Blob([lines], { type: 'text/csv;charset=utf-8' });
+    var href = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = href;
+    link.download = 'Attendance_' + (state.market === 'all' ? 'All_Markets' : state.market.replace(/[^A-Za-z0-9_-]+/g, '_')) +
+      '_' + today() + '.csv';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(href);
+    state.shell.announcement = rows.length + ' filtered attendance rows exported.';
+    var live = root.querySelector('.suite-live');
+    if (live) live.textContent = state.shell.announcement;
+  }
+  function downloadCsvFile(name, headers, rows) {
+    var quote = function (value) { return '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"'; };
+    var csv = [headers].concat(rows).map(function (row) { return row.map(quote).join(','); }).join('\r\n');
+    var href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    var link = document.createElement('a');
+    link.href = href; link.download = name;
+    document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(href);
+  }
+  function exportPayrollRows(kind) {
+    var suffix = (state.market === 'all' ? 'All_Markets' : state.market.replace(/[^A-Za-z0-9_-]+/g, '_')) + '_' + today() + '.csv';
+    if (kind === 'hours') {
+      var period = state.payroll.period || {}, reviews = period.reviews || {};
+      var changes = state.payroll.filteredChanges || [];
+      downloadCsvFile('Payroll_Hour_Changes_' + suffix,
+        ['Week ending', 'Associate', 'Badge', 'Site', 'Change', 'Before', 'After', 'Delta', 'Detected', 'After close', 'Review', 'Reviewed by', 'Reviewed at', 'Review note'],
+        changes.map(function (change) {
+          var review = reviews[PayrollCore.changeKey(change)] || {};
+          return [change.weekEnding || state.payroll.week, change.name || '', change.badge || '', change.location || '',
+            change.kind || '', change.from, change.to, change.delta, change.at || '', change.afterClose ? 'Yes' : 'No',
+            review.at ? 'Reviewed' : 'Needs review', review.by || '', review.at || '', review.note || ''];
+        }));
+      state.shell.announcement = changes.length + ' filtered hour changes exported.';
+    } else {
+      var rows = state.payroll.filteredDiscrepancies || [];
+      downloadCsvFile('Payroll_Discrepancies_' + suffix,
+        ['Associate', 'Badge', 'Site', 'Date', 'Week ending', 'Details', 'Status', 'Source'],
+        rows.map(function (row) {
+          var person = profile(row.badge);
+          return [person ? person.name : row.name || '', row.badge || '', row.location || '', row.date || '',
+            row.weekEnding || '', row.details || '', PayrollCore.pipeline.statusMeta(row.status).label, row.source || ''];
+        }));
+      state.shell.announcement = rows.length + ' filtered discrepancies exported.';
+    }
+    var live = root.querySelector('.suite-live');
+    if (live) live.textContent = state.shell.announcement;
+  }
   function attendance() {
     if (!state.records) return needsRoster();
     if (!state.storesLoaded) return loadingPanel('attendance records');
-    var q = state.query.trim().toLowerCase();
-    var all = state.stores.attendance.filter(function (a) {
-      var p = profile(a.badge);
-      if (!inMarket(p)) return false;
-      if (!q) return true;
-      return searchText(p, a.badge + ' ' + a.type + ' ' + a.date).toLowerCase().indexOf(q) !== -1;
-    });
+    var base = attendanceBaseRows();
+    var all = filteredAttendanceRows();
     all = sortRows(all, 'attendance', function (a, k) {
       var pr = profile(a.badge);
       if (k === 'location') return pr ? pr.locationLabel : '';
@@ -1888,29 +2443,43 @@
     });
     var rows = all.slice(0, MAX_ROWS);
     var orphans = SuiteData.unmatched(state.profiles, state.stores.attendance);
+    var atRisk = profilesInMarket().filter(function (person) { return Number(person.points) >= 5; }).length;
+    var excused = base.filter(function (row) { return !!row.excusedBy; }).length;
 
     return heroLink('Attendance',
         'Occurrences and points read from the PLX workbook, joined to the assignment roster by badge.',
         PLX_ATTENDANCE_URL, 'Open the attendance tab') +
-      workbookNote() +
+      policyNotice() +
+      '<div class="metric-strip attendance-metrics">' +
+      metric('Occurrences', base.length, 'In the selected market') +
+      metric('Associates at 5+', atRisk, 'Current balance needs review', atRisk ? 'orange' : 'green') +
+      metric('Excused rows', excused, 'Approved time off reduced points') +
+      metric('Unmatched', orphans.length, 'Correct the badge or name at source', orphans.length ? 'orange' : 'green') + '</div>' +
       orphanNote(orphans) +
       '<section class="suite-panel">' +
-      '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
-      '" placeholder="Search by EID, name, badge, type, or date…"></div>' +
+      '<div class="view-switch" role="tablist" aria-label="Attendance view">' +
+      [['occurrences', 'Occurrence ledger'], ['risk', 'Associate risk']].map(function (view) {
+        return '<button type="button" role="tab" class="suite-btn ' +
+          (state.attendanceFilters.view === view[0] ? 'primary' : '') + '" aria-selected="' +
+          (state.attendanceFilters.view === view[0] ? 'true' : 'false') + '" data-attendance-view="' + view[0] + '">' + view[1] + '</button>';
+      }).join('') + '</div>' + attendanceFilters(base) +
+      (state.attendanceFilters.view === 'risk' ? attendanceRiskTable(all) :
       (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
         sortHead('attendance', 'date', 'Date') +
         sortHead('attendance', 'name', 'Associate') +
         sortHead('attendance', 'location', 'Site / account') +
         sortHead('attendance', 'type', 'Type') +
-        '<th title="Minutes late or short. The workbook records what happened and on which day, never for how long, so only occurrences logged by hand before this page went read-only carry one.">Minutes</th>' +
+        '<th>Minutes<span class="header-help">Late or short, when supplied</span></th>' +
         sortHead('attendance', 'points', 'Points') +
-        '<th title="This associate\u2019s total across every occurrence -- not a running total down this table.">Balance</th>' +
+        '<th>Balance<span class="header-help">Associate total, not row total</span></th>' +
         '<th>Notes</th></tr></thead><tbody>' +
         rows.map(function (a) {
           var p = profile(a.badge);
-          return '<tr><td>' + esc(a.date) + '</td>' +
+          return '<tr><td>' + esc(formatDate(a.date)) + '</td>' +
             '<td>' + (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div><div class="sub">' + esc(p.badge) + '</div>'
-              : '<div class="name">Badge ' + esc(a.badge) + '</div><div class="sub warn-text">Not on roster</div>') + '</td>' +
+              : '<div class="name">' + esc(a.name || (a.badge ? 'Badge ' + a.badge : 'Unidentified row')) + '</div>' +
+                '<div class="sub warn-text">Not on roster · ' + esc(a.source || 'PLX workbook') + '</div>' +
+                extLink(PLX_ATTENDANCE_URL, 'Correct at source', 'suite-btn tiny')) + '</td>' +
             '<td>' + (p && p.location
               ? esc(p.location) + (p.account ? ' <span class="sub">' + esc(p.account) + '</span>' : '')
               : '<span class="sub">—</span>') + '</td>' +
@@ -1921,8 +2490,8 @@
               (a.source ? '<div class="sub">' + esc(a.source) + '</div>' : '') + '</td></tr>';
         }).join('') + '</tbody></table></div>' + rowCap(rows.length, all.length)
         : empty('No attendance records',
-            'Occurrences arrive with the PLX workbook. Upload it on the On-Premise page to pull the attendance tab through.')) +
-      '</section>';
+            'Occurrences arrive with the PLX workbook. Upload it on the On-Premise page to pull the attendance tab through.'))) +
+      '</section>' + workbookNote();
   }
 
   /* ---------- time off ---------- */
@@ -1960,8 +2529,9 @@
     return '<section class="suite-panel pto-import"><div class="suite-panel-head">' +
       '<h2>Shared IL PTO tracker</h2><div class="suite-actions">' +
       extLink(link, 'Open the spreadsheet', 'suite-btn') + ' ' +
-      '<label class="suite-btn cov-pick primary">Import tracker' +
-      '<input type="file" accept=".xlsx,.xls" data-pto-book></label></div></div>' +
+      (mayImport() ? '<label class="suite-btn cov-pick primary">Import tracker' +
+      '<input type="file" accept=".xlsx,.xls" data-pto-book aria-label="Import shared PTO tracker"></label>' : '') +
+      '</div></div>' +
       '<p class="perf-note">The workbook Chicago and St. Louis share. GEODIS PTO is read from the ' +
       '<b>30080</b>, <b>GEODIS - 20062</b> and <b>20062 Geodis Processed</b> tabs; rows on 30080 for other ' +
       'clients are counted and left alone. An import replaces what this tracker last said and does not ' +
@@ -2095,9 +2665,14 @@
   function timeoff() {
     if (!state.records) return needsRoster();
     if (!state.storesLoaded) return loadingPanel('time-off requests');
+    var highlightedRequest = state.highlightId && (state.stores.timeOff || []).filter(function (row) {
+      return row.id === state.highlightId;
+    })[0];
+    if (highlightedRequest && isCompletedRequest(highlightedRequest)) state.timeoff.showCompleted = true;
     var showCompleted = state.timeoff.showCompleted;
+    var timeoffFilters = state.timeoff;
     var q = state.query.trim().toLowerCase();
-    var all = state.stores.timeOff.filter(function (t) {
+    var scoped = state.stores.timeOff.filter(function (t) {
       var p = profile(t.badge);
       // A request from a form carries a name but may have no badge, so it has no
       // market either. Hiding it would lose a PTO request nobody has actioned.
@@ -2105,7 +2680,26 @@
       if (!q) return true;
       return searchText(p, (p ? '' : t.name || '') + ' ' + t.badge + ' ' + t.type + ' ' +
         t.status + ' ' + (t.source || '')).toLowerCase().indexOf(q) !== -1;
-    }).sort(function (a, b) { return String(b.start || '').localeCompare(String(a.start || '')); });
+    });
+    var maxWindow = new Date(); maxWindow.setDate(maxWindow.getDate() + 30);
+    var maxWindowIso = maxWindow.toISOString().slice(0, 10);
+    var all = scoped.filter(function (request) {
+      var status = TimeOffCore.normalizeStatus(request.status);
+      var start = String(request.start || ''), end = String(request.end || request.start || '');
+      if (timeoffFilters.status !== 'all' && status !== timeoffFilters.status) return false;
+      if (timeoffFilters.type !== 'all' && request.type !== timeoffFilters.type) return false;
+      if (timeoffFilters.needsAction && !TimeOffCore.needsAction(status)) return false;
+      if (timeoffFilters.window === 'upcoming' && end < today()) return false;
+      if (timeoffFilters.window === 'next30' && (end < today() || start > maxWindowIso)) return false;
+      if (timeoffFilters.window === 'past' && end >= today()) return false;
+      return true;
+    }).sort(function (a, b) {
+      var aAction = TimeOffCore.needsAction(a.status) ? 1 : 0;
+      var bAction = TimeOffCore.needsAction(b.status) ? 1 : 0;
+      if (aAction !== bAction) return bAction - aAction;
+      return aAction ? String(a.start || '').localeCompare(String(b.start || ''))
+        : String(b.start || '').localeCompare(String(a.start || ''));
+    });
     // Counted after the market and the search, so the number on the checkbox is
     // what ticking it would actually add to the list.
     var completed = all.filter(isCompletedRequest).length;
@@ -2113,47 +2707,83 @@
     var rows = shown.slice(0, MAX_ROWS);
 
     var orphans = state.stores.timeOff.filter(function (t) { return !profile(t.badge); });
+    var needsActionCount = scoped.filter(function (request) { return TimeOffCore.needsAction(request.status); }).length;
+    var awaitingClient = scoped.filter(function (request) {
+      return TimeOffCore.normalizeStatus(request.status) === 'Sent for Client Approval';
+    }).length;
+    var awaitingPayroll = scoped.filter(function (request) {
+      return TimeOffCore.normalizeStatus(request.status) === 'Approved';
+    }).length;
+    var upcomingCount = scoped.filter(function (request) {
+      var status = TimeOffCore.normalizeStatus(request.status);
+      return String(request.end || request.start || '') >= today() && ['Denied', 'Cancelled'].indexOf(status) === -1;
+    }).length;
+    var types = Array.from(new Set(scoped.map(function (request) { return request.type; }).filter(Boolean))).sort();
     // The banner says they are listed below, so it has to own up when they aren't.
     var orphansHidden = showCompleted ? 0 : orphans.filter(isCompletedRequest).length;
-    return heroLink('PTO / VTO tracking',
+    return sourceReturnBanner() + heroLink('PTO / VTO tracking',
         'Approved time off is excused and carries no attendance points. Requests are raised on the shared tracker.',
         ptoTrackerLink(), 'Open the PTO spreadsheet') +
-      ptoImportPanel() +
+      '<div class="metric-strip action-metrics">' +
+      '<button type="button" class="metric" data-timeoff-preset="needs"><span class="metric-icon orange">!</span><span><span class="metric-label">Needs action</span><span class="metric-value">' + needsActionCount +
+      '</span><span class="metric-note">Received or awaiting a decision</span></span></button>' +
+      '<button type="button" class="metric" data-timeoff-preset="client"><span class="metric-icon">#</span><span><span class="metric-label">Awaiting client</span><span class="metric-value">' + awaitingClient +
+      '</span><span class="metric-note">Sent for approval</span></span></button>' +
+      '<button type="button" class="metric" data-timeoff-preset="payroll"><span class="metric-icon">#</span><span><span class="metric-label">Awaiting payroll</span><span class="metric-value">' + awaitingPayroll +
+      '</span><span class="metric-note">Approved, not submitted</span></span></button>' +
+      '<button type="button" class="metric" data-timeoff-preset="upcoming"><span class="metric-icon green">✓</span><span><span class="metric-label">Upcoming</span><span class="metric-value">' + upcomingCount +
+      '</span><span class="metric-note">Approved or in progress</span></span></button>' +
+      '</div>' +
       (orphans.length ? '<div class="warn-banner"><b>' + orphans.length + '</b> request' +
         (orphans.length === 1 ? '' : 's') + ' could not be matched to an associate on the roster — usually a ' +
         'name typed differently on the form. They are listed below and still need actioning.' +
         (orphansHidden ? ' <b>' + orphansHidden + '</b> of them completed — tick "Show completed" to reach ' +
           (orphansHidden === 1 ? 'it' : 'them') + '.' : '') + '</div>' : '') +
       '<section class="suite-panel">' +
-      '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
-      '" placeholder="Search by EID, name, badge, type, or status…">' +
+      '<div class="filter-row timeoff-filter-row"><label class="filter-control filter-search"><span>Search</span>' +
+      '<input class="suite-input" id="suite-search" value="' + esc(state.query) +
+      '" placeholder="EID, name, badge, type, or status…"></label>' +
+      attendanceSelect('timeoff-status', 'Status', timeoffFilters.status,
+        [['all', 'All statuses']].concat(TimeOffCore.STATUS_KEYS.map(function (key) { return [key, TimeOffCore.statusMeta(key).label]; }))) +
+      attendanceSelect('timeoff-type', 'Type', timeoffFilters.type,
+        [['all', 'All types']].concat(types.map(function (type) { return [type, type]; }))) +
+      attendanceSelect('timeoff-window', 'Date window', timeoffFilters.window,
+        [['all', 'Any date'], ['upcoming', 'Upcoming'], ['next30', 'Next 30 days'], ['past', 'Past']]) +
+      '<label class="cov-ctl"><input type="checkbox" id="timeoff-needs"' + (timeoffFilters.needsAction ? ' checked' : '') +
+      '> <span>Needs action only</span></label>' +
       '<label class="cov-ctl"><input type="checkbox" id="timeoff-completed"' + (showCompleted ? ' checked' : '') +
-      '> <span>Show completed' + (completed ? ' (' + completed + ')' : '') + '</span></label></div>' +
+      '> <span>Show completed' + (completed ? ' (' + completed + ')' : '') + '</span></label>' +
+      ((timeoffFilters.status !== 'all' || timeoffFilters.type !== 'all' || timeoffFilters.window !== 'all' ||
+        timeoffFilters.needsAction || state.query) ? '<button type="button" class="suite-btn" data-timeoff-clear>Clear filters</button>' : '') + '</div>' +
       (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
         '<th>Associate</th><th>Type</th><th>Dates</th><th>Hours</th><th>Status</th><th>Attendance tie-in</th><th></th></tr></thead><tbody>' +
         rows.map(function (t) {
           var p = profile(t.badge);
-          return '<tr' + (p ? '' : ' class="cov-row warn"') + '><td>' +
+          return '<tr id="record-' + esc(t.id) + '" tabindex="-1" class="' +
+            (p ? '' : 'cov-row warn ') + (state.highlightId === t.id ? 'record-highlight' : '') + '"><td>' +
             (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div><div class="sub">' + esc(p.badge) + '</div>'
                : '<div class="name">' + esc(t.name || 'Badge ' + t.badge) + '</div>' +
                  '<div class="sub warn-text">Not matched to a profile</div>') +
             (t.source ? '<div class="sub">' + esc(t.source) + '</div>' : '') + '</td>' +
             '<td><span class="row-type ' + (t.type === 'VTO' ? 'vto' : t.type === 'Sick' ? 'sick' : '') + '">' + esc(t.type) + '</span></td>' +
-            '<td>' + esc(t.start) + (t.end && t.end !== t.start ? ' → ' + esc(t.end) : '') + '</td>' +
+            '<td>' + esc(formatDate(t.start)) + (t.end && t.end !== t.start ? ' → ' + esc(formatDate(t.end)) : '') + '</td>' +
             '<td>' + esc(t.hours || 0) + (Number(t.transitionHours) > 0 ? '<div class="sub">' +
               esc(t.transitionHours) + ' transition · ' + esc(t.accrualHours || 0) + ' accrual</div>' : '') + '</td>' +
             '<td>' + statusSelect(t) + '</td>' +
             '<td>' + tieIn(t) + '</td>' +
             '<td>' + (mayEdit()
               ? (p ? '' : '<button class="suite-btn" data-connect="' + esc(t.id) + '">Connect…</button> ') +
-                '<button class="suite-btn danger" data-del="timeoff|' + esc(t.id) + '">Remove</button>'
+                '<button class="suite-btn danger" data-del="timeoff|' + esc(t.id) + '" title="Imported rows may return on the next tracker sync">Remove local copy</button>'
               : '<span class="sub">&mdash;</span>') + '</td></tr>';
         }).join('') + '</tbody></table></div>' + rowCap(rows.length, shown.length)
         : empty(completed && !showCompleted ? 'Nothing outstanding' : 'No time-off requests',
             completed && !showCompleted
               ? completed + ' completed request' + (completed === 1 ? ' is' : 's are') +
                 ' hidden — tick "Show completed" to see ' + (completed === 1 ? 'it' : 'them') + '.'
-              : undefined)) + '</section>';
+              : undefined)) + '</section>' +
+      sourceDisclosure('PTO tracker source',
+        state.ilPto.sync && state.ilPto.sync.syncedAt ? 'Last pulled ' + ageLabel(state.ilPto.sync.syncedAt) : 'Manual import required',
+        ptoImportPanel(), !(state.ilPto.sync && state.ilPto.sync.syncedAt));
   }
 
   /* A request moves through a pipeline rather than being approved or not, so the
@@ -2205,6 +2835,28 @@
   /* Connecting a timeclock id to a profile. Separate from connectModal(), which
      patches a single record: this writes a mapping that every future on-premise
      upload consults, so the same person never has to be connected twice. */
+  var dialogReturnFocus = null;
+  function activateDialog(initialSelector) {
+    var backdrop = document.getElementById('suite-modal');
+    if (!backdrop) return;
+    dialogReturnFocus = document.activeElement;
+    var dialog = backdrop.querySelector('.suite-modal');
+    if (dialog) {
+      dialog.setAttribute('role', 'dialog');
+      dialog.setAttribute('aria-modal', 'true');
+      dialog.setAttribute('aria-labelledby', 'suite-modal-title');
+    }
+    root.setAttribute('aria-hidden', 'true');
+    var first = backdrop.querySelector(initialSelector || '[autofocus],input,select,textarea,button');
+    if (first) first.focus();
+  }
+  function closeDialog() {
+    var backdrop = document.getElementById('suite-modal');
+    if (backdrop) backdrop.remove();
+    root.removeAttribute('aria-hidden');
+    if (dialogReturnFocus && document.contains(dialogReturnFocus)) dialogReturnFocus.focus();
+    dialogReturnFocus = null;
+  }
   function linkModal(eid, name) {
     if (!eid) {
       alert('That row has no timeclock id, so there is nothing to connect. ' +
@@ -2216,8 +2868,8 @@
     state.connectQuery = name || '';
     document.body.insertAdjacentHTML('beforeend',
       '<div class="suite-modal-backdrop" id="suite-modal"><div class="suite-modal">' +
-      '<div class="suite-modal-head"><h3>Connect “' + esc(name || eid) + '”</h3>' +
-      '<button class="suite-btn" data-close>×</button></div>' +
+      '<div class="suite-modal-head"><h3 id="suite-modal-title">Connect “' + esc(name || eid) + '”</h3>' +
+      '<button class="suite-btn" data-close aria-label="Close dialog">&times;</button></div>' +
       '<div class="connect-body">' +
       '<p class="perf-note">Timeclock id <b>' + esc(eid) + '</b> does not match any associate by name. ' +
       'Search the roster for the right person — the connection is remembered, so every future ' +
@@ -2227,6 +2879,7 @@
       '<div id="connect-results">' + connectResults() + '</div></div>' +
       '<div class="suite-modal-actions"><button type="button" class="suite-btn" data-close>Cancel</button></div>' +
       '</div></div>');
+    activateDialog('#connect-search');
     var box = document.getElementById('connect-search');
     if (box) { box.focus(); box.select(); }
   }
@@ -2240,8 +2893,8 @@
     state.connectQuery = t.name || '';
     document.body.insertAdjacentHTML('beforeend',
       '<div class="suite-modal-backdrop" id="suite-modal"><div class="suite-modal">' +
-      '<div class="suite-modal-head"><h3>Connect “' + esc(t.name || 'this request') + '”</h3>' +
-      '<button class="suite-btn" data-close>×</button></div>' +
+      '<div class="suite-modal-head"><h3 id="suite-modal-title">Connect “' + esc(t.name || 'this request') + '”</h3>' +
+      '<button class="suite-btn" data-close aria-label="Close dialog">&times;</button></div>' +
       '<div class="connect-body">' +
       '<p class="perf-note">Search the roster for the associate this request belongs to. ' +
       'Linking is recorded against your name.</p>' +
@@ -2250,6 +2903,7 @@
       '<div id="connect-results">' + connectResults() + '</div></div>' +
       '<div class="suite-modal-actions"><button type="button" class="suite-btn" data-close>Cancel</button></div>' +
       '</div></div>');
+    activateDialog('#connect-search');
     var box = document.getElementById('connect-search');
     if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
   }
@@ -2403,6 +3057,7 @@
 
   function taskFilters(every, now) {
     var f = state.tasks, tests = taskTests(now);
+    var completed = every.filter(function (task) { return !TasksCore.isOpen(task); }).length;
     var active = (f.kind !== 'all') + (f.status !== 'all') + (f.urgency !== 'all') +
       (f.source !== 'all') + (state.query.trim() ? 1 : 0);
     return '<div class="filter-row task-filters">' +
@@ -2418,9 +3073,9 @@
         TASK_URGENCY.map(function (u) { return [u[2], u[1]]; }), f.urgency,
         taskCounts(every, tests, 'urgency', function (t) { return TasksCore.urgencyOf(t, now); })) +
       taskSelect('task-source', 'From anywhere', TASK_SOURCES, f.source,
-        taskCounts(every, tests, 'source', taskSourceOf)) +
+      taskCounts(every, tests, 'source', taskSourceOf)) +
       '<label class="cov-ctl"><input type="checkbox" id="task-done"' + (f.showDone ? ' checked' : '') +
-      '> <span>Show completed</span></label>' +
+      '> <span>Show completed' + (completed ? ' (' + completed + ')' : '') + '</span></label>' +
       (active ? '<button class="suite-btn" data-task-clear="1">Clear ' + active + ' filter' +
         (active === 1 ? '' : 's') + '</button>' : '') +
       '</div>';
@@ -2447,7 +3102,8 @@
         TasksCore.kindMeta('note').hours + '.</div>' : '') +
       '<section class="suite-panel">' + taskFilters(every, now) +
       (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
-        '<th>Task</th><th>Kind</th><th>Associate</th><th>Raised</th><th>Age</th><th>Status</th><th></th>' +
+        '<th>Task</th><th>Kind / priority</th><th>Owner / due</th><th>Associate / site</th>' +
+        '<th>Raised</th><th>Age</th><th>Status</th><th>Action</th>' +
         '</tr></thead><tbody>' +
         rows.slice(0, MAX_ROWS).map(function (t) { return taskRow(t, now); }).join('') +
         '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length)
@@ -2464,12 +3120,16 @@
       '<td class="detail-cell"><div class="name detail-text">' + esc(t.title) + '</div>' +
       detailText(t.detail, 'sub') + '</td>' +
       '<td><span class="task-kind">' + esc(kind.label) + '</span>' +
+      (t.priority ? '<div class="sub task-priority">' + esc(t.priority) + ' priority</div>' : '') +
       (kind.unknown ? '<div class="sub warn-text">not a kind this build knows</div>' : '') + '</td>' +
+      '<td><div class="name">' + esc(t.assignee || 'Unassigned') + '</div>' +
+      '<div class="sub' + (t.due && t.due < today() ? ' warn-text' : '') + '">' +
+      (t.due ? 'Due ' + esc(formatDate(t.due)) : 'No due date') + '</div></td>' +
       '<td>' + (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div>' +
-                    '<div class="sub">' + idLine(p) + '</div>'
+                    '<div class="sub">' + idLine(p) + (t.location ? ' · ' + esc(t.location) : '') + '</div>'
                   : t.name ? '<div class="name">' + esc(t.name) + '</div>' +
-                    '<div class="sub warn-text">no profile</div>'
-                  : '<span class="sub">—</span>') + '</td>' +
+                    '<div class="sub warn-text">no profile' + (t.location ? ' · ' + esc(t.location) : '') + '</div>'
+                  : '<span class="sub">' + esc(t.location || '—') + '</span>') + '</td>' +
       '<td>' + esc(shortWhen(t.createdAt) || '—') + '<div class="sub">' + esc(t.source || '') + '</div></td>' +
       '<td>' + urgencyChip(t, now) + '</td>' +
       /* A derived task is a view of a record that lives elsewhere, so its status
@@ -2479,7 +3139,7 @@
           '<div class="sub">on ' + esc(TasksCore.kindMeta(t.kind).panel === 'timeoff' ? 'Time Off' : 'Payroll') + '</div>'
         : pipelineSelect(t, TasksCore.pipeline, 'tasks')) + '</td>' +
       '<td>' + (t.derived
-        ? '<button class="suite-btn" data-nav="' + esc(kind.panel) + '">Open ›</button>'
+        ? '<button class="suite-btn" data-open-source="' + esc(kind.panel) + '|' + esc(t.sourceId || '') + '">Open source ›</button>'
         : mayEdit()
           ? '<button class="suite-btn" data-task-done="' + esc(t.id) + '"' +
             (TasksCore.isOpen(t) ? '' : ' disabled') + '>Complete</button> ' +
@@ -2494,13 +3154,16 @@
      hours watch is the system noticing it. */
   function payrollView() {
     var pr = state.payroll;
-    return hero('Payroll', 'Discrepancies raised by the team, and hours that changed after a period closed.', '', '') +
-      '<div class="filter-row payroll-tabs">' +
+    return sourceReturnBanner() + hero('Payroll', 'Discrepancies raised by the team, and hours that changed after a period closed.', '', '') +
+      '<div class="filter-row payroll-tabs" role="tablist" aria-label="Payroll views">' +
       [['discrepancies', 'Discrepancies'], ['hours', 'Beeline hours']].map(function (x) {
         return '<button class="suite-btn ' + (pr.tab === x[0] ? 'primary' : '') +
-          '" data-payroll-tab="' + x[0] + '">' + esc(x[1]) + '</button>';
+          '" id="payroll-tab-' + x[0] + '" role="tab" aria-controls="payroll-panel" tabindex="' +
+          (pr.tab === x[0] ? '0' : '-1') + '" aria-selected="' + (pr.tab === x[0] ? 'true' : 'false') + '" data-payroll-tab="' +
+          x[0] + '">' + esc(x[1]) + '</button>';
       }).join('') + '</div>' +
-      (pr.tab === 'hours' ? payrollHours() : payrollDiscrepancies());
+      '<div id="payroll-panel" role="tabpanel" aria-labelledby="payroll-tab-' + esc(pr.tab) + '">' +
+      (pr.tab === 'hours' ? payrollHours() : payrollDiscrepancies()) + '</div>';
   }
 
   /* Payroll issues arrive two ways and used to be visible in only one place
@@ -2556,18 +3219,31 @@
   function payrollDiscrepancies() {
     if (!state.storesLoaded) return loadingPanel('discrepancies');
     var q = state.query.trim().toLowerCase();
-    var all = (state.stores.discrepancies || []).filter(function (dsc) {
+    var scoped = (state.stores.discrepancies || []).filter(function (dsc) {
       var p = profile(dsc.badge);
       if (p ? !inMarket(p) : state.market !== 'all' && dsc.badge) return false;
       if (!q) return true;
       return searchText(p, (p ? '' : dsc.name || '') + ' ' + dsc.badge + ' ' + dsc.location + ' ' +
         dsc.details + ' ' + dsc.status).toLowerCase().indexOf(q) !== -1;
-    }).sort(function (a, b) { return String(b.date || '').localeCompare(String(a.date || '')); });
+    });
+    var all = scoped.filter(function (dsc) {
+      if (state.payroll.discrepancyStatus !== 'all' &&
+          PayrollCore.pipeline.statusMeta(dsc.status).key !== state.payroll.discrepancyStatus) return false;
+      if (state.payroll.discrepancyLocation !== 'all' && String(dsc.location || '') !== state.payroll.discrepancyLocation) return false;
+      if (state.payroll.missingDate && dsc.date) return false;
+      return true;
+    }).sort(function (a, b) {
+      var aOpen = PayrollCore.pipeline.needsAction(a.status) ? 1 : 0;
+      var bOpen = PayrollCore.pipeline.needsAction(b.status) ? 1 : 0;
+      return bOpen - aOpen || String(b.date || '').localeCompare(String(a.date || ''));
+    });
     var rows = all.slice(0, MAX_ROWS);
     var open = all.filter(function (dsc) { return PayrollCore.pipeline.needsAction(dsc.status); }).length;
     var orphans = (state.stores.discrepancies || []).filter(function (dsc) { return !profile(dsc.badge); });
 
     var openTaskCount = payrollTasks().filter(TasksCore.isOpen).length;
+    var payrollLocations = Array.from(new Set(scoped.map(function (dsc) { return dsc.location; }).filter(Boolean))).sort();
+    state.payroll.filteredDiscrepancies = all;
 
     return '<div class="metric-strip">' +
       metric('Open discrepancies', open, 'Not yet corrected or closed', open ? 'orange' : 'green') +
@@ -2580,20 +3256,30 @@
         (orphans.length === 1 ? 'y' : 'ies') + ' could not be matched to an associate — usually a name ' +
         'typed differently on the form. Use Connect to link them.</div>' : '') +
       '<section class="suite-panel">' +
-      '<div class="filter-row"><input class="suite-input" id="suite-search" value="' + esc(state.query) +
-      '" placeholder="Search by EID, name, location, detail, or status…"></div>' +
+      '<div class="filter-row payroll-filter-row"><label class="filter-control filter-search"><span>Search</span>' +
+      '<input class="suite-input" id="suite-search" value="' + esc(state.query) +
+      '" placeholder="EID, name, location, detail, or status…"></label>' +
+      attendanceSelect('payroll-status', 'Status', state.payroll.discrepancyStatus,
+        [['all', 'All statuses']].concat(PayrollCore.pipeline.STATUS_KEYS.map(function (key) {
+          return [key, PayrollCore.pipeline.statusMeta(key).label];
+        }))) + attendanceSelect('payroll-location', 'Site', state.payroll.discrepancyLocation,
+          [['all', 'All sites']].concat(payrollLocations.map(function (location) { return [location, location]; }))) +
+      '<label class="cov-ctl"><input type="checkbox" id="payroll-missing-date"' +
+      (state.payroll.missingDate ? ' checked' : '') + '> <span>Missing date only</span></label>' +
+      '<button type="button" class="suite-btn" data-payroll-export="discrepancies">Export filtered</button></div>' +
       (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
         '<th>Associate</th><th>Location</th><th>Date</th><th>Week ending</th><th>Details</th>' +
         '<th>Status</th><th></th></tr></thead><tbody>' +
         rows.map(function (dsc) {
           var p = profile(dsc.badge);
-          return '<tr' + (p ? '' : ' class="cov-row warn"') + '><td>' +
+          return '<tr id="record-' + esc(dsc.id) + '" tabindex="-1" class="' +
+            (p ? '' : 'cov-row warn ') + (state.highlightId === dsc.id ? 'record-highlight' : '') + '"><td>' +
             (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div>' +
                  '<div class="sub">' + idLine(p) + '</div>'
                : '<div class="name">' + esc(dsc.name || 'Unknown') + '</div>' +
                  '<div class="sub warn-text">Not matched to a profile</div>') + '</td>' +
             '<td>' + esc(dsc.location || '—') + '</td>' +
-            '<td>' + esc(dsc.date || '<span class="warn-text">not set</span>') + '</td>' +
+            '<td>' + (dsc.date ? esc(formatDate(dsc.date)) : '<span class="warn-text">Not set</span>') + '</td>' +
             '<td>' + esc(dsc.weekEnding || '—') + '</td>' +
             '<td class="detail-cell">' + (detailText(dsc.details) || '<span class="sub">&mdash;</span>') + '</td>' +
             '<td>' + pipelineSelect(dsc, PayrollCore.pipeline, 'discrepancies') + '</td>' +
@@ -2622,23 +3308,37 @@
           }).join('')
         : '<option value="">No periods yet</option>') +
       '</select></label>' +
-      (pr.week ? '<label class="cov-ctl">Payroll closed<input class="suite-input" type="datetime-local" ' +
-        'id="payroll-close" value="' + esc(dtValue(closeDate())) + '"></label>' +
+      (pr.week ? '<label class="cov-ctl"><span>' + (closeDate() ? 'Payroll close time' : 'Set close time') + '</span><input class="suite-input" type="datetime-local" ' +
+        'id="payroll-close" value="' + (closeDate() ? esc(dtValue(closeDate())) : '') + '"></label>' +
         '<span class="cov-asof-note">' + (pr.period && pr.period.closesAt
-          ? 'Changes after this are flagged' : 'Set this to flag post-close changes') + '</span>' : '') +
+          ? 'Changes after this are flagged · ' + esc(Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time') +
+            (pr.period.closeBy ? ' · set by ' + esc(pr.period.closeBy) : '')
+          : '<b>Not set</b> · post-close changes are not inferred') + '</span>' : '') +
       '</div>';
 
     if (pr.loading) return picker + loadingPanel('this pay period');
     if (!pr.periods.length) {
       return picker + '<section class="suite-panel"><div class="workflow-empty">' +
-        'No hours have been posted yet. An automation posts each pull of the Beeline hours report to ' +
-        '<code>?payroll=1&amp;week=YYYY-MM-DD</code>, and every pull after the first is compared with the one ' +
-        'before it.</div></section>';
+        'No Beeline hours have arrived yet. Once the scheduled report starts sending data, the first pull becomes ' +
+        'the baseline and later pulls are compared with it.</div></section>';
     }
     var period = pr.period || {};
     var snaps = period.snapshots || [];
-    var changes = (period.changes || []).slice().reverse();
-    var afterClose = changes.filter(function (c) { return c.afterClose; });
+    var rawChanges = (period.changes || []).slice().reverse();
+    var reviews = period.reviews || {};
+    var hoursQuery = state.query.trim().toLowerCase();
+    var changes = rawChanges.filter(function (change) {
+      var person = profile(change.badge);
+      var review = reviews[PayrollCore.changeKey(change)];
+      if (state.payroll.afterCloseOnly && !change.afterClose) return false;
+      if (state.payroll.review === 'reviewed' && !review) return false;
+      if (state.payroll.review === 'unreviewed' && review) return false;
+      if (hoursQuery && searchText(person, (change.name || '') + ' ' + (change.badge || '') + ' ' +
+          (change.location || '') + ' ' + (change.kind || '')).toLowerCase().indexOf(hoursQuery) === -1) return false;
+      return true;
+    });
+    var afterClose = rawChanges.filter(function (c) { return c.afterClose; });
+    state.payroll.filteredChanges = changes;
     var latest = snaps.length ? snaps[snaps.length - 1] : null;
     var sum = (latest && latest.summary) || {};
 
@@ -2654,10 +3354,18 @@
         (afterClose.length === 1 ? '' : 's') + ' landed after this period closed. Those are the ones to check ' +
         'against what was already paid.</div>' : '') +
       '<section class="suite-panel"><div class="suite-panel-head"><h2>Hour changes</h2></div>' +
+      '<div class="filter-row payroll-filter-row"><label class="filter-control filter-search"><span>Search</span>' +
+      '<input class="suite-input" id="suite-search" value="' + esc(state.query) + '" placeholder="Associate, badge, site, or change…"></label>' +
+      '<label class="cov-ctl"><input type="checkbox" id="payroll-after-close"' +
+      (state.payroll.afterCloseOnly ? ' checked' : '') + '> <span>After close only</span></label>' +
+      attendanceSelect('payroll-review-filter', 'Review', state.payroll.review,
+        [['all', 'Any review state'], ['unreviewed', 'Needs review'], ['reviewed', 'Reviewed']]) +
+      '<button type="button" class="suite-btn" data-payroll-export="hours">Export filtered</button></div>' +
       (changes.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
-        '<th>Associate</th><th>Change</th><th>Before</th><th>After</th><th>Delta</th><th>Seen</th></tr></thead><tbody>' +
+        '<th>Associate</th><th>Change</th><th>Before</th><th>After</th><th>Delta</th><th>Detected</th><th>Review</th></tr></thead><tbody>' +
         changes.slice(0, MAX_ROWS).map(function (c) {
           var p = profile(c.badge);
+          var review = reviews[PayrollCore.changeKey(c)];
           return '<tr class="' + (c.afterClose ? 'cov-row bad' : '') + '"><td>' +
             (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div>'
                : '<div class="name">' + esc(c.name || c.badge) + '</div>') +
@@ -2667,7 +3375,14 @@
             '<td>' + esc(c.from) + '</td><td>' + esc(c.to) + '</td>' +
             '<td class="' + (c.delta > 0 ? 'delta-up' : c.delta < 0 ? 'delta-down' : '') + '">' +
             (c.delta > 0 ? '+' : '') + esc(c.delta) + '</td>' +
-            '<td>' + esc(shortWhen(c.at)) + '</td></tr>';
+            '<td>' + esc(shortWhen(c.at)) + '</td><td>' +
+            (review ? '<span class="status">Reviewed</span><div class="sub">' + esc(review.by || '') + ' · ' +
+              esc(shortWhen(review.at)) + '</div>' + (review.note ? '<div class="sub">' + esc(review.note) + '</div>' : '') +
+              (mayEdit() ? '<button type="button" class="suite-btn tiny" data-payroll-review="' +
+                esc(PayrollCore.changeKey(c)) + '" data-reviewed="true">Edit review</button>' : '')
+              : mayEdit() ? '<button type="button" class="suite-btn" data-payroll-review="' +
+                esc(PayrollCore.changeKey(c)) + '">Mark reviewed</button>' : '<span class="sub">Needs review</span>') +
+            '</td></tr>';
         }).join('') + '</tbody></table></div>' + rowCap(Math.min(changes.length, MAX_ROWS), changes.length)
         : empty('No changes recorded', snaps.length < 2
             ? 'The first pull is a baseline. Changes appear from the second pull onward.'
@@ -2677,7 +3392,7 @@
   function closeDate() {
     var c = state.payroll.period && state.payroll.period.closesAt;
     var d = c ? new Date(c) : null;
-    return d && !isNaN(d.getTime()) ? d : new Date();
+    return d && !isNaN(d.getTime()) ? d : null;
   }
 
   /* The same status, for an account that may not change it. A disabled <select>
@@ -2739,17 +3454,20 @@
           ? 'You can give colleagues and managers a role. Locations, shifts and the settings themselves need an administrator.'
           : 'Changing accounts, locations or shifts needs a manager or an administrator.') +
         '</div>') +
-      '<div class="filter-row payroll-tabs">' + tabs.map(function (x) {
+      '<div class="filter-row payroll-tabs" role="tablist" aria-label="Settings sections">' + tabs.map(function (x) {
         return '<button class="suite-btn ' + (state.admin.tab === x[0] ? 'primary' : '') +
+          '" id="settings-tab-' + x[0] + '" role="tab" aria-controls="settings-panel" tabindex="' +
+          (state.admin.tab === x[0] ? '0' : '-1') + '" aria-selected="' + (state.admin.tab === x[0] ? 'true' : 'false') +
           '" data-settings-tab="' + x[0] + '">' + esc(x[1]) + '</button>';
       }).join('') + '</div>' +
+      '<div id="settings-panel" role="tabpanel" aria-labelledby="settings-tab-' + esc(state.admin.tab) + '">' +
       (state.admin.tab === 'account' ? accountPanel()
         : !state.admin.loaded ? loadingPanel('settings')
         : state.admin.tab === 'users' ? usersPanel()
         : state.admin.tab === 'locations' ? listPanel('locations', admin)
         : state.admin.tab === 'connections' ? connectionsPanel()
         : state.admin.tab === 'links' ? appConfigPanel(admin)
-        : listPanel('shiftTypes', admin));
+        : listPanel('shiftTypes', admin)) + '</div>';
   }
 
   /* ---------- connections ----------
@@ -3000,8 +3718,7 @@
             admin: 'change settings' }[c] || c;
         }).join(', ')
       : 'nothing yet';
-    return '<section class="suite-panel"><div class="suite-panel-head"><h2>Signed in</h2>' +
-      '<div class="suite-actions"><button class="suite-btn" data-sign-out>Sign out</button></div></div>' +
+    return '<section class="suite-panel"><div class="suite-panel-head"><h2>Signed in</h2></div>' +
       '<dl class="detail-list">' +
       detail('Email', a.email) +
       detail('Role', role.label + (role.unknown ? ' — not a role this build knows, so it grants nothing' : '')) +
@@ -3069,9 +3786,13 @@
                     'a change here would be undone at the next sign-in</div>'
                   : me && me.email === u.email ? '' : '<div class="sub">above your own</div>')) + '</td>' +
             '<td>' + (editable
-              ? '<input class="suite-input" data-user-markets="' + esc(u.email) + '" value="' +
-                esc(u.markets.join(', ')) + '" placeholder="All markets">' +
-                '<div class="sub">' + esc(markets.join(', ') || 'no markets yet') + '</div>'
+              ? '<select class="suite-select user-market-select" multiple size="' + Math.min(4, Math.max(2, markets.length + 1)) +
+                '" data-user-markets-multi="' + esc(u.email) + '" aria-label="Markets for ' + esc(u.email) + '">' +
+                '<option value="__all__"' + (!u.markets.length ? ' selected' : '') + '>All authorized markets</option>' +
+                markets.map(function (marketName) {
+                  return '<option value="' + esc(marketName) + '"' + (u.markets.indexOf(marketName) !== -1 ? ' selected' : '') +
+                    '>' + esc(marketName) + '</option>';
+                }).join('') + '</select><div class="sub">Choose All, or one or more named markets.</div>'
               : esc(u.markets.length ? u.markets.join(', ') : 'All markets')) + '</td>' +
             '<td>' + (editable
               ? '<button class="suite-btn ' + (u.enabled ? 'danger' : '') + '" data-user-toggle="' + esc(u.email) + '">' +
@@ -3097,6 +3818,23 @@
       blank: function () { return { key: '', label: '', location: '', hours: '', active: true }; }
     }
   };
+  function listDraftModal(which, id) {
+    var spec = LISTS[which];
+    if (!spec) return;
+    var existing = (state.admin[which] || []).filter(function (row) { return row.id === id; })[0];
+    var draft = existing || spec.blank();
+    var inputs = spec.cols.map(function (column) {
+      return '<label class="suite-field"><span>' + esc(column[1]) + '</span><input class="suite-input" name="' +
+        esc(column[0]) + '" value="' + esc(draft[column[0]] || '') + '" required></label>';
+    }).join('');
+    document.body.insertAdjacentHTML('beforeend', '<div class="suite-modal-backdrop" id="suite-modal"><div class="suite-modal">' +
+      '<div class="suite-modal-head"><h3 id="suite-modal-title">' + esc(existing ? 'Edit ' + spec.title.slice(0, -1) : spec.add) +
+      '</h3><button class="suite-btn" data-close aria-label="Close dialog">&times;</button></div>' +
+      '<form class="suite-form" data-admin-list-form="' + esc(which) + '" data-record-id="' + esc(id || '') + '">' +
+      inputs + '<div class="suite-modal-actions"><button type="button" class="suite-btn" data-close>Cancel</button>' +
+      '<button class="suite-btn primary">' + (existing ? 'Save changes' : spec.add) + '</button></div></form></div></div>');
+    activateDialog('input');
+  }
   /* The RC base URL and assignment object live in Settings rather than in code:
      they differ per Salesforce org, and a wrong URL should be a field to fix,
      not a deploy. */
@@ -3107,6 +3845,14 @@
       hint: 'The object an assignment record lives on. TargetRecruit uses TR1__Closing_Report__c; its ids start "a58".' },
     { key: 'ilPtoTrackerUrl', label: 'Shared IL PTO tracker (SharePoint)',
       hint: 'The workbook Chicago and St. Louis share. Blank uses the built-in link.' },
+    { key: 'attendancePolicyName', label: 'Attendance policy name',
+      hint: 'The approved document name shown beside attendance decisions.' },
+    { key: 'attendancePolicyVersion', label: 'Attendance policy version',
+      hint: 'Required before disciplinary standing is shown, e.g. 2026.1.' },
+    { key: 'attendancePolicyEffective', label: 'Attendance policy effective date',
+      hint: 'YYYY-MM-DD from the approved policy.' },
+    { key: 'attendancePolicyVerifiedAt', label: 'Attendance policy verified date',
+      hint: 'YYYY-MM-DD; clear this whenever the policy needs re-verification.' },
     /* Who may create an account. Only ever ADDS to the built-in list -- see
        setAllowedDomains() in auth-core.js. Clearing this field falls back to the
        built-ins rather than to nothing, so a typo here cannot lock every
@@ -3124,14 +3870,17 @@
     return '<section class="suite-panel"><div class="suite-panel-head"><h2>App settings</h2></div>' +
       '<p class="perf-note">The daily RC assignment export carries an 18-character record id for the ' +
       'associate and the assignment. With a base URL set, those become links straight into RC.</p>' +
+      (admin ? '<form class="settings-form" data-app-config-form>' : '<div class="settings-form">') +
       APP_SETTINGS.map(function (f) {
         return '<label class="suite-field"><span>' + esc(f.label) + '</span>' +
           (admin
-            ? '<input class="suite-input" data-app-config="' + f.key + '" value="' + esc(valueOf(f.key)) +
+            ? '<input class="suite-input" name="' + f.key + '" data-app-config="' + f.key + '" value="' + esc(valueOf(f.key)) +
               '" placeholder="' + esc(f.hint) + '">'
             : '<span class="sub">' + esc(valueOf(f.key) || 'not set') + '</span>') +
           '<span class="sub">' + esc(f.hint) + '</span></label>';
-      }).join('') +
+      }).join('') + (admin ? '<div class="settings-actions"><button type="button" class="suite-btn" data-test-config>Validate settings</button>' +
+        '<button class="suite-btn primary">Save settings</button><span id="app-config-status" role="status" aria-live="polite"></span>' +
+        '</div></form>' : '</div>') +
       (valueOf('rcBaseUrl')
         ? '<p class="perf-note">Links are live, and show only where RC actually has a record id.</p>'
         : '<p class="perf-note">No base URL set, so no links appear anywhere — the ids are stored either way.</p>') +
@@ -3152,16 +3901,13 @@
         '<th>Status</th>' + (admin ? '<th></th>' : '') + '</tr></thead><tbody>' +
         rows.map(function (r) {
           return '<tr>' + spec.cols.map(function (c) {
-            return '<td>' + (admin
-              ? '<input class="suite-input" data-list-field="' + which + '|' + esc(r.id) + '|' + c[0] +
-                '" value="' + esc(r[c[0]] || '') + '">'
-              : esc(r[c[0]] || '—')) + '</td>';
+            return '<td>' + esc(r[c[0]] || '—') + '</td>';
           }).join('') +
             '<td><span class="status ' + (r.active === false ? 'closed' : '') + '">' +
-            (r.active === false ? 'Inactive' : 'Active') + '</span></td>' +
-            (admin ? '<td><button class="suite-btn" data-list-toggle="' + which + '|' + esc(r.id) + '">' +
-              (r.active === false ? 'Activate' : 'Deactivate') + '</button> ' +
-              '<button class="suite-btn danger" data-del="' + which + '|' + esc(r.id) + '">Remove</button></td>' : '') +
+            (r.active === false ? 'Archived' : 'Active') + '</span></td>' +
+            (admin ? '<td><button class="suite-btn" data-list-edit="' + which + '|' + esc(r.id) + '">Edit</button> ' +
+              '<button class="suite-btn" data-list-toggle="' + which + '|' + esc(r.id) + '">' +
+              (r.active === false ? 'Restore' : 'Archive') + '</button></td>' : '') +
             '</tr>';
         }).join('') + '</tbody></table></div>'
         : empty('Nothing added yet', admin ? 'Use ' + spec.add + ' above.' : 'An administrator can add these.')) +
@@ -3182,6 +3928,11 @@
       state.admin.loaded = true;
       state.admin.loading = false;
       render();
+    }).catch(function (err) {
+      state.admin.loading = false;
+      state.shell.announcement = 'Settings data could not be loaded. Retry when the source is available.';
+      render();
+      return null;
     });
   }
 
@@ -3348,9 +4099,11 @@
     return '<section class="suite-panel req-import"><div class="suite-panel-head">' +
       '<h2>Add an export by hand</h2><div class="suite-actions">' +
       (srcs.length ? '<button class="suite-btn" data-req-clear="1">Start over</button> ' : '') +
-      (srcs.length && missing.length ? '<button class="suite-btn" data-req-save="1">Save anyway</button> ' : '') +
-      '<label class="suite-btn cov-pick' + (srcs.length ? '' : ' primary') + '">Add export file' +
-      '<input type="file" accept=".csv,.xlsx,.xls" data-req-file></label></div></div>' +
+      (srcs.length ? '<button class="suite-btn primary" data-req-save="1">Review &amp; import</button> ' : '') +
+      (state.reqBackup ? '<button class="suite-btn" data-req-rollback="1">Rollback last import</button> ' : '') +
+      (mayImport() ? '<label class="suite-btn cov-pick' + (srcs.length ? '' : ' primary') + '">Add export file' +
+      '<input type="file" accept=".csv,.xlsx,.xls" data-req-file aria-label="Add Beeline export file"></label>' : '') +
+      '</div></div>' +
       '<p class="perf-note">The emailed exports import themselves; this is for a report that did not arrive, ' +
       'or an off-cycle pull. Drop the <b>GEODIS Open Reqs</b> and <b>Candidate Status per Req</b> exports — in either ' +
       'order, or one combined file if the columns are all on it. Both files list one row per candidate, so the ' +
@@ -3575,7 +4328,7 @@
      counts are then the only thing that knows who progressed. */
   function reqCandidateRows(r) {
     if (!r.candidateCount) {
-      return '<tr class="req-detail"><td colspan="8"><div class="req-none">Nobody has been submitted to this request yet.</div></td></tr>';
+      return '<tr class="req-detail" id="req-detail-' + esc(r.id) + '"><td colspan="9"><div class="req-none">Nobody has been submitted to this request yet.</div></td></tr>';
     }
     var breakdown = Object.keys(r.statusCounts || {}).map(function (k) {
       return r.statusCounts[k] + ' ' + k.toLowerCase();
@@ -3583,7 +4336,7 @@
     var head = r.candidateCount + ' submitted' + (breakdown ? ' · ' + breakdown : '') +
       (r.hasCandidateStatus ? '' :
         ' <span class="req-note">This export does not say which candidate reached which stage.</span>');
-    return '<tr class="req-detail"><td colspan="8"><div class="req-cands">' +
+    return '<tr class="req-detail" id="req-detail-' + esc(r.id) + '"><td colspan="9"><div class="req-cands">' +
       '<div class="req-cands-head">' + head + '</div>' +
       '<table class="suite-table"><thead><tr><th>Candidate</th><th>Status</th><th>Beeline ID</th>' +
       '<th>External ID</th><th>On roster</th></tr></thead><tbody>' +
@@ -3608,12 +4361,16 @@
       sortHead('requisitions', 'positions', 'Positions') +
       sortHead('requisitions', 'submitted', 'Submitted') +
       sortHead('requisitions', 'filled', 'Filled') +
+      sortHead('requisitions', 'short', 'Short by') +
       sortHead('requisitions', 'manager', 'Hiring manager') +
       '</tr></thead><tbody>' +
       rows.slice(0, MAX_ROWS).map(function (r) {
         var open = !!state.reqExpanded[r.id];
-        return '<tr class="req-row ' + (open ? 'open' : '') + '" data-req-expand="' + esc(r.id) + '">' +
-          '<td class="req-caret"><span>' + (open ? '▾' : '▸') + '</span></td>' +
+        return '<tr class="req-row ' + (open ? 'open' : '') + '">' +
+          '<td class="req-caret"><button type="button" class="req-toggle" data-req-expand="' + esc(r.id) +
+          '" aria-expanded="' + (open ? 'true' : 'false') + '" aria-controls="req-detail-' + esc(r.id) +
+          '" aria-label="' + (open ? 'Collapse' : 'Show') + ' candidates for ' + esc(r.id) + '">' +
+          '<span aria-hidden="true">' + (open ? '▾' : '▸') + '</span></button></td>' +
           '<td><div class="name">' + esc(r.jobPosition || 'Beeline request') + '</div>' +
           '<div class="sub">' + esc(r.id) + '</div></td>' +
           '<td>' + startCell(r) + '</td>' +
@@ -3632,6 +4389,8 @@
             : '<span class="score ' + (r.fillPct < 70 ? 'bad' : r.fillPct < 90 ? 'warn' : '') + '">' +
               r.hired + ' / ' + r.requested + '</span>') +
           ' ' + reqHealthChip(r) + '</td>' +
+          '<td><strong class="' + (r.shortBy ? 'warn-text' : 'ok-text') + '">' +
+          (r.shortBy == null ? '—' : esc(r.shortBy)) + '</strong></td>' +
           '<td><div class="name">' + esc(r.hiringManager || '—') + '</div>' +
           (r.reportsTo ? '<div class="sub">reports to ' + esc(r.reportsTo) + '</div>' : '') + '</td></tr>' +
           (open ? reqCandidateRows(r) : '');
@@ -3674,8 +4433,8 @@
         'No Beeline requests loaded yet. Add the daily export above to see open requests and who is on them.' +
         '</div></section>';
 
-    return hero('Beeline Requests', 'Open requests and the candidates attached to them.', 'requisition', 'New request') +
-      reqSyncBar() + reqImportPanel() + body +
+    return hero('Beeline Requests', 'Open requests and the candidates attached to them.', 'requisition', 'Add off-board request') +
+      body +
       (wbOnly.length
         ? '<section class="suite-panel"><div class="suite-panel-head"><h2>In the PLX workbook, not in Beeline</h2></div>' +
           '<p class="perf-note">The workbook is edited by the client, so a request can appear there before Beeline has it — ' +
@@ -3687,7 +4446,10 @@
           '<p class="perf-note">Requests typed into the suite rather than imported from Beeline or the workbook. ' +
           'An import leaves these alone.</p>' +
           reqTable(manual, false) + '</section>'
-        : '');
+        : '') +
+      sourceDisclosure('Beeline data sources', state.reqSync && state.reqSync.syncedAt
+        ? 'Automated exports last imported ' + ageLabel(state.reqSync.syncedAt)
+        : 'No automated export received', reqSyncBar() + reqImportPanel(), !(state.reqSync && state.reqSync.syncedAt));
   }
 
   /* What the two sources disagree about. Shown above the table rather than buried
@@ -3764,10 +4526,10 @@
         state.reqSources = (state.reqSources || [])
           .filter(function (s) { return s.fileName !== file.name; })
           .concat([parsed]);
-        state.reqImport = null;
-        // Everything the board needs is loaded: save without a second click.
-        if (!ReqsCore.missingColumns(state.reqSources).length) saveReqImport();
-        else render();
+        var summary = reqImportSummary();
+        state.reqImport = { headline: 'Ready to review · ' + summary.requests + ' requests · ' +
+          summary.candidates + ' candidates · ' + summary.changed + ' request records will change', warnings: [] };
+        render();
       } catch (err) {
         console.error(err);
         state.reqImport = { failed: true, headline: 'Could not read "' + file.name + '": ' + err.message, warnings: [] };
@@ -3776,6 +4538,17 @@
     };
     reader.onerror = function () { alert('Failed to read "' + file.name + '".'); };
     reader.readAsArrayBuffer(file);
+  }
+
+  function reqImportSummary() {
+    var srcs = state.reqSources || [];
+    if (!srcs.length) return { requests: 0, candidates: 0, changed: 0 };
+    var board = ReqsCore.buildBoard({ sources: srcs, locations: state.stores.locations });
+    var incoming = ReqsCore.toReqRecords(board);
+    var existing = {};
+    (state.stores.requisitions || []).forEach(function (row) { existing[row.id] = JSON.stringify(row); });
+    var changed = incoming.filter(function (row) { return existing[row.id] !== JSON.stringify(row); }).length;
+    return { requests: incoming.length, candidates: ReqsCore.toCandidateRecords(board).length, changed: changed };
   }
 
   function saveReqImport() {
@@ -3789,6 +4562,8 @@
     var reqRecords = ReqsCore.toReqRecords(board);
     var candRecords = ReqsCore.toCandidateRecords(board);
     var merged = ReqsCore.mergeForSave(state.stores.requisitions, reqRecords);
+    var backup = { requisitions: (state.stores.requisitions || []).map(function (r) { return Object.assign({}, r); }),
+      reqCandidates: (state.stores.reqCandidates || []).map(function (r) { return Object.assign({}, r); }) };
     state.reqImport = { headline: 'Saving ' + reqRecords.length + ' requests…', warnings: [] };
     render();
 
@@ -3798,6 +4573,7 @@
     ]).then(function () {
       state.stores.requisitions = merged;
       state.stores.reqCandidates = candRecords;
+      state.reqBackup = backup;
       rebuild();
       var missing = ReqsCore.missingColumns(srcs);
       state.reqImport = {
@@ -3810,6 +4586,33 @@
       render();
     }).catch(function (err) {
       state.reqImport = { failed: true, headline: 'Could not save the requests: ' + err.message, warnings: [] };
+      Promise.all([
+        SuiteData.replaceCollection('requisitions', backup.requisitions),
+        SuiteData.replaceCollection('reqCandidates', backup.reqCandidates)
+      ]).then(function () {
+        state.stores.requisitions = backup.requisitions;
+        state.stores.reqCandidates = backup.reqCandidates;
+        state.reqImport.warnings = ['The previous board was restored automatically.'];
+        render();
+      }).catch(function () { render(); });
+    });
+  }
+
+  function rollbackReqImport() {
+    var backup = state.reqBackup;
+    if (!backup) return;
+    Promise.all([
+      SuiteData.replaceCollection('requisitions', backup.requisitions),
+      SuiteData.replaceCollection('reqCandidates', backup.reqCandidates)
+    ]).then(function () {
+      state.stores.requisitions = backup.requisitions;
+      state.stores.reqCandidates = backup.reqCandidates;
+      state.reqBackup = null;
+      state.reqSources = [];
+      state.reqImport = { headline: 'The previous Beeline board was restored.', warnings: [] };
+      rebuild(); render();
+    }).catch(function (err) {
+      state.reqImport = { failed: true, headline: 'Could not restore the previous board: ' + err.message, warnings: [] };
       render();
     });
   }
@@ -3930,35 +4733,46 @@
   }
   function gateShell(title, body, extra) {
     return '<div class="gate"><div class="gate-card">' +
-      '<div class="gate-brand"><div class="suite-logo">G</div>' +
-      '<div><strong>GEODIS</strong><small>MANAGEMENT SUITE</small></div></div>' +
+      '<div class="gate-brand"><img class="suite-logo" src="' + GEODIS_LOGO_URL + '" alt="GEODIS">' +
+      '<small>MANAGEMENT SUITE</small></div>' +
       '<h1>' + esc(title) + '</h1>' + (body ? '<p>' + body + '</p>' : '') + (extra || '') +
       '</div></div>';
   }
   function signInScreen() {
     var a = state.auth;
+    var mode = state.shell.signInMode || 'in';
+    var labels = { in: 'Sign in', create: 'Create account', reset: 'Reset password' };
+    var password = mode === 'reset' ? '' :
+      '<label class="suite-field"><span>Password</span>' +
+      '<input name="password" type="password" autocomplete="' + (mode === 'create' ? 'new-password' : 'current-password') +
+      '" minlength="6" required></label>';
+    var confirmPassword = mode === 'create'
+      ? '<label class="suite-field"><span>Confirm password</span>' +
+        '<input name="passwordConfirm" type="password" autocomplete="new-password" minlength="6" required></label>'
+      : '';
     return gateShell('Sign in',
       'This tool carries the roster, attendance and pay for the whole site. ' +
       'It is open to ' + boldList(AuthCore.allowedDomainList()) + ' addresses.',
       '<form class="signin-form gate-form" data-signin>' +
+      '<div class="signin-mode" role="tablist" aria-label="Account access">' +
+      [['in', 'Sign in'], ['create', 'Create account'], ['reset', 'Forgot password']].map(function (item) {
+        return '<button type="button" class="suite-btn ' + (mode === item[0] ? 'primary' : '') +
+          '" role="tab" aria-selected="' + (mode === item[0] ? 'true' : 'false') +
+          '" data-auth-mode="' + item[0] + '" data-signin-do="' + item[0] + '">' + item[1] + '</button>';
+      }).join('') + '</div>' +
       '<label class="suite-field"><span>Work email</span>' +
-      '<input name="email" type="email" autocomplete="username" placeholder="you@geodis.com" required></label>' +
-      '<label class="suite-field"><span>Password</span>' +
-      '<input name="password" type="password" autocomplete="current-password" minlength="6" required></label>' +
-      '<div class="signin-actions">' +
-      /* All three are type="button". The form's own required/minlength only ever
-         ran for the submit one, so "Create account" -- the button a new person
-         reaches for -- was the one with no validation behind it. They are all
-         checked in guard() now, which is the same check for all three. */
-      '<button type="button" class="suite-btn primary" data-signin-do="in"' + (a.loading ? ' disabled' : '') + '>' +
-      (a.loading ? 'Working…' : 'Sign in') + '</button>' +
-      '<button type="button" class="suite-btn" data-signin-do="create">Create account</button>' +
-      '<button type="button" class="suite-btn" data-signin-do="reset">Forgot password</button>' +
-      '</div></form>' +
-      (a.error ? '<div class="warn-banner">' + esc(a.error) + '</div>' : '') +
-      '<p class="gate-note"><b>First time here?</b> Use <b>Create account</b>, not Sign in — ' +
-      'your work email does not have one until you make it. A new account starts as a ' +
-      '<b>Colleague</b>, so the tool works as soon as you are in.</p>');
+      '<input name="email" type="email" autocomplete="username" value="' + esc(state.shell.signInEmail || '') +
+      '" placeholder="you@geodis.com" required></label>' +
+      password + confirmPassword +
+      '<div class="signin-actions"><button class="suite-btn primary" data-signin-submit' +
+      (a.loading ? ' disabled' : '') + '>' + (a.loading ? 'Working…' : labels[mode]) + '</button></div>' +
+      (a.error ? '<div class="warn-banner" role="alert">' + esc(a.error) + '</div>' : '') +
+      '</form>' +
+      (mode === 'create'
+        ? '<p class="gate-note"><b>First time here?</b> A new account starts as a <b>Colleague</b>, so the tool works as soon as you are in.</p>'
+        : mode === 'reset'
+          ? '<p class="gate-note">We’ll send a reset link to your work email.</p>'
+          : '<p class="gate-note">Use <b>Create account</b> if this is your first visit.</p>'));
   }
   function noAccessScreen() {
     var a = state.auth, acct = account();
@@ -3986,6 +4800,32 @@
       'A manager or an administrator can give you the Colleague role under Settings → Users.</div>';
   }
 
+  function dataStateBanner() {
+    if (!SuiteData.getSourceStates) return '';
+    var states = SuiteData.getSourceStates();
+    var troubled = Object.keys(states).map(function (key) { return states[key]; }).filter(function (source) {
+      return source.status === 'error' || source.status === 'stale';
+    });
+    if (!troubled.length) return '';
+    var stale = troubled.filter(function (source) { return source.hasData; }).length;
+    var failed = troubled.length - stale;
+    return '<section class="data-health-notice ' + (failed ? 'error' : 'stale') + '" role="' +
+      (failed ? 'alert' : 'status') + '"><div><b>' +
+      (failed ? 'Some data could not be loaded' : 'Showing last known data') + '</b><span>' +
+      (failed ? failed + ' source' + (failed === 1 ? '' : 's') + ' unavailable. ' : '') +
+      (stale ? stale + ' source' + (stale === 1 ? '' : 's') + ' could not refresh. ' : '') +
+      'Existing values are kept and clearly marked.</span></div><button class="suite-btn" data-refresh>Retry</button></section>';
+  }
+  function feedbackToast() {
+    var undo = state.shell.undo;
+    if (!undo || undo.expiresAt <= Date.now()) {
+      state.shell.undo = null;
+      return '';
+    }
+    return '<div class="suite-toast" role="status"><span>' + esc(undo.message) + '</span>' +
+      '<button type="button" data-undo-change>Undo</button><button type="button" data-dismiss-toast aria-label="Dismiss">&times;</button></div>';
+  }
+
   /* ---------- render ---------- */
   var VIEWS = {
     overview: overview, associates: associates, profile: profileView,
@@ -3993,6 +4833,41 @@
     payroll: payrollView, requisitions: requisitions, reconciliation: reconciliation,
     settings: settingsView, tasks: tasksView
   };
+  function enhanceRenderedUi() {
+    root.querySelectorAll('div[data-profile],span[data-profile]').forEach(function (el) {
+      if (el.closest('button,a')) return;
+      var button = document.createElement('button');
+      button.type = 'button';
+      Array.from(el.attributes).forEach(function (attr) { button.setAttribute(attr.name, attr.value); });
+      button.classList.add('inline-control');
+      button.innerHTML = el.innerHTML;
+      el.replaceWith(button);
+    });
+    root.querySelectorAll('.suite-table-wrap').forEach(function (wrap, index) {
+      if (!wrap.hasAttribute('tabindex')) wrap.tabIndex = 0;
+      wrap.setAttribute('role', 'region');
+      var panel = wrap.closest('.suite-panel');
+      var heading = panel && panel.querySelector('h2,h3');
+      wrap.setAttribute('aria-label', (heading ? heading.textContent.trim() : 'Results') + ' table');
+      wrap.querySelectorAll('th').forEach(function (th) { th.setAttribute('scope', 'col'); });
+      var table = wrap.querySelector('table');
+      if (table && !table.querySelector('caption')) {
+        var caption = document.createElement('caption');
+        caption.className = 'visually-hidden';
+        caption.textContent = wrap.getAttribute('aria-label');
+        table.insertBefore(caption, table.firstChild);
+      }
+    });
+    root.querySelectorAll('input,select,textarea').forEach(function (control) {
+      if (control.getAttribute('aria-label') || control.getAttribute('aria-labelledby') ||
+          (control.labels && control.labels.length)) return;
+      var row = control.closest('tr');
+      var rowName = row && row.cells && row.cells[0] ? row.cells[0].textContent.trim().replace(/\s+/g, ' ') : '';
+      control.setAttribute('aria-label', control.placeholder ||
+        (control.classList.contains('status-select') ? 'Status' + (rowName ? ' for ' + rowName : '') :
+          String(control.id || control.name || 'Field').replace(/[-_]/g, ' ')));
+    });
+  }
   function render() {
     invalidateTasks();
     unmountRecon();   // rescue the reconciliation DOM before innerHTML wipes it
@@ -4013,20 +4888,90 @@
        cannot ask mayEdit() the way this file does. The class is how it finds
        out -- see body.suite-readonly in suite.css and GEODISSuite.can() below. */
     document.body.classList.toggle('suite-readonly', !mayEdit());
-    var body = readOnlyBanner() + (VIEWS[state.view] || overview)();
-    root.innerHTML = '<div class="suite-layout">' + navHtml() + '<div class="suite-main">' + headerHtml() +
-      '<main class="suite-content">' + body + '</main></div></div>';
+    var body = dataStateBanner() + readOnlyBanner() + (VIEWS[state.view] || overview)();
+    root.innerHTML = '<div class="suite-layout" data-view="' + esc(state.view) + '">' + navHtml() +
+      '<div class="suite-main">' + headerHtml() +
+      '<main class="suite-content" id="suite-main" tabindex="-1">' + body + '</main></div></div>' +
+      feedbackToast() + '<div class="suite-live" aria-live="polite" aria-atomic="true">' + esc(state.shell.announcement) + '</div>';
     if (state.view === 'reconciliation') mountRecon();
+    enhanceRenderedUi();
+    syncRoute(true);
   }
-  function go(view, badge) {
+  function syncRoute(replace) {
+    if (!history || !history.pushState) return;
+    var href = routeHref(state.view, state.profileBadge, currentRouteExtras());
+    var snapshot = { view: state.view, badge: state.profileBadge, market: state.market,
+      query: state.query, settingsTab: state.admin.tab, payrollTab: state.payroll.tab };
+    if (replace) history.replaceState(snapshot, '', href); else history.pushState(snapshot, '', href);
+  }
+  function go(view, badge, options) {
+    options = options || {};
+    if (VALID_VIEWS.indexOf(view) === -1) view = 'overview';
     state.view = view;
     if (badge !== undefined) state.profileBadge = badge;
-    state.query = '';
+    state.highlightId = options.record || '';
+    if (!options.keepQuery) state.query = '';
+    state.shell.mobileOpen = false;
+    state.shell.accountOpen = false;
+    syncRoute(!!options.replace);
     render();
-    window.scrollTo(0, 0);
+    window.scrollTo(0, Number(options.scrollY) || 0);
+    var title = document.getElementById('suite-page-title');
+    if (title) title.focus();
   }
 
+  window.addEventListener('popstate', function () {
+    var params = new URLSearchParams(location.search);
+    var view = params.get('view') || 'overview';
+    state.view = VALID_VIEWS.indexOf(view) === -1 ? 'overview' : view;
+    state.profileBadge = params.get('badge') || null;
+    state.highlightId = params.get('record') || '';
+    if (params.get('market')) state.market = params.get('market');
+    state.query = params.get('q') || '';
+    if (state.view === 'settings' && params.get('tab')) state.admin.tab = params.get('tab');
+    if (state.view === 'payroll' && params.get('tab')) state.payroll.tab = params.get('tab');
+    applyRouteFilters(params);
+    state.shell.mobileOpen = false;
+    state.shell.accountOpen = false;
+    render();
+    var title = document.getElementById('suite-page-title');
+    if (title) title.focus();
+  });
+
   /* ---------- modals ---------- */
+  function payrollReviewModal(key) {
+    var period = state.payroll.period || {};
+    var existing = (period.reviews || {})[key] || {};
+    document.body.insertAdjacentHTML('beforeend',
+      '<div class="suite-modal-backdrop" id="suite-modal"><div class="suite-modal">' +
+      '<div class="suite-modal-head"><h3 id="suite-modal-title">Review hour change</h3>' +
+      '<button type="button" class="suite-btn" data-close aria-label="Close dialog">&times;</button></div>' +
+      '<form class="suite-form" data-payroll-review-form data-change-key="' + esc(key) + '">' +
+      '<p class="perf-note full">Marking a change reviewed records who checked it and when. Add the decision or follow-up so another manager can audit it later.</p>' +
+      field('Review note', 'note', 'textarea', existing.note || '') +
+      '<div class="suite-modal-actions">' + (existing.at
+        ? '<button type="button" class="suite-btn danger" data-payroll-review-clear="' + esc(key) + '">Clear review</button>' : '') +
+      '<button type="button" class="suite-btn" data-close>Cancel</button>' +
+      '<button class="suite-btn primary">' + (existing.at ? 'Update review' : 'Mark reviewed') + '</button></div>' +
+      '</form></div></div>');
+    activateDialog('[name="note"]');
+  }
+  function savePayrollReview(key, reviewed, note) {
+    var actor = currentActor(true);
+    if (!actor || !state.payroll.week) return Promise.resolve(false);
+    state.shell.announcement = reviewed ? 'Saving payroll review.' : 'Clearing payroll review.';
+    return SuiteData.savePayrollReview(state.payroll.week, {
+      key: key, reviewed: reviewed, note: note || '', by: actor.name || actor.id || ''
+    }).then(function () { return SuiteData.loadPayrollPeriod(state.payroll.week); }).then(function (period) {
+      state.payroll.period = period;
+      state.shell.announcement = reviewed ? 'Payroll change marked reviewed.' : 'Payroll review cleared.';
+      closeDialog(); render(); return true;
+    }).catch(function (err) {
+      state.shell.announcement = 'The payroll review could not be saved.';
+      alert('The payroll review could not be saved.\n\n' + err.message);
+      return false;
+    });
+  }
   /* Offers the EID as the value, because that is the number people have in
      front of them. The field still accepts a badge or a timeclock id -- see
      findByAnyId -- so nobody is forced to look up a different number to type
@@ -4054,6 +4999,8 @@
     } else if (type === 'badge' || type === 'badge-optional') {
       input = '<input name="' + name + '" list="roster-list" value="' + esc(value) + '"' +
         (type === 'badge' ? ' required' : '') + ' placeholder="EID, badge, or name">' + rosterDatalist();
+    } else if (type === 'textarea') {
+      input = '<textarea name="' + name + '" rows="4">' + esc(value) + '</textarea>';
     } else {
       input = '<input name="' + name + '" type="' + type + '" value="' + esc(value) + '"' +
         (type === 'number' ? ' min="0" step="0.5"' : '') + '>';
@@ -4073,9 +5020,15 @@
           TasksCore.KINDS.map(function (k) { return [k.key, k.label]; })) +
         // Optional: plenty of tasks are about a system or a site, not a person.
         field('Associate (optional)', 'badge', 'badge-optional', badge || '') +
-        field('Detail', 'detail', 'text', '');
+        '<div class="field-preview full" id="task-associate-preview" role="status">' +
+        (badge && profile(badge) ? 'Linked to ' + esc(profile(badge).name) + ' · ' + idLine(profile(badge)) : 'No associate linked') + '</div>' +
+        field('Owner', 'assignee', 'text', '') +
+        field('Due date', 'due', 'date', '') +
+        field('Priority', 'priority', 'select', 'Normal', ['Low', 'Normal', 'High', 'Critical']) +
+        field('Location', 'location', 'text', state.market === 'all' ? '' : state.market) +
+        field('Detail', 'detail', 'textarea', '');
     } else {
-      title = 'New Beeline request';
+      title = 'Add off-board request';
       fields = field('Req ID', 'id', 'text', 'REQ-' + Date.now().toString().slice(-6)) +
         field('Job title', 'title', 'text', '') +
         field('Department', 'department', 'select', 'Warehouse Operations',
@@ -4088,10 +5041,12 @@
     }
     document.body.insertAdjacentHTML('beforeend',
       '<div class="suite-modal-backdrop" id="suite-modal"><div class="suite-modal">' +
-      '<div class="suite-modal-head"><h3>' + esc(title) + '</h3><button class="suite-btn" data-close>×</button></div>' +
+      '<div class="suite-modal-head"><h3 id="suite-modal-title">' + esc(title) + '</h3>' +
+      '<button class="suite-btn" data-close aria-label="Close dialog">&times;</button></div>' +
       '<form class="suite-form" data-form="' + type + '">' + fields +
       '<div class="suite-modal-actions"><button type="button" class="suite-btn" data-close>Cancel</button>' +
-      '<button class="suite-btn primary">Save record</button></div></form></div></div>');
+      '<button class="suite-btn primary">' + (type === 'task' ? 'Create task' : 'Add local request') + '</button></div></form></div></div>');
+    activateDialog('[name="title"],[name="id"]');
   }
 
   /* ---------- persistence ----------
@@ -4105,9 +5060,11 @@
       var list = state.stores[localKey], i = list.findIndex(function (x) { return x.id === record.id; });
       if (i === -1) list.push(record); else list[i] = Object.assign({}, list[i], record);
       rebuild(); render();
+      return true;
     }).catch(function (err) {
       console.warn('Could not save the ' + name + ' record.', err);
       alert('That record could not be saved, so it was not shared with anyone else.\n\n' + err.message);
+      return false;
     });
   }
   function remove(name, localKey, id) {
@@ -4143,21 +5100,213 @@
      place: an admin page is low-traffic, and being certain what was stored
      matters more than saving a round trip. */
   function persistAdmin(which, patch) {
-    if (!guard(ADMIN_COLLECTIONS[which] || 'admin', WRITE_VERB[which] || 'change settings')) return;
-    SuiteData.saveRecord(which, patch).then(function () {
+    if (!guard(ADMIN_COLLECTIONS[which] || 'admin', WRITE_VERB[which] || 'change settings')) return Promise.resolve(false);
+    return SuiteData.saveRecord(which, patch).then(function () {
       return SuiteData.loadCollection(which);
     }).then(function (rows) {
       state.admin[which] = rows;
       render();
+      return true;
     }).catch(function (err) {
       alert('That change could not be saved.\n\n' + err.message);
+      return false;
     });
+  }
+  function userAccessPatch(user) {
+    return { id: AuthCore.normalizeEmail(user.email), email: user.email, role: user.role,
+      enabled: user.enabled !== false, markets: (user.markets || []).slice() };
+  }
+  function announceUserUndo(previous, message) {
+    state.shell.undo = { kind: 'adminUser', previous: previous, expiresAt: Date.now() + 10000,
+      message: message };
+    render();
   }
 
   /* ---------- events ---------- */
   root.addEventListener('click', function (e) {
+    var returnTasks = e.target.closest('[data-return-tasks]');
+    if (returnTasks) {
+      var taskContext = state.returnTaskContext || {};
+      state.tasks = Object.assign(state.tasks, taskContext.filters || {});
+      state.query = taskContext.query || '';
+      state.returnTaskContext = null;
+      go('tasks', undefined, { keepQuery: true, scrollY: taskContext.scrollY || 0 });
+      return;
+    }
+    var sourceLink = e.target.closest('[data-open-source]');
+    if (sourceLink) {
+      var sourceParts = sourceLink.dataset.openSource.split('|');
+      var sourcePanel = sourceParts[0], sourceId = sourceParts.slice(1).join('|');
+      state.returnTaskContext = { filters: Object.assign({}, state.tasks), query: state.query,
+        scrollY: window.scrollY || 0 };
+      state.query = '';
+      if (sourcePanel === 'timeoff') {
+        var sourceRecord = (state.stores.timeOff || []).filter(function (row) { return row.id === sourceId; })[0];
+        if (sourceRecord && isCompletedRequest(sourceRecord)) state.timeoff.showCompleted = true;
+      }
+      if (sourcePanel === 'payroll') state.payroll.tab = 'discrepancies';
+      go(sourcePanel, undefined, { keepQuery: true, record: sourceId });
+      setTimeout(function () {
+        var target = document.getElementById('record-' + sourceId);
+        if (target) { target.scrollIntoView({ block: 'center' }); target.focus(); }
+      }, 0);
+      return;
+    }
+    var returnRoster = e.target.closest('[data-return-roster]');
+    if (returnRoster) {
+      var prior = state.rosterContext || {};
+      state.query = prior.query || state.query || '';
+      state.statusFilter = prior.statusFilter || state.statusFilter;
+      if (prior.sort) state.sort.associates = prior.sort;
+      go('associates', undefined, { keepQuery: true, scrollY: prior.scrollY || 0 });
+      return;
+    }
+    var overviewPreset = e.target.closest('[data-overview-preset]');
+    if (overviewPreset) {
+      e.preventDefault();
+      var presetName = overviewPreset.dataset.overviewPreset;
+      if (presetName === 'timeoff-needs') {
+        state.timeoff.status = 'all'; state.timeoff.needsAction = true; state.timeoff.window = 'all';
+      } else if (presetName === 'requisitions-short') {
+        state.reqHealth = 'short'; state.reqWhen = 'all';
+      } else if (presetName === 'attendance-risk') {
+        state.attendanceFilters.view = 'risk'; state.attendanceFilters.points = 'high';
+      }
+      go(overviewPreset.dataset.nav, undefined, { keepQuery: true });
+      return;
+    }
     var nav = e.target.closest('[data-nav]');
-    if (nav) { go(nav.dataset.nav); return; }
+    if (nav) { e.preventDefault(); go(nav.dataset.nav); return; }
+
+    if (e.target.closest('[data-mobile-nav-open]')) {
+      state.shell.mobileOpen = true;
+      render();
+      var first = root.querySelector('.suite-nav-btn');
+      if (first) first.focus();
+      return;
+    }
+    if (e.target.closest('[data-mobile-nav-close]')) {
+      state.shell.mobileOpen = false;
+      render();
+      var menu = root.querySelector('[data-mobile-nav-open]');
+      if (menu) menu.focus();
+      return;
+    }
+    if (e.target.closest('[data-account-toggle]')) {
+      state.shell.accountOpen = !state.shell.accountOpen;
+      render();
+      var accountButton = root.querySelector('[data-account-toggle]');
+      if (accountButton) accountButton.focus();
+      return;
+    }
+    if (e.target.closest('[data-refresh]')) { refreshEverything(); return; }
+    var attendanceView = e.target.closest('[data-attendance-view]');
+    if (attendanceView) {
+      state.attendanceFilters.view = attendanceView.dataset.attendanceView;
+      render();
+      return;
+    }
+    if (e.target.closest('[data-attendance-clear]')) {
+      var attendanceViewMode = state.attendanceFilters.view;
+      state.attendanceFilters = { view: attendanceViewMode, type: 'all', location: 'all', points: 'all',
+        excused: 'all', unmatched: false, from: '', to: '' };
+      state.query = '';
+      render();
+      return;
+    }
+    if (e.target.closest('[data-attendance-export]')) {
+      exportAttendanceRows(filteredAttendanceRows());
+      return;
+    }
+    var payrollExport = e.target.closest('[data-payroll-export]');
+    if (payrollExport) { exportPayrollRows(payrollExport.dataset.payrollExport); return; }
+    var payrollReview = e.target.closest('[data-payroll-review]');
+    if (payrollReview) { payrollReviewModal(payrollReview.dataset.payrollReview); return; }
+    var clearPayrollReview = e.target.closest('[data-payroll-review-clear]');
+    if (clearPayrollReview) {
+      if (confirm('Clear this review? The hour change will return to Needs review.')) {
+        savePayrollReview(clearPayrollReview.dataset.payrollReviewClear, false, '');
+      }
+      return;
+    }
+    var coveragePreset = e.target.closest('[data-cov-preset]');
+    if (coveragePreset) {
+      state.coverage.statusFilter = coveragePreset.dataset.covPreset;
+      render();
+      var coverageTable = root.querySelector('.suite-table-wrap');
+      if (coverageTable) coverageTable.focus();
+      return;
+    }
+    var timeoffPreset = e.target.closest('[data-timeoff-preset]');
+    if (timeoffPreset) {
+      var preset = timeoffPreset.dataset.timeoffPreset;
+      state.timeoff.status = preset === 'client' ? 'Sent for Client Approval' : preset === 'payroll' ? 'Approved' : 'all';
+      state.timeoff.window = preset === 'upcoming' ? 'upcoming' : 'all';
+      state.timeoff.needsAction = preset === 'needs';
+      render();
+      return;
+    }
+    if (e.target.closest('[data-timeoff-clear]')) {
+      state.timeoff.status = 'all'; state.timeoff.type = 'all'; state.timeoff.window = 'all';
+      state.timeoff.needsAction = false; state.query = '';
+      render();
+      return;
+    }
+    if (e.target.closest('[data-test-config]')) {
+      var settingsForm = e.target.closest('[data-app-config-form]');
+      var rcValue = settingsForm && settingsForm.querySelector('[name="rcBaseUrl"]');
+      var ptoValue = settingsForm && settingsForm.querySelector('[name="ilPtoTrackerUrl"]');
+      var candidates = [rcValue, ptoValue].filter(Boolean).map(function (input) { return input.value.trim(); }).filter(Boolean);
+      var valid = candidates.every(function (value) {
+        try { var parsed = new URL(/^https?:\/\//i.test(value) ? value : 'https://' + value); return /^https?:$/.test(parsed.protocol); }
+        catch (err) { return false; }
+      });
+      state.shell.announcement = valid ? 'The configured URLs are valid. Save to publish them.' : 'One or more configured URLs is invalid.';
+      var configStatus = settingsForm && settingsForm.querySelector('#app-config-status');
+      if (configStatus) configStatus.textContent = state.shell.announcement;
+      var liveStatus = root.querySelector('.suite-live');
+      if (liveStatus) liveStatus.textContent = state.shell.announcement;
+      return;
+    }
+    if (e.target.closest('[data-dismiss-toast]')) { state.shell.undo = null; render(); return; }
+    if (e.target.closest('[data-undo-change]')) {
+      var undo = state.shell.undo;
+      state.shell.undo = null;
+      if (!undo || undo.expiresAt <= Date.now()) { render(); return; }
+      if (undo.kind === 'coverageDoc') {
+        var priorDoc = Object.assign({ key: undo.key, name: undo.current.name || '', badge: undo.current.badge || '',
+          disposition: '', reason: '' }, undo.previous || {});
+        SuiteData.saveDocumentation(undo.date, priorDoc).then(function () {
+          return SuiteData.loadCoverage(undo.date);
+        }).then(function (day) {
+          if (state.coverage.reviewDate === undo.date) state.coverage.reviewDay = day;
+          if (!state.coverage.reviewDate || undo.date === ScheduleCore.isoDate(new Date())) state.coverage.storedDay = day;
+          state.shell.announcement = 'The previous floor documentation was restored.';
+          render();
+        }).catch(function (err) {
+          state.shell.announcement = 'The documentation could not be restored.';
+          alert('The documentation could not be restored.\n\n' + err.message);
+          render();
+        });
+        return;
+      }
+      if (undo.kind === 'adminUser') {
+        persistAdmin('users', undo.previous).then(function (ok) {
+          state.shell.announcement = ok ? 'The previous account access was restored.' : 'The account access could not be restored.';
+          render();
+        });
+        return;
+      }
+      var priorRecord = (state.stores[undo.localKey] || []).filter(function (row) { return row.id === undo.id; })[0];
+      var undoActor = currentActor(true);
+      if (!priorRecord || !undoActor) { render(); return; }
+      var undoPatch = undo.pipe.applyStatus(priorRecord, undo.previousStatus, undoActor);
+      persist(undo.collection, undoPatch, undo.localKey).then(function (ok) {
+        state.shell.announcement = ok ? 'The previous status was restored.' : 'The status could not be restored.';
+        render();
+      });
+      return;
+    }
 
     var sh = e.target.closest('[data-set-shift]');
     if (sh) { setShift(sh.dataset.setShift); return; }
@@ -4166,16 +5315,33 @@
     if (stab) {
       state.admin.tab = stab.dataset.settingsTab;
       if (state.admin.tab !== 'account' && !state.admin.loaded) loadAdminData();
+      syncRoute(false);
       render();
       return;
     }
     if (e.target.closest('[data-sign-out]')) { SuiteAuth.signOut(); return; }
+    var authMode = e.target.closest('[data-auth-mode]');
+    if (authMode) {
+      e.preventDefault();
+      var currentSignIn = authMode.closest('[data-signin]');
+      var currentEmail = currentSignIn && currentSignIn.querySelector('[name="email"]');
+      state.shell.signInEmail = currentEmail ? currentEmail.value : '';
+      state.shell.signInMode = authMode.dataset.authMode;
+      render();
+      var emailField = root.querySelector('[data-signin] [name="email"]');
+      if (emailField) emailField.focus();
+      return;
+    }
+    /* Kept as a compatibility path for an older gate that may still be open in
+       another tab during a deployment. The current gate uses mode tabs and one
+       real submit button, so browser validation runs consistently. */
     var doSign = e.target.closest('[data-signin-do]');
     if (doSign) {
       e.preventDefault();
       var form = doSign.closest('[data-signin]');
       var email = form.querySelector('[name="email"]').value;
-      var pw = form.querySelector('[name="password"]').value;
+      var passwordField = form.querySelector('[name="password"]');
+      var pw = passwordField ? passwordField.value : '';
       var what = doSign.dataset.signinDo;
       if (what === 'reset') SuiteAuth.resetPassword(email);
       else if (what === 'create') SuiteAuth.createAccount(email, pw);
@@ -4184,23 +5350,34 @@
     }
     var addTo = e.target.closest('[data-list-add]');
     if (addTo) {
-      var which = addTo.dataset.listAdd;
-      var rec = LISTS[which].blank();
-      rec.id = which.slice(0, 3).toUpperCase() + Date.now();
-      persistAdmin(which, rec);
+      listDraftModal(addTo.dataset.listAdd, '');
+      return;
+    }
+    var editList = e.target.closest('[data-list-edit]');
+    if (editList) {
+      var editBits = editList.dataset.listEdit.split('|');
+      listDraftModal(editBits[0], editBits.slice(1).join('|'));
       return;
     }
     var lt = e.target.closest('[data-list-toggle]');
     if (lt) {
       var bits = lt.dataset.listToggle.split('|');
       var row = (state.admin[bits[0]] || []).filter(function (x) { return x.id === bits[1]; })[0];
-      if (row) persistAdmin(bits[0], { id: row.id, active: row.active === false });
+      if (row && confirm((row.active === false ? 'Restore' : 'Archive') + ' this ' +
+          (bits[0] === 'locations' ? 'location' : 'shift') + '?\n\nArchived entries remain in history but stop appearing as active options.')) {
+        persistAdmin(bits[0], { id: row.id, active: row.active === false });
+      }
       return;
     }
     var ut = e.target.closest('[data-user-toggle]');
     if (ut) {
       var u = state.admin.users.filter(function (x) { return AuthCore.normalizeEmail(x.email) === ut.dataset.userToggle; })[0];
-      if (u) persistAdmin('users', { id: AuthCore.normalizeEmail(u.email), email: u.email, enabled: !(u.enabled !== false) });
+      if (u && confirm((u.enabled !== false ? 'Disable' : 'Enable') + ' ' + u.email + '?\n\n' +
+          (u.enabled !== false ? 'They will lose access when their session refreshes.' : 'They will regain the permissions assigned to their role.'))) {
+        var previousUserAccess = userAccessPatch(u);
+        persistAdmin('users', { id: AuthCore.normalizeEmail(u.email), email: u.email, enabled: !(u.enabled !== false) })
+          .then(function (ok) { if (ok) announceUserUndo(previousUserAccess, 'Account access changed.'); });
+      }
       return;
     }
     var sortCell = e.target.closest('[data-sort]');
@@ -4214,7 +5391,12 @@
       return;
     }
     var prof = e.target.closest('[data-profile]');
-    if (prof) { go('profile', prof.dataset.profile); return; }
+    if (prof) {
+      state.rosterContext = { query: state.query, statusFilter: state.statusFilter,
+        sort: Object.assign({}, state.sort.associates), scrollY: window.scrollY || 0 };
+      go('profile', prof.dataset.profile, { keepQuery: true });
+      return;
+    }
 
     var copyPhone = e.target.closest('[data-phone-copy]');
     if (copyPhone) {
@@ -4235,23 +5417,7 @@
     if (editPhone) {
       var pr = profile(editPhone.dataset.phoneEdit);
       if (!pr) return;
-      var typed = window.prompt('Mobile number for ' + pr.name +
-        '\n\nUsed to look them up in TextUs and Vonage.', ContactsCore.format(pr.phone));
-      if (typed === null) return;                       // cancelled
-      var trimmed = String(typed).trim();
-      // Clearing it is a deliberate act and has to be possible; a typo is not.
-      if (trimmed && !ContactsCore.isValid(trimmed)) {
-        alert('"' + trimmed + '" is not a ten-digit US number, so it was not saved.\n\n' +
-          'A wrong number is worse than none -- it reaches somebody, just not this person.');
-        return;
-      }
-      var actor = currentActor(true);
-      if (!actor) return;
-      persist('contacts', ContactsCore.record({
-        badge: pr.badge, name: pr.name, phone: trimmed,
-        eid: pr.wfmId || '', nameKey: ScheduleCore.rosterKey(pr.name),
-        source: 'Entered by hand'
-      }, actor, new Date()), 'contacts');
+      phoneModal(pr);
       return;
     }
 
@@ -4291,9 +5457,16 @@
       if (!actor) return;
       var t = (state.stores.tasks || []).filter(function (x) { return x.id === done.dataset.taskDone; })[0];
       if (!t) return;
+      var taskPreviousStatus = t.status;
       var patch = TasksCore.pipeline.applyStatus(t, 'Complete', actor, new Date());
       patch.updatedAt = patch.statusUpdatedAt;
-      persist('tasks', patch, 'tasks');
+      persist('tasks', patch, 'tasks').then(function (ok) {
+        if (!ok) return;
+        state.shell.undo = { collection: 'tasks', localKey: 'tasks', id: t.id,
+          previousStatus: taskPreviousStatus, pipe: TasksCore.pipeline,
+          expiresAt: Date.now() + 10000, message: 'Task completed.' };
+        render();
+      });
       return;
     }
 
@@ -4304,7 +5477,10 @@
     if (del) {
       var parts = del.dataset.del.split('|'), name = parts[0], id = parts.slice(1).join('|');
       if (!guard(ADMIN_COLLECTIONS[name] || 'edit', WRITE_VERB[name] || 'remove records')) return;
-      if (!confirm('Remove this record for everyone?')) return;
+      var removeMessage = name === 'timeoff'
+        ? 'Remove this local copy for everyone?\n\nIf the row is still present in the owning PTO tracker, it can return on the next sync. Correct the tracker to remove it permanently.'
+        : 'Remove this record for everyone?';
+      if (!confirm(removeMessage)) return;
       if (state.admin[name] !== undefined) {
         SuiteData.deleteRecord(name, id).then(function () {
           return SuiteData.loadCollection(name);
@@ -4339,15 +5515,17 @@
     if (ptab) {
       state.payroll.tab = ptab.dataset.payrollTab;
       state.query = '';
+      syncRoute(false);
       render();
       if (state.payroll.tab === 'hours' && !state.payroll.periods.length) loadPayrollIndex();
       return;
     }
     if (e.target.closest('[data-cov-now]')) { state.coverage.asOf = new Date(); render(); return; }
     if (e.target.closest('[data-cov-clear]')) {
-      if (!confirm('Clear the loaded schedule and on-premise files?')) return;
+      if (!confirm('Clear the current on-premise upload from this browser? Stored checks remain available.')) return;
       state.coverage.presence = null;
       state.coverage.presenceFile = '';
+      state.coverage.capturedAt = null;
       state.coverage.asOf = null;
       try { sessionStorage.removeItem(SCHED_CACHE); } catch (err) { /* nothing cached */ }
       render();
@@ -4387,7 +5565,19 @@
       render();
       return;
     }
-    if (e.target.closest('[data-req-save]')) { if (guard('import', 'import reports')) saveReqImport(); return; }
+    if (e.target.closest('[data-req-save]')) {
+      if (!guard('import', 'import reports')) return;
+      var importSummary = reqImportSummary();
+      if (!confirm('Import ' + importSummary.requests + ' requests and ' + importSummary.candidates +
+          ' candidates?\n\n' + importSummary.changed + ' request records differ from the current board. ' +
+          'You can roll this import back from the same Data source panel.')) return;
+      saveReqImport(); return;
+    }
+    if (e.target.closest('[data-req-rollback]')) {
+      if (!guard('import', 'rollback an import')) return;
+      if (confirm('Restore the Beeline request and candidate board from before the last manual import?')) rollbackReqImport();
+      return;
+    }
     if (e.target.closest('[data-req-sites]')) { if (guard('admin', 'change locations')) saveSiteLessons(); return; }
     if (e.target.closest('[data-req-clear]')) {
       state.reqSources = []; state.reqImport = null; render(); return;
@@ -4410,6 +5600,7 @@
     var date = state.coverage.reviewDate || ScheduleCore.isoDate(coverageAsOf());
     var key = el.dataset.docKey;
     var row = el.closest('.cov-doc');
+    var previous = Object.assign({}, documentedFor(key) || {});
     var rec = {
       key: key,
       name: el.dataset.docName || '',
@@ -4417,14 +5608,25 @@
       disposition: row.querySelector('.cov-disp').value,
       reason: row.querySelector('.cov-reason').value
     };
+    state.coverage.feedback[key] = 'saving';
+    var feedbackNode = row.querySelector('.save-feedback');
+    if (feedbackNode) feedbackNode.textContent = 'Saving…';
     return SuiteData.saveDocumentation(date, rec).then(function () {
       return taskFromDisposition(rec, date);
     }).then(function () {
       return SuiteData.loadCoverage(date);
     }).then(function (day) {
       if (state.coverage.reviewDate === date) state.coverage.reviewDay = day;
-      else state.coverage.storedDay = day;
+      if (!state.coverage.reviewDate || date === ScheduleCore.isoDate(new Date())) state.coverage.storedDay = day;
+      state.coverage.feedback[key] = 'saved';
+      state.shell.undo = { kind: 'coverageDoc', date: date, key: key,
+        previous: previous, current: rec, expiresAt: Date.now() + 10000,
+        message: 'Floor documentation saved.' };
+      render();
     }).catch(function (err) {
+      state.coverage.feedback[key] = 'error';
+      var errorNode = row && row.querySelector('.save-feedback');
+      if (errorNode) errorNode.textContent = 'Not saved';
       console.warn('Could not save the documentation.', err);
       alert('That note could not be saved, so it was not shared with anyone else.\n\n' + err.message);
     });
@@ -4467,16 +5669,20 @@
 
   root.addEventListener('change', function (e) {
     if (e.target.dataset && e.target.dataset.userRole) {
-      persistAdmin('users', { id: e.target.dataset.userRole, email: e.target.dataset.userRole, role: e.target.value });
+      var accountRow = (state.admin.users || []).filter(function (row) {
+        return AuthCore.normalizeEmail(row.email) === AuthCore.normalizeEmail(e.target.dataset.userRole);
+      })[0];
+      var oldRole = accountRow ? AuthCore.roleMeta(accountRow.role).label : 'current role';
+      var newRole = AuthCore.roleMeta(e.target.value).label;
+      if (!confirm('Change ' + e.target.dataset.userRole + ' from ' + oldRole + ' to ' + newRole +
+          '?\n\nThis changes what they can see and edit as soon as their session refreshes.')) { render(); return; }
+      var priorRoleAccess = accountRow ? userAccessPatch(accountRow) : null;
+      persistAdmin('users', { id: e.target.dataset.userRole, email: e.target.dataset.userRole, role: e.target.value })
+        .then(function (ok) { if (ok && priorRoleAccess) announceUserUndo(priorRoleAccess, 'Account role changed.'); });
       return;
     }
     var ac = e.target.dataset && e.target.dataset.appConfig;
-    if (ac) {
-      var meta = APP_SETTINGS.filter(function (f) { return f.key === ac; })[0];
-      persistAdmin('appConfig', { id: 'CFG-' + ac, key: ac, value: e.target.value.trim(),
-        label: meta ? meta.label : ac });
-      return;
-    }
+    if (ac) return; // App settings publish together from their explicit Save button.
     var lf = e.target.dataset && e.target.dataset.listField;
     if (lf) {
       var f = lf.split('|'), patch = { id: f[1] };
@@ -4492,6 +5698,22 @@
       persistAdmin('users', { id: um, email: um, markets: list });
       return;
     }
+    var umm = e.target.dataset && e.target.dataset.userMarketsMulti;
+    if (umm) {
+      var selectedMarkets = Array.from(e.target.selectedOptions).map(function (option) { return option.value; });
+      var scopedMarkets = selectedMarkets.indexOf('__all__') !== -1 ? [] : selectedMarkets;
+      if (!selectedMarkets.length) { alert('Choose All authorized markets or at least one named market.'); render(); return; }
+      if (!confirm('Change the market access for ' + umm + ' to ' +
+          (scopedMarkets.length ? scopedMarkets.join(', ') : 'all authorized markets') + '?')) { render(); return; }
+      var marketAccount = (state.admin.users || []).filter(function (row) {
+        return AuthCore.normalizeEmail(row.email) === AuthCore.normalizeEmail(umm);
+      })[0];
+      var priorMarketAccess = marketAccount ? userAccessPatch(marketAccount) : null;
+      persistAdmin('users', { id: umm, email: umm, markets: scopedMarkets }).then(function (ok) {
+        if (ok && priorMarketAccess) announceUserUndo(priorMarketAccess, 'Account market access changed.');
+      });
+      return;
+    }
     if (e.target.classList.contains('status-select')) {
       var kind = e.target.dataset.statusKind || 'timeoff';
       var pipe = PIPELINES[kind];
@@ -4499,19 +5721,38 @@
       var id = e.target.dataset.status;
       var rec = (state.stores[local] || []).filter(function (x) { return x.id === id; })[0];
       if (!rec || !pipe) return;
+      var previousStatus = rec.status;
+      if (kind === 'timeoff' && TimeOffCore.isExcused(previousStatus) !== TimeOffCore.isExcused(e.target.value)) {
+        var affected = profile(rec.badge);
+        var consequence = TimeOffCore.isExcused(e.target.value)
+          ? 'This will excuse covered attendance dates and make them worth 0 points.'
+          : 'This will stop excusing covered attendance dates; any workbook occurrence can count again.';
+        if (!confirm('Change ' + (affected ? affected.name : rec.name || 'this request') + ' to ' +
+            TimeOffCore.statusMeta(e.target.value).label + '?\n\n' + consequence)) { render(); return; }
+      }
       var actor = currentActor(true);
       if (!actor) { render(); return; }   // they cancelled the name prompt
       var patch = pipe.applyStatus(rec, e.target.value, actor);
       // A task's ageing runs off updatedAt, so touching one has to move it --
       // otherwise working a task would not stop it escalating.
       if (kind === 'tasks') patch.updatedAt = patch.statusUpdatedAt;
-      persist(kind, patch, local);
+      persist(kind, patch, local).then(function (ok) {
+        if (!ok || kind !== 'timeoff') return;
+        state.shell.undo = { collection: kind, localKey: local, id: id, previousStatus: previousStatus,
+          pipe: pipe, expiresAt: Date.now() + 10000,
+          message: 'Time-off status changed to ' + TimeOffCore.statusMeta(e.target.value).label + '.' };
+        render();
+      });
       return;
     }
     if (e.target.id === 'payroll-week') { openPayrollWeek(e.target.value); return; }
     if (e.target.id === 'payroll-close') {
       var week = state.payroll.week;
       if (!week) return;
+      var message = e.target.value
+        ? 'Set this as the payroll close time? Every later hours change will be highlighted as post-close.'
+        : 'Remove the payroll close time? Post-close changes will no longer be identified for this period.';
+      if (!confirm(message)) { render(); return; }
       var iso = e.target.value ? new Date(e.target.value).toISOString() : '';
       SuiteData.savePayrollClose(week, iso).then(function () {
         return SuiteData.loadPayrollPeriod(week);
@@ -4541,7 +5782,7 @@
     if (e.target.id === 'export-shift') { state.coverage.exportShift = e.target.value; render(); return; }
     if (!e.target.classList.contains('cov-disp')) return;
     // Re-render so the offered occurrence matches the new disposition.
-    saveDoc(e.target).then(render);
+    saveDoc(e.target);
   });
   root.addEventListener('input', function (e) {
     if (!e.target.classList.contains('cov-reason')) return;
@@ -4581,6 +5822,21 @@
   root.addEventListener('change', function (e) {
     if (e.target.id === 'market-picker') { setMarket(e.target.value); }
     if (e.target.id === 'status-filter') { state.statusFilter = e.target.value; render(); }
+    if (e.target.id === 'associate-quick') { state.associateQuick = e.target.value; render(); return; }
+    var attendanceFilterMap = {
+      'attendance-type': 'type', 'attendance-location': 'location', 'attendance-points': 'points',
+      'attendance-excused': 'excused', 'attendance-from': 'from', 'attendance-to': 'to'
+    };
+    if (attendanceFilterMap[e.target.id]) {
+      state.attendanceFilters[attendanceFilterMap[e.target.id]] = e.target.value;
+      render();
+      return;
+    }
+    if (e.target.id === 'attendance-unmatched') {
+      state.attendanceFilters.unmatched = e.target.checked;
+      render();
+      return;
+    }
 
     /* Every import lands in a shared collection everybody else then works from,
        so it is gated at the point the file is chosen. Refusing after the parse
@@ -4614,7 +5870,16 @@
     if (e.target.id === 'task-urgency') { state.tasks.urgency = e.target.value; render(); }
     if (e.target.id === 'task-source') { state.tasks.source = e.target.value; render(); }
     if (e.target.id === 'task-done') { state.tasks.showDone = e.target.checked; render(); }
+    if (e.target.id === 'timeoff-status') { state.timeoff.status = e.target.value; render(); return; }
+    if (e.target.id === 'timeoff-type') { state.timeoff.type = e.target.value; render(); return; }
+    if (e.target.id === 'timeoff-window') { state.timeoff.window = e.target.value; render(); return; }
+    if (e.target.id === 'timeoff-needs') { state.timeoff.needsAction = e.target.checked; render(); return; }
     if (e.target.id === 'timeoff-completed') { state.timeoff.showCompleted = e.target.checked; render(); }
+    if (e.target.id === 'payroll-status') { state.payroll.discrepancyStatus = e.target.value; render(); return; }
+    if (e.target.id === 'payroll-location') { state.payroll.discrepancyLocation = e.target.value; render(); return; }
+    if (e.target.id === 'payroll-missing-date') { state.payroll.missingDate = e.target.checked; render(); return; }
+    if (e.target.id === 'payroll-after-close') { state.payroll.afterCloseOnly = e.target.checked; render(); return; }
+    if (e.target.id === 'payroll-review-filter') { state.payroll.review = e.target.value; render(); return; }
     if (e.target.id === 'cov-status') { state.coverage.statusFilter = e.target.value; render(); }
     if (e.target.id === 'cov-loc') { state.coverage.location = e.target.value; render(); }
     if (e.target.id === 'cov-grace') {
@@ -4626,9 +5891,25 @@
       var d = new Date(e.target.value);
       if (!isNaN(d.getTime())) { state.coverage.asOf = d; render(); }
     }
+    if (e.target.id === 'cov-captured-at') {
+      var captured = new Date(e.target.value);
+      if (!isNaN(captured.getTime())) {
+        state.coverage.capturedAt = captured;
+        state.coverage.asOf = captured;
+        persistCheck(state.coverage.presenceFile || 'On-premise export');
+        render();
+      }
+    }
   });
 
   document.addEventListener('input', function (e) {
+    if (e.target.matches('[data-form="task"] [name="badge"]')) {
+      var preview = document.getElementById('task-associate-preview');
+      var match = findByAnyId(e.target.value);
+      if (preview) preview.textContent = match ? 'Linked to ' + match.name + ' · ' + (match.empNumber || match.badge) :
+        (e.target.value.trim() ? 'No roster match yet' : 'No associate linked');
+      return;
+    }
     if (e.target.id !== 'connect-search') return;
     state.connectQuery = e.target.value;
     var box = document.getElementById('connect-results');
@@ -4643,8 +5924,7 @@
         var actor = currentActor(true);
         if (!actor) return;
         var target = profile(hit.dataset.connectTo);
-        var modalEl = document.getElementById('suite-modal');
-        if (modalEl) modalEl.remove();
+        closeDialog();
         var eid = state.connectFor;
         SuiteData.saveRecord('timeclockLinks', {
           id: 'TCL-' + eid.replace(/[^A-Za-z0-9_-]/g, ''),
@@ -4670,17 +5950,116 @@
       if (!rec || !pipe) return;
       var actor = currentActor(true);
       if (!actor) return;
-      var modal = document.getElementById('suite-modal');
-      if (modal) modal.remove();
+      closeDialog();
       persist(kind, pipe.applyConnection(rec, hit.dataset.connectTo, actor), local);
       return;
     }
     if (e.target.closest('[data-close]')) {
       var m = e.target.closest('.suite-modal-backdrop');
-      if (m) m.remove();
+      if (m) closeDialog();
     }
+    if (e.target.classList.contains('suite-modal-backdrop')) closeDialog();
   });
   document.addEventListener('submit', function (e) {
+    var authForm = e.target.closest('[data-signin]');
+    if (authForm) {
+      e.preventDefault();
+      if (!authForm.reportValidity()) return;
+      var authEmail = authForm.querySelector('[name="email"]').value;
+      var authPassword = authForm.querySelector('[name="password"]');
+      var mode = state.shell.signInMode || 'in';
+      state.shell.signInEmail = authEmail;
+      if (mode === 'create') {
+        var confirmation = authForm.querySelector('[name="passwordConfirm"]');
+        if (!confirmation || confirmation.value !== authPassword.value) {
+          if (confirmation) {
+            confirmation.setCustomValidity('Passwords do not match.');
+            confirmation.reportValidity();
+            confirmation.setCustomValidity('');
+          }
+          return;
+        }
+        SuiteAuth.createAccount(authEmail, authPassword.value);
+      } else if (mode === 'reset') {
+        SuiteAuth.resetPassword(authEmail);
+      } else {
+        SuiteAuth.signIn(authEmail, authPassword.value);
+      }
+      return;
+    }
+    var phoneForm = e.target.closest('[data-phone-form]');
+    if (phoneForm) {
+      e.preventDefault();
+      savePhone(phoneForm.dataset.phoneForm, new FormData(phoneForm).get('phone'), phoneForm);
+      return;
+    }
+    var shiftForm = e.target.closest('[data-shift-form]');
+    if (shiftForm) {
+      e.preventDefault();
+      saveShift(shiftForm.dataset.shiftForm, new FormData(shiftForm).get('shift'));
+      return;
+    }
+    var payrollReviewForm = e.target.closest('[data-payroll-review-form]');
+    if (payrollReviewForm) {
+      e.preventDefault();
+      var reviewData = Object.fromEntries(new FormData(payrollReviewForm));
+      savePayrollReview(payrollReviewForm.dataset.changeKey, true, String(reviewData.note || '').trim());
+      return;
+    }
+    var configForm = e.target.closest('[data-app-config-form]');
+    if (configForm) {
+      e.preventDefault();
+      if (!guard('admin', 'change settings')) return;
+      var configData = Object.fromEntries(new FormData(configForm));
+      var invalidUrl = ['rcBaseUrl', 'ilPtoTrackerUrl'].filter(function (key) {
+        var value = String(configData[key] || '').trim();
+        if (!value) return false;
+        try { new URL(/^https?:\/\//i.test(value) ? value : 'https://' + value); return false; } catch (err) { return true; }
+      });
+      if (invalidUrl.length) { alert('Check the URL fields before saving.'); return; }
+      var badDate = ['attendancePolicyEffective', 'attendancePolicyVerifiedAt'].filter(function (key) {
+        return configData[key] && !/^\d{4}-\d{2}-\d{2}$/.test(configData[key]);
+      });
+      if (badDate.length) { alert('Policy dates must use YYYY-MM-DD.'); return; }
+      var saves = APP_SETTINGS.map(function (meta) {
+        return SuiteData.saveRecord('appConfig', { id: 'CFG-' + meta.key, key: meta.key,
+          value: String(configData[meta.key] || '').trim(), label: meta.label });
+      });
+      state.shell.announcement = 'Saving settings.';
+      Promise.all(saves).then(function () { return SuiteData.loadCollection('appConfig'); }).then(function (rows) {
+        state.admin.appConfig = rows;
+        state.stores.appConfig = rows;
+        state.shell.announcement = 'Settings saved.';
+        render();
+      }).catch(function (err) { alert('The settings could not be saved.\n\n' + err.message); });
+      return;
+    }
+    var adminListForm = e.target.closest('[data-admin-list-form]');
+    if (adminListForm) {
+      e.preventDefault();
+      var whichList = adminListForm.dataset.adminListForm;
+      var spec = LISTS[whichList];
+      var draft = Object.fromEntries(new FormData(adminListForm));
+      var id = adminListForm.dataset.recordId || whichList.slice(0, 3).toUpperCase() + Date.now();
+      var missing = spec.cols.filter(function (column) { return !String(draft[column[0]] || '').trim(); });
+      if (missing.length) {
+        state.shell.announcement = missing.map(function (column) { return column[1]; }).join(', ') + ' required.';
+        var firstMissing = adminListForm.querySelector('[name="' + missing[0][0] + '"]');
+        if (firstMissing) firstMissing.focus();
+        return;
+      }
+      var identity = whichList === 'locations' ? 'code' : 'key';
+      var duplicate = (state.admin[whichList] || []).some(function (row) {
+        return row.id !== id && String(row[identity] || '').toLowerCase() === String(draft[identity]).trim().toLowerCase();
+      });
+      if (duplicate) { alert('That ' + (whichList === 'locations' ? 'site number' : 'shift') + ' already exists.'); return; }
+      draft.id = id;
+      var originalListRow = (state.admin[whichList] || []).filter(function (row) { return row.id === id; })[0];
+      draft.active = originalListRow ? originalListRow.active !== false : true;
+      closeDialog();
+      persistAdmin(whichList, draft);
+      return;
+    }
     var form = e.target.closest('[data-form]');
     if (!form) return;
     e.preventDefault();
@@ -4705,6 +6084,8 @@
     if (type === 'requisitions' || type === 'requisition') {
       type = 'requisitions';
       data.status = data.openings > 0 && data.filled >= data.openings ? 'Filled' : 'Open';
+      data.source = data.source || 'Added by hand';
+      data.sourceKind = data.sourceKind || 'local';
     }
     if (type === 'task') {
       if (!String(data.title || '').trim()) { alert('A task needs a description of what has to be done.'); return; }
@@ -4721,13 +6102,47 @@
       data = TasksCore.create(data, currentActor(true) || null, new Date());
     }
     if (!data.id) data.id = type.slice(0, 2).toUpperCase() + Date.now();
-    document.getElementById('suite-modal').remove();
+    closeDialog();
     persist(type, data, LOCAL_KEY[type]);
   });
   document.addEventListener('keydown', function (e) {
-    if (e.key !== 'Escape') return;
+    var activeTab = e.target.closest && e.target.closest('[role="tab"]');
+    if (activeTab && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].indexOf(e.key) !== -1) {
+      var tabList = activeTab.closest('[role="tablist"]');
+      var tabs = tabList ? Array.from(tabList.querySelectorAll('[role="tab"]:not([disabled])')) : [];
+      if (tabs.length) {
+        e.preventDefault();
+        var current = tabs.indexOf(activeTab), next = current;
+        if (e.key === 'Home') next = 0;
+        else if (e.key === 'End') next = tabs.length - 1;
+        else next = (current + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+        tabs[next].focus();
+        tabs[next].click();
+      }
+      return;
+    }
     var m = document.getElementById('suite-modal');
-    if (m) m.remove();
+    if (e.key === 'Escape') {
+      if (m) { e.preventDefault(); closeDialog(); return; }
+      if (state.shell.accountOpen || state.shell.mobileOpen) {
+        var restoreSelector = state.shell.mobileOpen ? '[data-mobile-nav-open]' : '[data-account-toggle]';
+        state.shell.accountOpen = false;
+        state.shell.mobileOpen = false;
+        render();
+        var restoreControl = root.querySelector(restoreSelector);
+        if (restoreControl) restoreControl.focus();
+      }
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    var trap = m ? m.querySelector('.suite-modal') : state.shell.mobileOpen ? root.querySelector('.suite-nav') : null;
+    if (!trap) return;
+    var focusable = Array.from(trap.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'))
+      .filter(function (node) { return node.offsetParent !== null; });
+    if (!focusable.length) return;
+    var first = focusable[0], last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   });
 
   /* ---------- boot ---------- */
@@ -4753,41 +6168,69 @@
      re-fires onChange, and reloading everything each time would hammer the
      server for no new information. */
   var loaded = false;
-  function loadEverything() {
-    if (loaded) return;
+  function applyStores(stores) {
+    state.stores = stores;
+    state.storesLoaded = true;
+    var dom = (stores.appConfig || []).filter(function (r) { return r.key === 'allowedDomains'; })[0];
+    AuthCore.setAllowedDomains(dom ? dom.value : '');
+    rebuild();
+  }
+  function loadEverything(force) {
+    if (loaded && !force) return Promise.resolve(state.stores);
     loaded = true;
-    loadStoredCoverage();
+    loadStoredCoverage().catch(function () {});
 
-    SuiteData.loadIlPtoSync().then(function (sync) {
+    var syncLoads = [];
+    syncLoads.push(SuiteData.loadIlPtoSync().then(function (sync) {
       state.ilPto.sync = sync || {};
       if (state.view === 'timeoff') render();
-    }).catch(function () {});
+    }).catch(function () { render(); }));
 
-    SuiteData.loadPlxSync().then(function (sync) {
+    syncLoads.push(SuiteData.loadPlxSync().then(function (sync) {
       state.plx.sync = sync;
       if (state.view === 'reconciliation') render();
-    }).catch(function () {});
+    }).catch(function () { render(); }));
 
-    SuiteData.loadReqSync().then(function (sync) {
+    syncLoads.push(SuiteData.loadReqSync().then(function (sync) {
       state.reqSync = sync;
       if (state.view === 'requisitions') render();
-    }).catch(function () {});
+    }).catch(function () { render(); }));
 
-    SuiteData.loadAll().then(function (stores) {
-      state.stores = stores;
-      state.storesLoaded = true;
-      // The domain allowlist an administrator set. Applied here so the browser
-      // and the server agree on who may create an account.
-      var dom = (stores.appConfig || []).filter(function (r) { return r.key === 'allowedDomains'; })[0];
-      AuthCore.setAllowedDomains(dom ? dom.value : '');
-      rebuild();
+    return SuiteData.loadAll().then(function (stores) {
+      applyStores(stores);
+      state.shell.lastRefresh = Date.now();
+      state.shell.announcement = force ? 'All available data has been refreshed.' : '';
+      render();
+      return stores;
+    }).catch(function (err) {
+      loaded = false;
+      state.shell.announcement = 'Some data could not be loaded. Use Retry when the source is available.';
+      render();
+      throw err;
+    });
+  }
+  function refreshEverything() {
+    if (state.shell.refreshing) return;
+    state.shell.refreshing = true;
+    state.shell.announcement = 'Refreshing data.';
+    render();
+    loadEverything(true).catch(function () {}).then(function () {
+      state.shell.refreshing = false;
       render();
     });
   }
+  function refreshIfReturned() {
+    if (!state.auth.signedIn || state.shell.refreshing) return;
+    if (!state.shell.lastRefresh || Date.now() - state.shell.lastRefresh > 5 * 60 * 1000) refreshEverything();
+  }
+  window.addEventListener('focus', refreshIfReturned);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') refreshIfReturned();
+  });
 
   SuiteAuth.onChange(function (snap) {
     state.auth = snap;
-    if (AuthCore.can(snap.account, 'view')) loadEverything();
+    if (AuthCore.can(snap.account, 'view')) loadEverything().catch(function () {});
     /* A render on every auth change, not only on Settings. The gate is the whole
        shell now, so signing in, signing out, or having a role changed under you
        has to redraw the page rather than leave whatever was on screen before. */
@@ -4818,7 +6261,7 @@
        when the server says no. */
     can: function (action) { return may(action); },
     reload: function () {
-      return SuiteData.loadAll().then(function (s) { state.stores = s; rebuild(); render(); });
+      return loadEverything(true);
     }
   };
 

@@ -9,6 +9,9 @@ const t = (n, c) => { if (c) pass++; else { fail++; console.log('  FAIL: ' + n);
 const p2 = n => String(n).padStart(2, '0');
 const iso = d => d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
 const day = n => { const d = new Date(); d.setDate(d.getDate() + n); return iso(d); };
+const shownDate = value => new Date(value + 'T00:00:00').toLocaleDateString('en-US', {
+  month: 'short', day: 'numeric', year: 'numeric'
+});
 const TODAY = day(0);
 
 const records = [
@@ -87,7 +90,9 @@ const names = () => $$('.suite-table tbody tr').map(tr => tr.querySelectorAll('t
   t('the untagged one sinks to the bottom', sites[3].indexOf('—') === 0);
   t('within a site it falls back to name',
     names()[0].indexOf('Alan Brown') !== -1 && names()[1].indexOf('Mia Clark') !== -1);
-  t('the header shows it is sorted', $('[data-sort="associates:location"]').className.indexOf('sorted') !== -1);
+  const locationHeader = $('[data-sort="associates:location"]').closest('th');
+  t('the header shows it is sorted', locationHeader.classList.contains('sorted') &&
+    locationHeader.getAttribute('aria-sort') === 'ascending');
 
   click($('[data-sort="associates:location"]'));
   sites = column('Site / account').map(x => x.trim());
@@ -102,13 +107,13 @@ const names = () => $$('.suite-table tbody tr').map(tr => tr.querySelectorAll('t
   console.log('— sorting attendance by site —');
   click($('[data-nav="attendance"]'));
   t('attendance has a Site / account column', colIndex('Site / account') !== -1);
-  t('defaults to newest first', column('Date')[0].trim() === day(-1));
+  t('defaults to newest first', column('Date')[0].trim() === shownDate(day(-1)));
   click($('[data-sort="attendance:location"]'));
   const asites = column('Site / account').map(x => x.trim());
   t('sorts by site', asites[0].indexOf('1502') === 0);
   t('and the site is shown on the row', asites.join(' ').indexOf('CCM') !== -1);
   click($('[data-sort="attendance:date"]'));
-  t('date is sortable too', column('Date')[0].trim() === day(-3));
+  t('date is sortable too', column('Date')[0].trim() === shownDate(day(-3)));
 
   console.log('— Upcoming PTO —');
   click($('[data-nav="overview"]'));

@@ -104,7 +104,7 @@ const upload = (kind, aoa, name) => {
   });
   t('on all of them', seen.every(Boolean));
   t('and next to the user block',
-    $('.suite-add').nextElementSibling && $('.suite-add').nextElementSibling.classList.contains('suite-user'));
+    $('.suite-user').nextElementSibling && $('.suite-user').nextElementSibling.classList.contains('suite-add'));
   t('it says what it raises, rather than being a bare +',
     $('.suite-add-label').textContent === 'Task');
 
@@ -131,7 +131,7 @@ const upload = (kind, aoa, name) => {
       .every(r => !r.querySelector('.status-select')));
   t('it offers a way to the page that owns it instead',
     $$('tbody tr').some(r => r.textContent.indexOf('Eight hours missing') !== -1 &&
-      r.querySelector('[data-nav="payroll"]')));
+      r.querySelector('[data-open-source^="payroll|"]')));
 
   console.log('— escalation —');
   t('the 60-hour PTO request is urgent', /Ann Reed[\s\S]{0,400}?Urgent/.test(txt()));

@@ -36,8 +36,7 @@ const w = dom.window;
 w.alert = m => posts.push({ alert: m });
 w.confirm = () => true;
 w.scrollTo = () => {};
-let promptReply = null;
-w.prompt = (msg, def) => { posts.push({ prompt: msg, def: def }); return promptReply; };
+w.prompt = () => null;
 w.XLSX = {
   read: () => ({ SheetNames: ['Geodis Key', '1502 - HC', 'Pipeline'] }),
   utils: { sheet_to_json: (ws) => ws }
@@ -123,14 +122,17 @@ const shiftCellFor = name => {
   t('tags survive a rebuild', (w.GEODISSuite.state.stores.shifts || []).length === 2);
 
   console.log('— tagging a new associate by hand —');
-  promptReply = '2nd';
   const setBtn = $$('.shift-chip.none')[0];
   t('an untagged associate offers "Set shift"', !!setBtn);
   click(setBtn);
+  const shiftForm = $('[data-shift-form]');
+  const shiftSelect = shiftForm && shiftForm.querySelector('[name="shift"]');
+  t('it opens an explicit shift editor', !!shiftForm && !!shiftSelect);
+  t('and offers the shifts already known', Array.from(shiftSelect.options).some(o => o.value === '1st') &&
+    Array.from(shiftSelect.options).some(o => o.value === '2nd'));
+  shiftSelect.value = '2nd';
+  shiftForm.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
   await settle(60);
-  const asked = posts.filter(p => p.prompt).pop();
-  t('it prompts for the shift', !!asked);
-  t('and offers the shifts already known', asked.prompt.indexOf('1st') !== -1 && asked.prompt.indexOf('2nd') !== -1);
   const manual = posts.filter(p => p.url && p.url.indexOf('shifts=1') !== -1 && p.body.id).pop();
   t('saved as a single record, not a bulk replace', !!manual && !Array.isArray(manual.body.records));
   t('keyed by name, since a new starter has no EID here', manual.body.id.indexOf('name:') === 0);
@@ -138,8 +140,10 @@ const shiftCellFor = name => {
   t('the roster reflects it', shiftCellFor('Uma Untagged') === '2nd');
 
   console.log('— clearing a tag —');
-  promptReply = '';
   click($$('.shift-chip').find(el => el.textContent.trim() === '2nd' && el.closest('tr').textContent.indexOf('Uma') !== -1));
+  const clearForm = $('[data-shift-form]');
+  clearForm.querySelector('[name="shift"]').value = '';
+  clearForm.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
   await settle(60);
   t('cleared back to untagged', shiftCellFor('Uma Untagged') === 'Set shift');
   t('the stored record was removed', !stored.some(r => r.id.indexOf('uma') !== -1));

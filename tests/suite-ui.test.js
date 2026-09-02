@@ -50,7 +50,7 @@ t('no fabricated associates anywhere', !d.body.textContent.includes('James Dixon
 
 console.log('— roster arrives from the reconciliation view —');
 d.dispatchEvent(new w.CustomEvent('geodis:records',{detail:{records,updatedAt:'2026-08-24T11:00:00Z'}}));
-t('overview now has metrics', $$('.metric').length===4);
+t('overview now has six workforce metrics', $$('.overview-metrics > *').length===6);
 t('active count excludes the endCrm profile', $('.metric-value').textContent==='2');
 t('sync time shown in the footer', $('.suite-nav-footer').textContent.includes('Roster synced'));
 
@@ -186,6 +186,9 @@ w.GEODISSuite.reload().then(()=>{
     ['Extra, Eli (80-EELI1)','true','GEODIS/US/CL/CLSCEN/CLSL/CL1523/1523','Boss, Bea']
   ]);
   cs.asOf=new Date(2026,7,25,11,12);
+  // A presence report is only decision-ready once its capture time has been
+  // confirmed. Real uploads set both values; mirror that contract here.
+  cs.capturedAt=new Date(cs.asOf.getTime());
   cs.presenceFile='onprem.csv';
   click($('[data-nav="coverage"]'));
 

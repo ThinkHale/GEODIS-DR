@@ -51,6 +51,7 @@ const d = w.document, $ = s => d.querySelector(s), $$ = s => Array.from(d.queryS
 const click = el => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
 const pickMarket = m => { const s = $('#market-picker'); s.value = m; s.dispatchEvent(new w.Event('change', { bubbles: true })); };
 const metrics = () => $$('.metric').map(el => el.querySelector('.metric-value').textContent.trim());
+const priorities = () => $$('.overview-priority').map(el => el.querySelector('strong').textContent.trim());
 const bodyText = () => d.body.textContent;
 
 setTimeout(() => {
@@ -64,14 +65,14 @@ setTimeout(() => {
   let m = metrics();
   t('3 active associates', m[0] === '3');
   t('2 pending time-off', m[2] === '2');
-  t('2 reconciliation exceptions', m[3] === '2');
+  t('2 reconciliation exceptions', priorities()[0] === '2');
 
   console.log('— overview, scoped to Chicago (the reported bug) —');
   pickMarket('Chicago');
   m = metrics();
   t('active narrows to 2', m[0] === '2');
   t('pending time-off narrows to 1', m[2] === '1');
-  t('exceptions narrow to 1', m[3] === '1');
+  t('exceptions narrow to 1', priorities()[0] === '1');
   t('St. Louis associate gone from the roster note', bodyText().indexOf('3 on the assignment roster') === -1);
   t('time-off activity shows only Chicago', bodyText().indexOf('Sam Lou') === -1);
   t('requisition table shows only Chicago + unassigned',

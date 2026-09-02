@@ -42,6 +42,7 @@ const ReqsCore = require('./reqs-core.js');
 const ShiftKey = require('./shift-key.js');
 const Contacts = require('./contacts-core.js');
 const Auth = require('./auth-core.js');
+const MarketAccess = require('./market-access-core.js');
 
 // Shared secret proving a request came from our Power Automate flow.
 // Set with: firebase functions:secrets:set SYNC_KEY
@@ -128,7 +129,8 @@ const COLLECTIONS = {
      the task shape on read, so there is only ever one record to mark done. */
   tasks:        { path: 'tasks/tasks.json',              responseKey: 'tasks',
                   fields: { kind: 'str', title: 'str', detail: 'str', badge: 'str', name: 'str',
-                            market: 'str', location: 'str', status: 'str', source: 'str',
+                            market: 'str', location: 'str', assignee: 'str', due: 'str', priority: 'str',
+                            status: 'str', source: 'str',
                             sourceKind: 'str', sourceId: 'str', urgentAfterHours: 'num',
                             createdAt: 'str', createdBy: 'str', updatedAt: 'str',
                             statusUpdatedAt: 'str', statusUpdatedBy: 'str', statusHistory: 'log' } },
@@ -374,13 +376,38 @@ function sanitizeRecord(raw, fields) {
   });
   return out;
 }
+/* Resolve the authoritative joins a market-scoped collection may need. A read
+   failure produces an empty context via readJsonFile(), which intentionally
+   resolves nothing for a restricted account instead of falling open. */
+async function marketContextForCollection(name) {
+  const needsLocations = name === 'requisitions' || name === 'reqCandidates' ||
+    name === 'shifts' || name === 'shiftTypes';
+  const [snapshot, locations, requisitions] = await Promise.all([
+    readJsonFile(SNAPSHOT_PATH),
+    needsLocations ? readJsonArray(COLLECTIONS.locations.path) : Promise.resolve(null),
+    name === 'reqCandidates' ? readJsonArray(COLLECTIONS.requisitions.path) : Promise.resolve(null)
+  ]);
+  const context = { snapshot };
+  if (locations) context.locations = locations;
+  if (requisitions) context.requisitions = requisitions;
+  return context;
+}
+function denyMarketWrite(res) {
+  res.status(403).json({ ok: false, forbidden: true,
+    error: 'That record is outside your assigned markets or has no verified market.' });
+}
 async function handleCollection(req, res, opts) {
   setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
   if (req.method === 'GET') {
-    if (!await requireUser(req, res, 'view')) return;
+    const actor = await requireUser(req, res, 'view');
+    if (!actor) return;
     res.set('Cache-Control', 'no-cache, max-age=0');
     let rows = await readJsonArray(opts.path);
+    if (MarketAccess.hasRestriction(actor)) {
+      rows = MarketAccess.filterRecords(actor, opts.name, rows,
+        await marketContextForCollection(opts.name));
+    }
     /* An address in ADMIN_EMAILS is raised to admin on EVERY sign-in. Changing
        its role from Settings therefore appears to work and then quietly reverts
        the next time they sign in -- the worst kind of failure, because the
@@ -405,6 +432,8 @@ async function handleCollection(req, res, opts) {
   if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
   const actor = await requireUser(req, res, COLLECTION_WRITE[opts.name] || 'edit');
   if (!actor) return;
+  const restricted = MarketAccess.hasRestriction(actor);
+  const marketContext = restricted ? await marketContextForCollection(opts.name) : null;
 
   const body = req.body || {};
   const now = new Date().toISOString();
@@ -423,12 +452,25 @@ async function handleCollection(req, res, opts) {
     if (body.records.length > MAX_COLLECTION_RECORDS) {
       res.status(400).json({ ok: false, error: 'Too many records' }); return;
     }
-    list = body.records.map((raw, i) => {
+    const incoming = body.records.map((raw, i) => {
       const rec = sanitizeRecord(raw || {}, opts.fields);
       rec.id = raw && raw.id != null ? String(raw.id).slice(0, 64) : opts.responseKey + '-' + Date.now() + '-' + i;
       rec.updatedAt = now;
       return rec;
     });
+    if (restricted) {
+      const existing = await readJsonArray(opts.path);
+      const mergedBulk = MarketAccess.mergeRestrictedReplace(actor, opts.name, existing, incoming, marketContext);
+      if (!mergedBulk.ok) { denyMarketWrite(res); return; }
+      if (mergedBulk.records.length > MAX_COLLECTION_RECORDS) {
+        res.status(409).json({ ok: false,
+          error: 'The market-scoped import cannot be merged without exceeding the collection limit.' });
+        return;
+      }
+      list = mergedBulk.records;
+    } else {
+      list = incoming;
+    }
   } else {
     const id = body.id != null ? String(body.id).trim() : '';
     if (!id || id.length > 64) { res.status(400).json({ ok: false, error: 'Missing/invalid id' }); return; }
@@ -436,6 +478,9 @@ async function handleCollection(req, res, opts) {
     const idx = list.findIndex(x => x && x.id === id);
     if (body._delete) {
       if (idx === -1) { res.status(200).json({ ok: true, deleted: false }); return; }
+      if (restricted && !MarketAccess.recordDecision(actor, opts.name, list[idx], marketContext).allowed) {
+        denyMarketWrite(res); return;
+      }
       if (opts.name === 'users' && !Auth.canManage(actor, Auth.normalizeUser(list[idx]))) {
         res.status(403).json({ ok: false, forbidden: true,
           error: 'That account is not one you can remove.' });
@@ -454,6 +499,10 @@ async function handleCollection(req, res, opts) {
       rec.id = id;
       rec.updatedAt = now;
       const merged = idx === -1 ? rec : Object.assign({}, list[idx], rec);
+      if (restricted && idx !== -1 &&
+          !MarketAccess.recordDecision(actor, opts.name, list[idx], marketContext).allowed) {
+        denyMarketWrite(res); return;
+      }
       /* Changing an account is the one write where the permission is not the
          whole answer. 'roles' says a manager may open this door; WHICH change
          they may make depends on the account in front of them and the role they
@@ -489,6 +538,9 @@ async function handleCollection(req, res, opts) {
         merged.createdAt = list[idx] ? list[idx].createdAt || now : merged.createdAt || now;
         merged.lastSeenAt = list[idx] ? list[idx].lastSeenAt || '' : '';
       }
+      if (restricted && !MarketAccess.recordDecision(actor, opts.name, merged, marketContext).allowed) {
+        denyMarketWrite(res); return;
+      }
       if (opts.responseKey === 'timeOff') {
         associatePto = await readJsonArray(COLLECTIONS.associatePto.path);
         TransitionPto.apply(idx === -1 ? null : list[idx], merged, associatePto, now);
@@ -507,9 +559,13 @@ async function handleCollection(req, res, opts) {
       contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
     });
   }
-  res.status(200).json({ ok: true, count: list.length,
-    record: body.id ? list.find(x => x && x.id === String(body.id).trim()) || null : null,
-    associatePto: associatePto || undefined });
+  const visible = restricted
+    ? MarketAccess.filterRecords(actor, opts.name, list, marketContext) : list;
+  const visiblePto = associatePto && restricted
+    ? MarketAccess.filterRecords(actor, 'associatePto', associatePto, marketContext) : associatePto;
+  res.status(200).json({ ok: true, count: visible.length,
+    record: body.id ? visible.find(x => x && x.id === String(body.id).trim()) || null : null,
+    associatePto: visiblePto || undefined });
 }
 
 
@@ -525,6 +581,30 @@ function dateKeyOf(v) {
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
 }
 function str(v, max) { return v == null ? '' : String(v).slice(0, max || 200); }
+function auditActor(actor) {
+  actor = actor || {};
+  return {
+    by: str(actor.name || actor.email || actor.id || 'Unknown', 120),
+    // Account ids are normalized emails throughout the suite data model. Keep
+    // audit records on that stable contract rather than Firebase-provider ids.
+    byId: str(actor.id || actor.email, 254)
+  };
+}
+/* Browser close-time writes arrive as ISO instants. Date.parse() alone is too
+   permissive (and normalizes impossible dates), so validate every component
+   before accepting the value. Empty remains the explicit "clear" operation. */
+function strictInstant(v) {
+  const value = v == null ? '' : String(v).trim();
+  if (!value) return '';
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?Z$/);
+  if (!match) return null;
+  const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+  const hour = Number(match[4]), minute = Number(match[5]), second = Number(match[6]);
+  const maxDay = month >= 1 && month <= 12
+    ? new Date(Date.UTC(year, month, 0)).getUTCDate() : 0;
+  if (!maxDay || day < 1 || day > maxDay || hour > 23 || minute > 59 || second > 59) return null;
+  return Number.isFinite(Date.parse(value)) ? value : null;
+}
 
 async function listDateKeys(dir) {
   const [files] = await bucket.getFiles({ prefix: dir + '/' });
@@ -532,6 +612,52 @@ async function listDateKeys(dir) {
     .map(f => (f.name.split('/').pop() || '').replace(/\.json$/, ''))
     .filter(k => dateKeyOf(k))
     .sort();
+}
+
+/* Authoritative ownership inputs for the date-partitioned documents. The
+   roster verifies badge/EID ownership; configured locations verify WFM site
+   paths and payroll location labels. A failed read yields empty inputs through
+   readJsonFile/readJsonArray, so a restricted request resolves nothing rather
+   than falling open. */
+async function datedMarketContext() {
+  const [snapshot, locations] = await Promise.all([
+    readJsonFile(SNAPSHOT_PATH), readJsonArray(COLLECTIONS.locations.path)
+  ]);
+  return { snapshot: snapshot, locations: locations };
+}
+function weekStartKey(date) {
+  const key = dateKeyOf(date);
+  if (!key) return '';
+  const value = new Date(key + 'T12:00:00Z');
+  value.setUTCDate(value.getUTCDate() - value.getUTCDay());
+  return value.toISOString().slice(0, 10);
+}
+async function coverageMarketContext(date, base) {
+  const context = Object.assign({}, base || await datedMarketContext());
+  const schedule = await readJsonFile(SCHEDULE_DIR + '/' + weekStartKey(date) + '.json');
+  context.schedulePeople = Array.isArray(schedule.people) ? schedule.people : [];
+  return context;
+}
+function hasScheduleRows(doc) { return !!(doc && Array.isArray(doc.people) && doc.people.length); }
+function hasCoverageRows(doc) {
+  return !!(doc && ((Array.isArray(doc.checks) && doc.checks.length) ||
+    (doc.documented && Object.keys(doc.documented).length)));
+}
+function hasPayrollRows(doc) {
+  return !!(doc && ((Array.isArray(doc.snapshots) && doc.snapshots.length) ||
+    (Array.isArray(doc.changes) && doc.changes.length)));
+}
+function visiblePayrollPeriod(actor, period, context) {
+  const visible = MarketAccess.filterPayroll(actor, period, context);
+  if (!MarketAccess.hasRestriction(actor) || !visible || !Object.keys(visible).length) return visible;
+  const source = period && period.reviews && typeof period.reviews === 'object'
+    ? period.reviews : {};
+  const reviews = {};
+  (Array.isArray(visible.changes) ? visible.changes : []).forEach(change => {
+    const key = Payroll.changeKey(change);
+    if (Object.prototype.hasOwnProperty.call(source, key)) reviews[key] = source[key];
+  });
+  return Object.assign({}, visible, { reviews: reviews });
 }
 
 /* GET  ?schedule=1                     -> { periods: [...] }
@@ -542,13 +668,29 @@ async function handleSchedule(req, res) {
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
   // The week's plan is roster data: reading it needs an account, writing one
   // needs somebody trusted with imports.
-  if (!await requireUser(req, res, req.method === 'GET' ? 'view' : 'import')) return;
+  const actor = await requireUser(req, res, req.method === 'GET' ? 'view' : 'import');
+  if (!actor) return;
+  const restricted = MarketAccess.hasRestriction(actor);
+  const marketContext = restricted ? await datedMarketContext() : null;
   const period = dateKeyOf(req.query.period);
 
   if (req.method === 'GET') {
     res.set('Cache-Control', 'no-cache, max-age=0');
-    if (!period) { res.status(200).json({ ok: true, periods: await listDateKeys(SCHEDULE_DIR) }); return; }
-    res.status(200).json({ ok: true, schedule: await readJsonFile(SCHEDULE_DIR + '/' + period + '.json') });
+    if (!period) {
+      let periods = await listDateKeys(SCHEDULE_DIR);
+      if (restricted) {
+        const visible = await Promise.all(periods.map(async key => ({
+          key: key,
+          schedule: MarketAccess.filterSchedule(actor,
+            await readJsonFile(SCHEDULE_DIR + '/' + key + '.json'), marketContext)
+        })));
+        periods = visible.filter(row => hasScheduleRows(row.schedule)).map(row => row.key);
+      }
+      res.status(200).json({ ok: true, periods: periods }); return;
+    }
+    const stored = await readJsonFile(SCHEDULE_DIR + '/' + period + '.json');
+    res.status(200).json({ ok: true,
+      schedule: restricted ? MarketAccess.filterSchedule(actor, stored, marketContext) : stored });
     return;
   }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
@@ -562,7 +704,7 @@ async function handleSchedule(req, res) {
 
   // shifts is a date -> shift map; keep only well-formed dates and flatten each
   // shift to the few fields the suite renders.
-  const doc = {
+  let doc = {
     periodStart: period,
     periodEnd: dateKeyOf(body.periodEnd) || '',
     fileName: str(body.fileName, 300),
@@ -593,11 +735,35 @@ async function handleSchedule(req, res) {
       };
     })
   };
+  if (restricted) {
+    const path = SCHEDULE_DIR + '/' + period + '.json';
+    const existing = await readJsonFile(path);
+    const currentPeople = Array.isArray(existing.people) ? existing.people : [];
+    const merged = MarketAccess.mergeRestrictedReplace(
+      actor, 'schedule', currentPeople, doc.people, marketContext);
+    if (!merged.ok) { denyMarketWrite(res); return; }
+    if (merged.records.length > MAX_SCHEDULE_PEOPLE) {
+      res.status(409).json({ ok: false,
+        error: 'The market-scoped schedule cannot be merged without exceeding the weekly limit.' });
+      return;
+    }
+    // Only the people array is partitioned. Keep existing document metadata
+    // where present so one market's upload does not rewrite another market's
+    // source filename or execution stamp.
+    doc = Object.assign({}, doc, {
+      periodEnd: existing.periodEnd || doc.periodEnd,
+      fileName: existing.fileName || doc.fileName,
+      executedAt: existing.executedAt || doc.executedAt,
+      people: merged.records
+    });
+  }
   await bucket.file(SCHEDULE_DIR + '/' + period + '.json').save(JSON.stringify(doc), {
     contentType: 'application/json',
     metadata: { cacheControl: 'no-cache, max-age=0' }
   });
-  res.status(200).json({ ok: true, period: period, people: doc.people.length });
+  const visiblePeople = restricted
+    ? MarketAccess.filterRecords(actor, 'schedule', doc.people, marketContext).length : doc.people.length;
+  res.status(200).json({ ok: true, period: period, people: visiblePeople });
 }
 
 /* GET  ?coverage=1                   -> { dates: [...] }
@@ -609,13 +775,31 @@ async function handleCoverage(req, res) {
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
   // Who was on the floor, and what a supervisor wrote about the people who were
   // not. Reading needs an account; documenting somebody's day needs 'edit'.
-  if (!await requireUser(req, res, req.method === 'GET' ? 'view' : 'edit')) return;
+  const actor = await requireUser(req, res, req.method === 'GET' ? 'view' : 'edit');
+  if (!actor) return;
+  const restricted = MarketAccess.hasRestriction(actor);
   const date = dateKeyOf(req.query.date);
 
   if (req.method === 'GET') {
     res.set('Cache-Control', 'no-cache, max-age=0');
-    if (!date) { res.status(200).json({ ok: true, dates: await listDateKeys(COVERAGE_DIR) }); return; }
-    res.status(200).json({ ok: true, coverage: await readJsonFile(COVERAGE_DIR + '/' + date + '.json') });
+    if (!date) {
+      let dates = await listDateKeys(COVERAGE_DIR);
+      if (restricted) {
+        const base = await datedMarketContext();
+        const visible = await Promise.all(dates.map(async key => {
+          const [coverage, context] = await Promise.all([
+            readJsonFile(COVERAGE_DIR + '/' + key + '.json'), coverageMarketContext(key, base)
+          ]);
+          return { key: key, coverage: MarketAccess.filterCoverage(actor, coverage, context) };
+        }));
+        dates = visible.filter(row => hasCoverageRows(row.coverage)).map(row => row.key);
+      }
+      res.status(200).json({ ok: true, dates: dates }); return;
+    }
+    const coverage = await readJsonFile(COVERAGE_DIR + '/' + date + '.json');
+    const context = restricted ? await coverageMarketContext(date) : null;
+    res.status(200).json({ ok: true,
+      coverage: restricted ? MarketAccess.filterCoverage(actor, coverage, context) : coverage });
     return;
   }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
@@ -624,6 +808,7 @@ async function handleCoverage(req, res) {
 
   const path = COVERAGE_DIR + '/' + date + '.json';
   const existing = await readJsonFile(path);
+  const marketContext = restricted ? await coverageMarketContext(date) : null;
   const doc = {
     date: date,
     checks: Array.isArray(existing.checks) ? existing.checks : [],
@@ -655,23 +840,49 @@ async function handleCoverage(req, res) {
     };
     // Re-running the same pull replaces it rather than double-counting the day.
     const i = doc.checks.findIndex(x => x && x.id === check.id);
+    if (restricted) {
+      const incoming = MarketAccess.coverageCheckDecision(actor, check, marketContext);
+      if (!incoming.allowed) { denyMarketWrite(res); return; }
+      // A matching id owned partly or wholly by another market cannot be safely
+      // replaced: its compact aggregate cannot be split after the fact. Reject
+      // atomically, preserving the stored check byte-for-byte.
+      if (i !== -1 && !MarketAccess.coverageCheckDecision(
+        actor, doc.checks[i], marketContext).allowed) {
+        denyMarketWrite(res); return;
+      }
+    }
     if (i === -1) doc.checks.push(check); else doc.checks[i] = check;
     doc.checks.sort((a, b) => String(a.asOf || '').localeCompare(String(b.asOf || '')));
-    if (doc.checks.length > MAX_CHECKS_PER_DAY) doc.checks = doc.checks.slice(-MAX_CHECKS_PER_DAY);
+    if (doc.checks.length > MAX_CHECKS_PER_DAY) {
+      if (restricted) {
+        res.status(409).json({ ok: false,
+          error: 'The market-scoped check cannot be saved without removing another market\'s history.' });
+        return;
+      }
+      doc.checks = doc.checks.slice(-MAX_CHECKS_PER_DAY);
+    }
   } else if (body.document) {
     const dRec = body.document;
     const key = str(dRec.key, 140);
     if (!key) { res.status(400).json({ ok: false, error: 'Missing document key' }); return; }
+    if (restricted && !MarketAccess.recordDecision(actor, 'coverage', {
+      key: key, badge: str(dRec.badge, 64), name: str(dRec.name, 120)
+    }, marketContext).allowed) {
+      denyMarketWrite(res); return;
+    }
     // An empty reason clears the entry rather than storing a blank note.
     if (!str(dRec.reason, 500).trim() && !str(dRec.disposition, 60).trim()) {
       delete doc.documented[key];
     } else {
+      const audit = auditActor(actor);
       doc.documented[key] = {
         reason: str(dRec.reason, 500),
         disposition: str(dRec.disposition, 60),
         name: str(dRec.name, 120),
         badge: str(dRec.badge, 64),
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
+        updatedBy: audit.by,
+        updatedById: audit.byId
       };
     }
   } else {
@@ -683,7 +894,9 @@ async function handleCoverage(req, res) {
     contentType: 'application/json',
     metadata: { cacheControl: 'no-cache, max-age=0' }
   });
-  res.status(200).json({ ok: true, date: date, checks: doc.checks.length });
+  const visible = restricted ? MarketAccess.filterCoverage(actor, doc, marketContext) : doc;
+  res.status(200).json({ ok: true, date: date,
+    checks: Array.isArray(visible.checks) ? visible.checks.length : 0 });
 }
 
 /* ---------- PTO requests from Microsoft Forms ----------
@@ -1107,9 +1320,11 @@ async function handleDiscrepancyIntake(req, res) {
    GET  ?payroll=1&week=YYYY-MM-DD     -> that period
    POST ?payroll=1&week=... { rows, takenAt, source }  -> add a pull, diff it
    POST ?payroll=1&week=... { closesAt }               -> record when it closed
+   POST ?payroll=1&week=... { review }                  -> review one stored change
 
-   Writing hours needs the sync key, because that is an automation. Recording a
-   close date is a person in the browser, so it takes the origin check instead. */
+   Writing hours needs the sync key, because that is an automation. Close and
+   review changes are made by a person in the browser, so they take an account
+   and the exact app origin instead. */
 async function handlePayroll(req, res) {
   setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
@@ -1117,35 +1332,130 @@ async function handlePayroll(req, res) {
 
   if (req.method === 'GET') {
     // Everyone's hours for a pay period. Read only by an account.
-    if (!await requireUser(req, res, 'view')) return;
+    const actor = await requireUser(req, res, 'view');
+    if (!actor) return;
+    const restricted = MarketAccess.hasRestriction(actor);
     res.set('Cache-Control', 'no-cache, max-age=0');
-    if (!week) { res.status(200).json({ ok: true, periods: await listDateKeys(PAYROLL_DIR) }); return; }
-    res.status(200).json({ ok: true, period: await readJsonFile(PAYROLL_DIR + '/' + week + '.json') });
+    if (!week) {
+      let periods = await listDateKeys(PAYROLL_DIR);
+      if (restricted) {
+        const context = await datedMarketContext();
+        const visible = await Promise.all(periods.map(async key => ({
+          key: key,
+          period: visiblePayrollPeriod(actor,
+            await readJsonFile(PAYROLL_DIR + '/' + key + '.json'), context)
+        })));
+        periods = visible.filter(row => hasPayrollRows(row.period)).map(row => row.key);
+      }
+      res.status(200).json({ ok: true, periods: periods }); return;
+    }
+    const stored = await readJsonFile(PAYROLL_DIR + '/' + week + '.json');
+    const context = restricted ? await datedMarketContext() : null;
+    res.status(200).json({ ok: true,
+      period: restricted ? visiblePayrollPeriod(actor, stored, context) : stored });
     return;
   }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed' }); return; }
   if (!week) { res.status(400).json({ ok: false, error: 'Missing/invalid week' }); return; }
 
   const body = req.body || {};
+  const hasClose = body.closesAt !== undefined;
+  const hasReview = body.review !== undefined;
+  const hasRows = Array.isArray(body.rows);
+  if ((hasClose ? 1 : 0) + (hasReview ? 1 : 0) + (hasRows ? 1 : 0) !== 1) {
+    res.status(400).json({ ok: false, error: 'Expected exactly one of rows, closesAt, or review' });
+    return;
+  }
+
+  let browserActor = null;
+  let closeValue = null;
+  let reviewInput = null;
+  if (hasClose || hasReview) {
+    if (req.get('origin') !== NOTES_ORIGIN) {
+      res.status(403).json({ ok: false, error: 'Forbidden origin' }); return;
+    }
+    browserActor = await requireUser(req, res, 'edit');
+    if (!browserActor) return;
+  }
+  if (hasClose) {
+    // The cutoff is global to the whole stored period. Until the schema carries
+    // a per-market cutoff, a restricted account cannot change it safely.
+    if (MarketAccess.hasRestriction(browserActor)) { denyMarketWrite(res); return; }
+    closeValue = strictInstant(body.closesAt);
+    if (closeValue === null) {
+      res.status(400).json({ ok: false, error: 'Invalid closesAt timestamp' }); return;
+    }
+  } else if (hasReview) {
+    const review = body.review;
+    if (!review || typeof review !== 'object' || Array.isArray(review)) {
+      res.status(400).json({ ok: false, error: 'Invalid payroll review' }); return;
+    }
+    const rawKey = review.key == null ? '' : String(review.key).trim();
+    const note = review.note == null ? '' : String(review.note);
+    if (!/^CHG-[a-z0-9]+$/.test(rawKey) || rawKey.length > 64) {
+      res.status(400).json({ ok: false, error: 'Missing/invalid payroll change key' }); return;
+    }
+    if (review.reviewed !== true && review.reviewed !== false) {
+      res.status(400).json({ ok: false, error: 'Invalid reviewed state' }); return;
+    }
+    if (note.length > 500) {
+      res.status(400).json({ ok: false, error: 'Review note must be 500 characters or fewer' }); return;
+    }
+    reviewInput = { key: rawKey, reviewed: review.reviewed, note: note };
+  } else if (hasRows) {
+    // The automation is a separate privileged principal and posts the complete
+    // report. A browser token never substitutes for its sync key.
+    if (req.get('x-sync-key') !== SYNC_KEY.value()) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
+    if (body.rows.length > MAX_HOURS_ROWS) { res.status(400).json({ ok: false, error: 'Too many rows' }); return; }
+  }
+
   const path = PAYROLL_DIR + '/' + week + '.json';
   const existing = await readJsonFile(path);
+  const now = new Date().toISOString();
   const period = {
     weekEnding: week,
     closesAt: existing.closesAt || '',
+    closeBy: str(existing.closeBy, 120),
+    closeById: str(existing.closeById, 254),
+    closeUpdatedAt: str(existing.closeUpdatedAt, 40),
     snapshots: Array.isArray(existing.snapshots) ? existing.snapshots : [],
     changes: Array.isArray(existing.changes) ? existing.changes : [],
-    updatedAt: new Date().toISOString()
+    reviews: existing.reviews && typeof existing.reviews === 'object' && !Array.isArray(existing.reviews)
+      ? Object.assign({}, existing.reviews) : {},
+    updatedAt: now
   };
 
-  if (body.closesAt !== undefined) {
-    // A person setting the cutoff, from the browser.
-    if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
-    if (!await requireUser(req, res, 'edit')) return;
-    period.closesAt = String(body.closesAt || '').slice(0, 40);
-  } else if (Array.isArray(body.rows)) {
-    // An automation posting a pull of the hours report.
-    if (req.get('x-sync-key') !== SYNC_KEY.value()) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return; }
-    if (body.rows.length > MAX_HOURS_ROWS) { res.status(400).json({ ok: false, error: 'Too many rows' }); return; }
+  if (hasClose) {
+    const audit = auditActor(browserActor);
+    period.closesAt = closeValue;
+    period.closeBy = audit.by;
+    period.closeById = audit.byId;
+    period.closeUpdatedAt = now;
+  } else if (hasReview) {
+    const matches = period.changes.filter(change => Payroll.changeKey(change) === reviewInput.key);
+    if (MarketAccess.hasRestriction(browserActor)) {
+      const context = await datedMarketContext();
+      if (matches.length !== 1 ||
+          !MarketAccess.recordDecision(browserActor, 'payroll', matches[0], context).allowed) {
+        denyMarketWrite(res); return;
+      }
+    } else if (matches.length !== 1) {
+      res.status(matches.length ? 409 : 404).json({ ok: false,
+        error: matches.length ? 'Payroll change key is ambiguous' : 'Payroll change was not found' });
+      return;
+    }
+    if (reviewInput.reviewed === false) {
+      delete period.reviews[reviewInput.key];
+    } else {
+      const audit = auditActor(browserActor);
+      period.reviews[reviewInput.key] = {
+        note: reviewInput.note,
+        by: audit.by,
+        byId: audit.byId,
+        at: now
+      };
+    }
+  } else if (hasRows) {
     const takenAt = String(body.takenAt || new Date().toISOString()).slice(0, 40);
     const prior = period.snapshots.length ? period.snapshots[period.snapshots.length - 1] : null;
     const next = { weekEnding: week, takenAt: takenAt, rows: body.rows };
@@ -1178,16 +1488,21 @@ async function handlePayroll(req, res) {
       afterClose: diff.afterClose, changes: diff.changes.length, summary: diff.summary
     });
     return;
-  } else {
-    res.status(400).json({ ok: false, error: 'Expected rows or closesAt' });
-    return;
   }
 
   await bucket.file(path).save(JSON.stringify(period), {
     contentType: 'application/json',
     metadata: { cacheControl: 'no-cache, max-age=0' }
   });
-  res.status(200).json({ ok: true, weekEnding: week, closesAt: period.closesAt });
+  if (hasReview) {
+    res.status(200).json({ ok: true, weekEnding: week, key: reviewInput.key,
+      reviewed: reviewInput.reviewed,
+      review: period.reviews[reviewInput.key] || null });
+    return;
+  }
+  res.status(200).json({ ok: true, weekEnding: week, closesAt: period.closesAt,
+    closeBy: period.closeBy, closeById: period.closeById,
+    closeUpdatedAt: period.closeUpdatedAt });
 }
 
 /* ---------- the live PLX workbook ----------
@@ -1830,11 +2145,13 @@ async function handleSnapshot(req, res) {
   setKvCors(res);
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
   if (req.method !== 'GET') { res.status(405).json({ ok: false, error: 'GET only' }); return; }
-  if (!await requireUser(req, res, 'view')) return;
+  const actor = await requireUser(req, res, 'view');
+  if (!actor) return;
   res.set('Cache-Control', 'no-cache, max-age=0');
   try {
     const [buf] = await bucket.file(SNAPSHOT_PATH).download();
-    res.status(200).type('application/json').send(buf.toString());
+    const snapshot = JSON.parse(buf.toString());
+    res.status(200).json(MarketAccess.filterSnapshot(actor, snapshot));
   } catch (err) {
     if (err && err.code === 404) {
       // No snapshot yet is a normal state on a new deployment, not a failure.

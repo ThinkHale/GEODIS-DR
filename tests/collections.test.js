@@ -20,11 +20,12 @@ const NOTES_ORIGIN='https://geodis.ebtools.pro';
 async function readJsonFile(path){ return stored[path]?JSON.parse(stored[path]):{}; }
 function setKvCors(){}
 
-const fn=new Function('bucket','NOTES_ORIGIN','readJsonFile','setKvCors','console','admin','Auth',
+const fn=new Function('bucket','NOTES_ORIGIN','readJsonFile','setKvCors','console','admin','Auth','MarketAccess',
   collBlock.replace(maxLine,'') + maxLine + '\n' + handler +
   '\nreturn {COLLECTIONS,handleCollection,sanitizeRecord,handleSignIn,bootstrapRoleFor};');
 const {COLLECTIONS,handleCollection,sanitizeRecord,handleSignIn,bootstrapRoleFor}=
-  fn(bucket,NOTES_ORIGIN,readJsonFile,setKvCors,console,auth.admin,auth.Auth);
+  fn(bucket,NOTES_ORIGIN,readJsonFile,setKvCors,console,auth.admin,auth.Auth,
+    require('../functions/market-access-core.js'));
 
 let pass=0,fail=0;
 const t=(n,c)=>{ if(c)pass++; else {fail++;console.log('  FAIL: '+n);} };
@@ -52,6 +53,9 @@ t('numeric strings coerced', s.points===1.5 && s.minutes===30);
 t('strings capped at 500', s.notes.length===500);
 t('declared fields kept', s.badge==='1001' && s.type==='Absent');
 t('non-numeric number rejected', sanitizeRecord({points:'abc'},COLLECTIONS.attendance.fields).points===undefined);
+const taskFields=sanitizeRecord({assignee:'Cody',due:'2026-09-05',priority:'high'},COLLECTIONS.tasks.fields);
+t('task assignment, due date, and priority are persisted fields',
+  taskFields.assignee==='Cody' && taskFields.due==='2026-09-05' && taskFields.priority==='high');
 
 console.log('— origin gate —');
 t('foreign origin rejected', (await post('attendance',{id:'x'},'https://evil.example')).code===403);

@@ -134,9 +134,12 @@ const compound = [
   ['Anali De Leon campos', 'De Leon campos, Anali'],
   ['Angie Nuñez Garnica', 'Nunez Garnica, Angie'],
   ['Bryan Antonio Zapata Rodriguez', 'Zapata Rodriguez, Bryan Antonio'],
-  ['Carlos Garcia Hernandez', 'Garcia Hernandez, Carlos'],
   ['Antwoin Gordon jr', 'Gordon jr, Antwoin'],
   ['Alexander Ramirez-Campos', 'Ramirez Campos, Alexander'],
+  /* A real row from the PLX workbook: the suffix is on the wrong side of the
+     comma, so stripping suffixes only from the surname half would file Herbert
+     Brooks under "iii". */
+  ['Herbert Brooks III', 'Brooks,III, Herbert'],
   ['Ahmad Willingham', 'Willingham, Ahmad']
 ];
 const cRecords = compound.map(([person], i) => ({
@@ -185,6 +188,39 @@ const same = SuiteData.buildProfiles(
     { id: 'y2', name: 'Garcia Herrera, Carlos', nameKey: 'carlos garcia', shift: '1st', building: '1502', account: '' }
   ], shiftKeysOf: SC2.rosterKeys });
 t('duplicates that say the same thing still match', same.get('S1').shift === '1st');
+
+/* Some workbook rows are not a different FORM of the name, they are a different
+   name: "Wilingham, Ahmad" with one L will never meet "Ahmad Willingham" by any
+   rule about surnames, and widening keys until it does would start attaching
+   the wrong building to people. That is what Settings → Connections is for --
+   somebody looks at the 0.95 suggestion and says yes.
+
+   The connection stores a timeclock id against a badge. Until now that fixed
+   the person's attendance and left their site and shift blank, which reads as
+   the Connect button not having worked. */
+console.log('— a connection made by hand outranks every name rule —');
+const misspelt = [{ id: 'w1', eid: '80-AWILLI3693', name: 'Wilingham, Ahmad',
+  nameKey: SC2.rosterKey('Wilingham, Ahmad'), shift: '1st', building: '1536', account: '' }];
+const ahmad = [{ badge: '234379', person: 'Ahmad Willingham', action: 'matched',
+  actionLabel: 'M', reason: '', market: 'Chicago' }];
+const unlinked = SuiteData.buildProfiles(ahmad, { shifts: misspelt, shiftKeysOf: SC2.rosterKeys });
+t('a misspelt row does not match on the name alone', !unlinked.get('234379').shift);
+t('and no site is invented for them', !unlinked.get('234379').location);
+
+const linkedUp = SuiteData.buildProfiles(ahmad, { shifts: misspelt, shiftKeysOf: SC2.rosterKeys,
+  timeclockLinks: [{ eid: '80-AWILLI3693', badge: '234379', linkedBy: 'Tester' }] });
+t('connecting them attaches the shift', linkedUp.get('234379').shift === '1st');
+t('and the site with it', linkedUp.get('234379').location === '1536');
+t('and the timeclock id stays on the profile', linkedUp.get('234379').timeclockId === '80-AWILLI3693');
+
+// The connection wins even when a name would have matched something else.
+const decoy = SuiteData.buildProfiles(ahmad, {
+  shifts: misspelt.concat([{ id: 'w2', eid: '80-OTHER0001', name: 'Willingham, Ahmad',
+    nameKey: SC2.rosterKey('Willingham, Ahmad'), shift: '3rd', building: '9999', account: '' }]),
+  shiftKeysOf: SC2.rosterKeys,
+  timeclockLinks: [{ eid: '80-AWILLI3693', badge: '234379', linkedBy: 'Tester' }] });
+t('a hand-made connection beats a name that happens to match',
+  decoy.get('234379').location === '1536');
 
 /* The fix has to reach data already stored. Shift records written before it
    existed carry a nameKey computed by the OLD rule and no widened keys, so the

@@ -187,6 +187,13 @@
        "carlos garcia" -- and attaching the wrong building and shift to somebody
        is worse than attaching none. Tags that agree on everything shown are not
        a collision: either answer is the same answer. */
+    /* By timeclock id as well as by name. The id is the strongest key there is:
+       a person sat down and said these two records are the same person, which
+       beats any comparison of spellings. It is what lets Settings → Connections
+       repair a workbook row whose NAME is simply wrong -- "Wilingham, Ahmad"
+       with one L will never meet "Ahmad Willingham" by any name rule, and no
+       amount of key-widening should pretend otherwise. */
+    var shiftByEid = {};
     var shiftIdx = {};
     var tagSignature = function (r) {
       return [r.shift || '', r.building || '', r.account || ''].join('|');
@@ -194,6 +201,9 @@
     if (stores.shifts && stores.shiftKeysOf) {
       stores.shifts.forEach(function (r) {
         if (!r) return;
+        var eid = String(r.eid || '').trim();
+        // parseHeadcount already refuses a duplicate id, so first wins here too.
+        if (eid && !(eid in shiftByEid)) shiftByEid[eid] = r;
         var keys = stores.shiftKeysOf(r.name || '');
         // A record with no usable name still answers to whatever it was filed
         // under at import.
@@ -327,7 +337,12 @@
          knows is that the key is ambiguous, which stops there rather than
          falling through to a looser key and guessing. */
       var sr = null;
-      if (stores.shiftKeysOf) {
+      /* A connection made by hand comes first, ahead of every name rule. Without
+         this, connecting somebody fixed their attendance and left their site and
+         shift blank -- which reads as the Connect button not having worked. */
+      var linked = linkByBadge[p.badge];
+      if (linked && shiftByEid[linked]) sr = shiftByEid[linked];
+      if (!sr && stores.shiftKeysOf) {
         var cand = stores.shiftKeysOf(p.name);
         for (var ci = 0; ci < cand.length; ci++) {
           if (cand[ci] in shiftIdx) { sr = shiftIdx[cand[ci]]; break; }

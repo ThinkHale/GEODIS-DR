@@ -182,9 +182,15 @@
       // among them costs an extra candidate, never a wrong one on its own.
       family = toks.slice(1);
     }
-    // "Gordon jr" is Gordon. A suffix is never the name somebody is filed under.
-    family = family.filter(function (x) { return x.length > 1 && !NAME_SUFFIXES[x]; });
-    var g = given.filter(function (x) { return x.length > 1; })[0] || given[0] || '';
+    /* "Gordon jr" is Gordon. A suffix is never the name somebody is filed
+       under -- and it is dropped from BOTH halves, because a stray comma puts
+       it on the wrong side: "Brooks,III, Herbert" splits into family "Brooks"
+       and given "III Herbert", where taking the first given token would file
+       Herbert Brooks under "brooks iii". */
+    var notSuffix = function (x) { return x.length > 1 && !NAME_SUFFIXES[x]; };
+    family = family.filter(notSuffix);
+    var g = given.filter(notSuffix)[0] || given.filter(function (x) { return x.length > 1; })[0] ||
+      given[0] || '';
     if (!g) return out;
     family.forEach(function (f) { add([g, f].sort().join(' ')); });
     return out;

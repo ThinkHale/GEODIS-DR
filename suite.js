@@ -4713,18 +4713,29 @@
      day, so 20 hours means two runs were missed; the PTO tracker is polled every
      four, where 20 hours would be five. A threshold that fits one feed says
      nothing useful about the other. */
+  /* A feed has stopped, so what is on this page is older than it looks.
+
+     This is NOT provenance, and hiding it from colleagues was wrong. Somebody
+     working a requisition board that stopped updating two days ago is making
+     decisions on stale data -- they cannot fix the flow, but they must not be
+     the last to know the numbers are old. The headline stays for everyone.
+
+     What IS provenance is the diagnosis underneath it: which automation, which
+     expired token, where to look in the run history. That is for whoever can
+     act on it. */
   function staleNote(iso, what, opts) {
-    // Nobody on the floor can restart a Power Automate flow, and a red banner
-    // about one is noise between them and the roster.
-    if (!showsProvenance()) return '';
     opts = opts || {};
     var after = opts.after || STALE_AFTER_HOURS;
     var h = hoursSince(iso);
     if (h == null || h < after) return '';
     return '<div class="warn-banner"><strong>' + esc(what) + ' is ' + esc(ageLabel(iso)) + '</strong>' +
-      '<p>It should refresh ' + esc(opts.cadence || 'twice a day') + '. This usually means the Power ' +
-      'Automate flow is failing — a SharePoint connection whose token has expired is the common cause, ' +
-      'and it shows as a 401 in the flow run history.</p></div>';
+      (showsProvenance()
+        ? '<p>It should refresh ' + esc(opts.cadence || 'twice a day') + '. This usually means the Power ' +
+          'Automate flow is failing — a SharePoint connection whose token has expired is the common cause, ' +
+          'and it shows as a 401 in the flow run history.</p>'
+        : '<p>It should refresh ' + esc(opts.cadence || 'twice a day') + '. Treat what is on this page as ' +
+          'out of date and tell a manager, who can see why it stopped.</p>') +
+      '</div>';
   }
 
   function plxBar() {

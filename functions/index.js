@@ -280,12 +280,40 @@ function isXlsxZip(b) {
    rather than being mangled by a second decode. Every flow posting an attachment
    goes through here; the behaviour was learned once, on the reconciliation feed,
    and must not be re-learned per endpoint. */
+/* Delimited text -- what a .csv export actually is. Used to decide whether a
+   double-decode produced the real file or produced rubbish.
+
+   Deliberately narrow: a NUL byte or invalid UTF-8 means binary, and a table
+   with no delimiter in the first few KB is not one of these exports. Getting
+   this wrong in the permissive direction costs a 400 and the previous file is
+   kept; getting it wrong the other way is what happened here. */
+function looksLikeDelimitedText(b) {
+  if (!b || b.length < 8) return false;
+  const head = b.slice(0, 4096);
+  for (let i = 0; i < head.length; i++) if (head[i] === 0) return false;
+  const text = head.toString('utf8');
+  if (text.indexOf('\uFFFD') !== -1) return false;
+  return /[,;\t]/.test(text);
+}
+
 function unwrapDoubleBase64(buffer) {
   if (isXlsxZip(buffer)) return buffer;
   const asText = buffer.toString('latin1');
   if (asText.length >= 8 && /^[A-Za-z0-9+/=\s]+$/.test(asText.slice(0, 200))) {
     const inner = Buffer.from(asText, 'base64');
+    /* An xlsx OR a csv. This used to accept only the zip, so when these exports
+       changed from .xlsx to .csv the unwrap quietly stopped firing and the
+       parser was handed one line of base64 text -- which reads as "no
+       Request-ID column", on every report at once, for a reason nothing in that
+       message pointed at.
+
+       A single-encoded CSV never reaches here: it contains commas, and the
+       base64 test above rejects it. */
     if (isXlsxZip(inner)) return inner;
+    if (looksLikeDelimitedText(inner)) {
+      console.warn('Unwrapped a double-base64 attachment (' + inner.length + ' bytes of delimited text).');
+      return inner;
+    }
   }
   return buffer;
 }

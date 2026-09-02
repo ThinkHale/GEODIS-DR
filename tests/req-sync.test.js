@@ -258,6 +258,41 @@ const candAoa = [
   t('it survives the import', reqs().some(x => x.id === 'RE123'));
   t('with its own fields untouched', reqs().find(x => x.id === 'RE123').title === 'Yard hostler');
 
+  /* Power Automate's Get Attachment (V2) double-base64-encodes contentBytes.
+     The unwrap that rescues that used to accept ONLY an xlsx zip -- so when
+     these exports changed from .xlsx to .csv it quietly stopped firing, the
+     parser was handed one line of base64 text, and every report failed at once
+     with "No Request-ID column was found": a message that pointed at the
+     columns when the columns were never the problem. */
+  console.log('— every shape the attachment arrives in —');
+  const csvText = 'Request-ID,Job Title,Candidates Requested\nREQ-7001,Picker,4\nREQ-7002,Loader,2';
+  const enc = t => Buffer.from(t, 'utf8').toString('base64');
+  const pushRaw = (b64, name) => call({
+    method: 'POST', query: {}, body: { fileBase64: b64, fileName: name },
+    get: reqGet({ 'x-sync-key': KEY })
+  });
+  t('a single-encoded CSV is read', (await pushRaw(enc(csvText), 'reqs.csv')).code === 200);
+  t('and a DOUBLE-encoded one is too', (await pushRaw(enc(enc(csvText)), 'reqs.csv')).code === 200);
+  t('with the same requests either way', reqs().some(r => r.beelineReq === 'REQ-7001'));
+  t('a single-encoded xlsx still works', (await push(reqAoa, 'reqs.xlsx')).code === 200);
+  /* Erring toward unwrapping is safe: a wrong guess produces a 400 and the
+     previous export is kept. Erring the other way is what cost a morning. */
+  const junk = Buffer.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]).toString('base64');
+  t('binary that is neither is refused, not guessed at', (await pushRaw(junk, 'x.bin')).code === 400);
+
+  /* The refusal has to say what it actually saw. "No Request-ID column" alone
+     cannot tell a renamed column from an empty file from the wrong attachment. */
+  console.log('— and a refusal says what it saw —');
+  const renamed = await pushRaw(enc('Order ID,Job Title\nA1,Picker'), 'reqs.csv');
+  t('a renamed column is refused', renamed.code === 400);
+  t('and the headers it DID find are named', /"Order ID"/.test(renamed.body.error));
+  t('with the row count', /2 row\(s\)/.test(renamed.body.error));
+  const blankFile = await pushRaw(enc('\n\n'), 'reqs.csv');
+  t('a blank attachment says so rather than blaming the columns',
+    /no rows at all|every one of them is blank|empty/i.test(blankFile.body.error));
+  t('a missing one is caught before that', (await pushRaw('', 'reqs.csv')).body.error === 'Missing fileBase64');
+
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

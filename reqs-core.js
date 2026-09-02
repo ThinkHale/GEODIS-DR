@@ -47,7 +47,11 @@
      Matched by header text rather than position, so a re-ordered or widened
      export keeps working -- and so one combined file is read by the same code. */
   var COLS = {
-    reqId:      [/^request[\s-]*id$/i, /request\s*id/i, /^req\s*id$/i],
+    /* Hyphen, underscore or space, and not only at the start of the cell -- a
+       header of "Beeline Request-ID" is the same column as "Request ID" and used
+       to miss both patterns: the anchored one because of the prefix, the loose
+       one because \s does not match a hyphen. */
+    reqId:      [/^request[\s\-_]*id$/i, /request[\s\-_]*id/i, /^req[\s\-_]*id$/i],
     status:     [/^request status$/i, /^status$/i],
     hiringMgr:  [/hiring manager/i],
     // The reqs export calls it "Start Date - Start"; the candidate export added it
@@ -227,6 +231,30 @@
 
   function blank(v) { return v === '' || v === null || v === undefined; }
 
+  /* How far down to look for the header. A few of these exports carry a title
+     and a blank line or two above it; 25 was a guess and costs nothing to
+     raise, since the scan stops the moment it finds the column. */
+  var HEADER_SCAN_ROWS = 40;
+
+  // The first row with anything in it -- the best guess at what the exporter
+  // thinks its headers are.
+  function firstPopulatedRow(rows) {
+    for (var i = 0; i < Math.min((rows || []).length, HEADER_SCAN_ROWS); i++) {
+      var cells = (rows[i] || []).map(str).filter(function (v) { return v !== ''; });
+      if (cells.length) return cells;
+    }
+    return [];
+  }
+  function describeWhatArrived(rows, headers) {
+    var n = (rows || []).length;
+    if (!n) return ' The file had no rows at all — the attachment may be empty, or not the export.';
+    if (!headers.length) return ' It has ' + n + ' row(s) but every one of them is blank.';
+    var shown = headers.slice(0, 12).map(function (h) { return '"' + h + '"'; }).join(', ');
+    return ' It has ' + n + ' row(s), and the first row with anything in it reads: ' + shown +
+      (headers.length > 12 ? ', …and ' + (headers.length - 12) + ' more' : '') +
+      '. If the column has been renamed, that is the name to add.';
+  }
+
   /* ---------- parse one export ----------
      Returns the reqs it could see and the candidates it could see. Either list
      may be empty: the reqs export names no candidates, and a candidate export
@@ -239,14 +267,21 @@
     };
 
     var cols = null;
-    for (var i = 0; i < Math.min(rows.length, 25); i++) {
+    for (var i = 0; i < Math.min(rows.length, HEADER_SCAN_ROWS); i++) {
       var headers = (rows[i] || []).map(str);
       var c = {};
       Object.keys(COLS).forEach(function (k) { c[k] = pickCol(headers, COLS[k]); });
       if (c.reqId !== -1) { out.headerRow = i; cols = c; break; }
     }
     if (!cols) {
-      out.warnings.push('No "Request-ID" column was found. Is this a Beeline requisition export?');
+      /* Say what was actually in the file. "No Request-ID column" on its own
+         cannot tell a renamed column from an empty export from Power Automate
+         having grabbed the wrong attachment -- three problems with three
+         different fixes, and no way to choose between them without asking
+         somebody to open the file. The headers it DID see answer it. */
+      out.sawHeaders = firstPopulatedRow(rows);
+      out.warnings.push('No "Request-ID" column was found. Is this a Beeline requisition export?' +
+        describeWhatArrived(rows, out.sawHeaders));
       return out;
     }
     out.columns = cols;

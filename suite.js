@@ -402,6 +402,26 @@
     });
   }
 
+  /* The transition workbook and the live IL tracker overlap historically. The
+     tracker may carry no badge when its EID is from a former assignment, so id
+     and badge dedupe cannot see that "Olmes Molina · 2026-08-21" is one request.
+     A completed processed-tracker row is the newer authoritative outcome and
+     suppresses the older in-flight transition copy for the same name and day. */
+  function suppressCompletedTrackerDuplicates(stores) {
+    var rows = stores.timeOff || [];
+    var completed = {};
+    rows.forEach(function (r) {
+      if (r.source !== PTO_TRACKER_SOURCE || TimeOffCore.normalizeStatus(r.status) !== 'Completed') return;
+      var name = String(r.name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      if (name && r.start) completed[name + '|' + r.start + '|' + String(r.end || r.start)] = true;
+    });
+    stores.timeOff = rows.filter(function (r) {
+      if (r.source !== 'Geodis Chicago PTO Payroll Tracker.xlsx') return true;
+      var name = String(r.name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      return !completed[name + '|' + String(r.start || '') + '|' + String(r.end || r.start || '')];
+    });
+  }
+
   var closingSourceTasks = false;
   function completeTasksFromSourceEvidence() {
     if (closingSourceTasks || !state.storesLoaded || !mayEdit()) return;
@@ -6518,6 +6538,7 @@
     state.stores = stores;
     state.stores.dismissedTimeOff = (state.stores.timeOff || []).filter(function (r) { return r.dismissed; });
     state.stores.timeOff = (state.stores.timeOff || []).filter(function (r) { return !r.dismissed; });
+    suppressCompletedTrackerDuplicates(state.stores);
     promoteLegacyPtoTasks(state.stores);
     state.storesLoaded = true;
     var dom = (stores.appConfig || []).filter(function (r) { return r.key === 'allowedDomains'; })[0];

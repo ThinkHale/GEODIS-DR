@@ -2750,7 +2750,8 @@
         var built = PtoTrackerCore.toTimeOffRecords(parsed, {
           badgeForEid: badgeForEid(), source: PTO_TRACKER_SOURCE, pipeline: TimeOffCore
         });
-        var merged = PtoTrackerCore.mergeForSave(state.stores.timeOff, built.records, PTO_TRACKER_SOURCE);
+        var merged = PtoTrackerCore.mergeForSave((state.stores.timeOff || []).concat(
+          state.stores.dismissedTimeOff || []), built.records, PTO_TRACKER_SOURCE);
         /* A request that left the sheet without reaching the processed tab is a
            question, not a deletion: its record stays and somebody is asked. */
         var newTasks = PtoTrackerCore.vanishedTasks(merged.vanished, {
@@ -2765,7 +2766,8 @@
           if (!newTasks.length) return null;
           return SuiteData.replaceCollection('tasks', (state.stores.tasks || []).concat(newTasks));
         }).then(function () {
-          state.stores.timeOff = merged.records;
+          state.stores.dismissedTimeOff = merged.records.filter(function (r) { return r.dismissed; });
+          state.stores.timeOff = merged.records.filter(function (r) { return !r.dismissed; });
           if (newTasks.length) state.stores.tasks = (state.stores.tasks || []).concat(newTasks);
           rebuild();
           var others = Object.keys(parsed.otherClients).map(function (c) {
@@ -5775,10 +5777,41 @@
     if (del) {
       var parts = del.dataset.del.split('|'), name = parts[0], id = parts.slice(1).join('|');
       if (!guard(ADMIN_COLLECTIONS[name] || 'edit', WRITE_VERB[name] || 'remove records')) return;
+      var timeOffRecord = name === 'timeoff' ? (state.stores.timeOff || []).filter(function (r) {
+        return r.id === id;
+      })[0] : null;
+      var legacyTaskId = timeOffRecord && timeOffRecord.source === 'Legacy PTO task' && id.indexOf('TO:') === 0
+        ? id.slice(3) : '';
       var removeMessage = name === 'timeoff'
-        ? 'Remove this local copy for everyone?\n\nIf the row is still present in the owning PTO tracker, it can return on the next sync. Correct the tracker to remove it permanently.'
+        ? 'Remove this request from the tool for everyone?\n\nThe owning tracker is not changed.'
         : 'Remove this record for everyone?';
       if (!confirm(removeMessage)) return;
+      if (legacyTaskId) {
+        Promise.all([SuiteData.deleteRecord('timeoff', id), SuiteData.deleteRecord('tasks', legacyTaskId)])
+          .then(function () {
+            state.stores.timeOff = state.stores.timeOff.filter(function (r) { return r.id !== id; });
+            state.stores.tasks = state.stores.tasks.filter(function (t) { return t.id !== legacyTaskId; });
+            rebuild(); render();
+          }).catch(function (err) {
+            alert('That request could not be removed.\n\n' + err.message);
+          });
+        return;
+      }
+      if (timeOffRecord && timeOffRecord.source === PTO_TRACKER_SOURCE) {
+        var actor = currentActor(true);
+        if (!actor) return;
+        var tombstone = Object.assign({}, timeOffRecord, {
+          dismissed: true, dismissedAt: new Date().toISOString(), dismissedBy: actor.name || actor.id || ''
+        });
+        SuiteData.saveRecord('timeoff', tombstone).then(function () {
+          state.stores.timeOff = state.stores.timeOff.filter(function (r) { return r.id !== id; });
+          state.stores.dismissedTimeOff = (state.stores.dismissedTimeOff || []).concat([tombstone]);
+          rebuild(); render();
+        }).catch(function (err) {
+          alert('That request could not be removed.\n\n' + err.message);
+        });
+        return;
+      }
       if (state.admin[name] !== undefined) {
         SuiteData.deleteRecord(name, id).then(function () {
           return SuiteData.loadCollection(name);
@@ -6483,6 +6516,8 @@
   var loaded = false;
   function applyStores(stores) {
     state.stores = stores;
+    state.stores.dismissedTimeOff = (state.stores.timeOff || []).filter(function (r) { return r.dismissed; });
+    state.stores.timeOff = (state.stores.timeOff || []).filter(function (r) { return !r.dismissed; });
     promoteLegacyPtoTasks(state.stores);
     state.storesLoaded = true;
     var dom = (stores.appConfig || []).filter(function (r) { return r.key === 'allowedDomains'; })[0];

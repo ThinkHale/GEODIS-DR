@@ -333,14 +333,23 @@
     var byId = {};
     incoming.forEach(function (r) { byId[String(r.id)] = r; });
 
-    var out = [], vanished = [];
+    var out = [], vanished = [], dismissed = {};
     (existing || []).forEach(function (r) {
       if (r.source !== source) { out.push(r); return; }      // somebody else's record
+      if (r.dismissed) {
+        // "Remove local copy" is an explicit local decision. Keep its tombstone
+        // so the next recurring tracker pull cannot recreate the visible row.
+        out.push(r);
+        dismissed[String(r.id)] = true;
+        return;
+      }
       if (byId[String(r.id)]) return;                        // still on the sheet; replaced below
       out.push(r);                                           // gone from the sheet, kept regardless
       if (String(r.status || '') !== 'Completed') vanished.push(r);
     });
-    return { records: out.concat(incoming), vanished: vanished };
+    return { records: out.concat(incoming.filter(function (r) {
+      return !dismissed[String(r.id)];
+    })), vanished: vanished };
   }
 
   /* A task for each request that left the sheet with payroll still holding it.

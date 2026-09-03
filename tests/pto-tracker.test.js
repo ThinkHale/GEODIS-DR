@@ -200,6 +200,12 @@ t('the other PTO workbook is untouched', merged.some(x => x.id === 'PTO-XLS-1'))
 t('so is the Forms intake', merged.some(x => x.id === 'FORM-1'));
 t('so is anything entered by hand', merged.some(x => x.id === 'HAND-1'));
 t('and the new row is in', merged.some(x => x.id === 'PTOIL-NEW'));
+t('a locally dismissed tracker row is not recreated by the next pull', (() => {
+  const prior = [{ id: 'PTOIL-HIDE', source: 'IL Shared PTO Tracker', dismissed: true }];
+  const next = [{ id: 'PTOIL-HIDE', source: 'IL Shared PTO Tracker', status: 'Received' }];
+  const rows = P.mergeForSave(prior, next).records;
+  return rows.length === 1 && rows[0].dismissed === true;
+})());
 
 console.log('— a request that leaves the sheet —');
 /* A shared spreadsheet somebody edits is not evidence a day off did not happen.

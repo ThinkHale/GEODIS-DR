@@ -83,6 +83,7 @@ const COLLECTIONS = {
                             status: 'str', notes: 'str', shift: 'str', location: 'str', source: 'str',
                             submittedAt: 'str', statusUpdatedAt: 'str', statusUpdatedBy: 'str',
                             connectedBy: 'str', connectedAt: 'str', statusHistory: 'log',
+                            dismissed: 'bool', dismissedAt: 'str', dismissedBy: 'str',
                             transitionHours: 'num', accrualHours: 'num', transitionAppliedAt: 'str',
                             legacyBalanceApplied: 'str', importRef: 'str' } },
   associatePto: { path: 'associates/pto.json',            responseKey: 'associatePto',

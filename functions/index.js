@@ -2003,7 +2003,21 @@ async function applyIlPtoWorkbook(buffer, opts) {
   if (opts.modifiedAt) {
     const last = await readJsonFile(ILPTO_META_PATH);
     if (last && last.modifiedAt && String(last.modifiedAt) === String(opts.modifiedAt)) {
-      return { ok: true, meta: Object.assign({}, last, { skipped: true, checkedAt: new Date().toISOString() }) };
+      const checkedAt = new Date().toISOString();
+      const meta = Object.assign({}, last, {
+        skipped: true,
+        checkedAt: checkedAt,
+        // `syncedAt` means the flow successfully checked in, not that the
+        // workbook contents changed. The UI's stale warning is about missed
+        // runs, so an unchanged but successful pull must refresh this clock.
+        syncedAt: checkedAt,
+        // Preserve the separate content-change time for diagnostics.
+        dataSyncedAt: last.dataSyncedAt || last.syncedAt || checkedAt
+      });
+      await bucket.file(ILPTO_META_PATH).save(JSON.stringify(meta), {
+        contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+      });
+      return { ok: true, meta: meta };
     }
   }
 
@@ -2096,8 +2110,10 @@ async function applyIlPtoWorkbook(buffer, opts) {
     contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
   });
 
+  const syncedAt = new Date().toISOString();
   const meta = {
-    syncedAt: new Date().toISOString(),
+    syncedAt: syncedAt,
+    dataSyncedAt: syncedAt,
     fileName: String(opts.fileName || '').slice(0, 200),
     modifiedAt: String(opts.modifiedAt || '').slice(0, 40),
     requests: built.records.length,

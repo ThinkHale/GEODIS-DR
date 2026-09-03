@@ -402,9 +402,9 @@
     });
   }
 
-  var closingEndedTasks = false;
-  function completeTasksForEndedRcAssignments() {
-    if (closingEndedTasks || !state.storesLoaded || !mayEdit()) return;
+  var closingSourceTasks = false;
+  function completeTasksFromSourceEvidence() {
+    if (closingSourceTasks || !state.storesLoaded || !mayEdit()) return;
     var ended = {};
     (state.records || []).forEach(function (r) {
       // Positive RC evidence only. `endCrm` means RC is still the system that
@@ -413,16 +413,33 @@
         ended[SuiteData.normBadge(r.badge)] = true;
       }
     });
-    var actor = PipelineCore.actorOf('Assignment reconciliation', '', 'system');
+    var attendanceByBadge = {};
+    (state.stores.attendance || []).forEach(function (r) {
+      var badge = SuiteData.normBadge(r && r.badge);
+      if (!badge) return;
+      if (!attendanceByBadge[badge]) attendanceByBadge[badge] = [];
+      attendanceByBadge[badge].push(r);
+    });
     var patches = (state.stores.tasks || []).map(TasksCore.normalize).filter(function (t) {
-      return t.kind === 'terminate' && TasksCore.isOpen(t) && ended[SuiteData.normBadge(t.badge)];
+      if (!TasksCore.isOpen(t) || !t.badge) return false;
+      var badge = SuiteData.normBadge(t.badge);
+      if (t.kind === 'terminate') return ended[badge];
+      if (t.kind !== 'attendance') return false;
+      // A dated task is satisfied only by that day's PLX occurrence. With no
+      // date, the associate's presence on the attendance tab is the evidence
+      // the task asked us to wait for.
+      return (attendanceByBadge[badge] || []).some(function (r) {
+        return !t.due || String(r.date || '').slice(0, 10) === t.due;
+      });
     }).map(function (t) {
-      var patch = TasksCore.pipeline.applyStatus(t, 'Complete', actor, new Date());
+      var sourceName = t.kind === 'attendance' ? 'PLX workbook reconciliation' : 'Assignment reconciliation';
+      var patch = TasksCore.pipeline.applyStatus(t, 'Complete',
+        PipelineCore.actorOf(sourceName, '', 'system'), new Date());
       patch.updatedAt = patch.statusUpdatedAt;
       return patch;
     });
     if (!patches.length) return;
-    closingEndedTasks = true;
+    closingSourceTasks = true;
     Promise.all(patches.map(function (patch) { return SuiteData.saveRecord('tasks', patch); }))
       .then(function () {
         patches.forEach(function (patch) {
@@ -431,8 +448,8 @@
         });
         rebuild(); render();
       }).catch(function (err) {
-        console.warn('Could not automatically complete ended-assignment tasks.', err);
-      }).then(function () { closingEndedTasks = false; });
+        console.warn('Could not automatically complete source-confirmed tasks.', err);
+      }).then(function () { closingSourceTasks = false; });
   }
   function allProfiles() { return Array.from(state.profiles.values()); }
   /* A market persisted from an earlier session can outlive the snapshot that had
@@ -6449,7 +6466,7 @@
     state.updatedAt = e.detail.updatedAt || state.updatedAt;
     rebuild();
     render();
-    completeTasksForEndedRcAssignments();
+    completeTasksFromSourceEvidence();
   });
 
 
@@ -6471,7 +6488,7 @@
     var dom = (stores.appConfig || []).filter(function (r) { return r.key === 'allowedDomains'; })[0];
     AuthCore.setAllowedDomains(dom ? dom.value : '');
     rebuild();
-    completeTasksForEndedRcAssignments();
+    completeTasksFromSourceEvidence();
   }
   function loadEverything(force) {
     if (loaded && !force) return Promise.resolve(state.stores);

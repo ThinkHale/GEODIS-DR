@@ -60,7 +60,10 @@ console.log('— a poll that changes nothing costs nothing —');
    on modification -- that needs it in your own drive. A flow polls instead, and an
    unchanged workbook must not rewrite every record and its updatedAt stamp. */
 t('an unchanged file stops before parsing', /String\(last\.modifiedAt\) === String\(opts\.modifiedAt\)/.test(apply));
-t('and says it skipped rather than reporting a fresh sync', /skipped: true/.test(apply));
+t('and says it skipped the data rewrite', /skipped: true/.test(apply));
+t('but records a fresh successful check-in for the stale-feed clock',
+  /syncedAt: checkedAt/.test(apply) && /ILPTO_META_PATH\)\.save\(JSON\.stringify\(meta\)/.test(apply));
+t('while preserving when the workbook data last changed', /dataSyncedAt: last\.dataSyncedAt \|\| last\.syncedAt/.test(apply));
 t('the check happens before the workbook is even read',
   apply.indexOf('opts.modifiedAt') < apply.indexOf('XLSX.read'));
 // A browser upload has no file timestamp and must always apply.

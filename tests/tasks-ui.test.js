@@ -173,10 +173,36 @@ const upload = (kind, aoa, name) => {
      their task under the wrong kind. */
   t('the default is the kind the form says it is', kindSel.value === 'note');
   t('every kind is offered by key', Array.from(kindSel.options).map(o => o.value).join(',') ===
-    'pto,payroll,terminate,system,attendance,note');
+    'pto,payroll,terminate,system,attendance,status,note,other');
   t('and labelled in words', Array.from(kindSel.options).some(o => o.textContent === 'Payroll issue'));
-  form.querySelector('[name="title"]').value = 'Add Ann to Beeline';
-  kindSel.value = 'system';
+
+  /* The kind comes first and the rest of the form follows from it. One flat form
+     asked everybody for a due date and a priority whatever they were raising,
+     and asked nobody for the thing that identifies the work. */
+  const pickKind = async k => {
+    const sel = $('[data-form="task"] [name="kind"]');
+    sel.value = k;
+    sel.dispatchEvent(new w.Event('change', { bubbles: true }));
+    await settle(30);
+  };
+  const has = n => !!$('[data-form="task"] [name="' + n + '"]');
+  await pickKind('attendance');
+  t('an attendance note asks which day it happened', has('exceptionDate'));
+  t('and which kind of exception', has('exceptionType'));
+  t('and does not ask for a due date it has no use for', !has('due'));
+  await pickKind('payroll');
+  t('a payroll issue asks for the week ending', has('weekEnding'));
+  t('and what went wrong', has('issueType'));
+  t('the escalation window is stated', /4 hours/.test(d.body.textContent));
+  await pickKind('pto');
+  t('a PTO request asks for the days off, not a due date', has('start') && has('end') && !has('due'));
+  t('and says it becomes a time-off request', /Time Off page/.test(d.body.textContent));
+  await pickKind('status');
+  t('a status update reads the current status rather than asking for it',
+    $('[data-form="task"] [name="currentStatus"]').readOnly);
+
+  await pickKind('system');
+  t('the associate carried across the kind change', has('badge'));
   form.querySelector('[name="badge"]').value = 'b1';
   form.querySelector('[name="detail"]').value = 'Never got a Beeline record';
   form.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
@@ -187,20 +213,39 @@ const upload = (kind, aoa, name) => {
   t('open', made.body.status === 'Open');
   t('attributed', made.body.createdBy === 'Tester');
   t('and carrying the associate it is about', made.body.badge === 'b1' && made.body.name === 'Ann Reed');
+  /* Nobody typed a title. A kind that knows what it is about names itself, so
+     the queue does not fill with rows that all read the same. */
+  t('it named itself from what was entered', /Add Ann Reed to the system/.test(made.body.title));
   click($('[data-nav="tasks"]'));
   await settle(40);
-  t('it shows on the page', d.body.textContent.indexOf('Add Ann to Beeline') !== -1);
+  t('it shows on the page', d.body.textContent.indexOf('Ann Reed') !== -1);
 
-  console.log('— a task with no description is refused —');
+  /* The refusal speaks in the words of the kind being raised. "A task needs a
+     description" was no help to somebody filing an attendance note who had left
+     the date blank. */
+  console.log('— what is missing is named in the kind\'s own words —');
   click($('.suite-add'));
-  const f2 = $('[data-form="task"]');
-  f2.querySelector('[name="title"]').value = '   ';
+  await settle(30);
   const writesBefore = posts.filter(p => p.url && p.url.indexOf('tasks=1') !== -1).length;
-  f2.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
-  await settle(40);
-  t('nothing was saved',
+  const submitNow = async () => {
+    $('[data-form="task"]').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+    await settle(40);
+  };
+  await submitNow();
+  t('a follow-up with no description is refused',
+    posts.some(p => p.alert && /what needs doing/i.test(p.alert)));
+  await pickKind('attendance');
+  posts.length = posts.length;
+  await submitNow();
+  t('an attendance note with no associate says so',
+    posts.some(p => p.alert && /is about a person/i.test(p.alert)));
+  $('[data-form="task"] [name="badge"]').value = 'b1';
+  $('[data-form="task"] [name="exceptionDate"]').value = '';
+  await submitNow();
+  t('and an undated one says why the date matters',
+    posts.some(p => p.alert && /cannot be matched to the workbook/i.test(p.alert)));
+  t('nothing was saved through any of it',
     posts.filter(p => p.url && p.url.indexOf('tasks=1') !== -1).length === writesBefore);
-  t('and it says why', posts.some(p => p.alert && p.alert.indexOf('what has to be done') !== -1));
   if ($('[data-close]')) click($('[data-close]'));
 
   console.log('— marking somebody Terminated leaves a task behind —');

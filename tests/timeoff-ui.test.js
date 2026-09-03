@@ -198,6 +198,40 @@ const rowFor = name => $$('.suite-table tbody tr').find(tr => tr.textContent.ind
   await settle(20);
   t('back out of the way', !completedRow());
 
+  /* Tasks and Time Off had two market rules and they disagreed. Time Off hid a
+     request whose badge reached no profile; Tasks showed the task derived from
+     that same request. So picking a market made a PTO request vanish from the
+     page that owns it while its task sat in the queue with nowhere to open.
+
+     A record nobody has matched to anybody has no market of its own, and is the
+     kind most likely to be forgotten if it disappears when somebody picks one. */
+  console.log('— a market filter does not hide an unmatched request —');
+  w.GEODISSuite.state.stores.timeOff.push({
+    id: 'T-ORPHAN', badge: '999999', name: 'Nomatch Nobody', type: 'PTO',
+    start: '2026-09-10', end: '2026-09-10', hours: 8, status: 'Received',
+    source: 'Form', submittedAt: '2026-09-01T10:00:00Z'
+  });
+  click($('[data-nav="timeoff"]'));
+  await settle(40);
+  const shown = () => $$('.suite-table tbody tr').some(r => /Nomatch Nobody/.test(r.textContent));
+  t('it is listed with no market chosen', shown());
+  const mp = $('#market-picker');
+  const anyMarket = mp && Array.from(mp.options).map(o => o.value).filter(v => v !== 'all')[0];
+  if (anyMarket) {
+    mp.value = anyMarket;
+    mp.dispatchEvent(new w.Event('change', { bubbles: true }));
+    await settle(60);
+    t('and still listed once a market is chosen — it belongs to no market, so hiding it loses it',
+      shown());
+    click($('[data-nav="tasks"]'));
+    await settle(40);
+    t('its task is in the queue for the same market',
+      $$('.suite-table tbody tr').some(r => /Nomatch Nobody/.test(r.textContent)));
+    $('#market-picker').value = 'all';
+    $('#market-picker').dispatchEvent(new w.Event('change', { bubbles: true }));
+    await settle(40);
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

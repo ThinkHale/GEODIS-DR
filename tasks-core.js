@@ -35,10 +35,18 @@
     { key: 'payroll',   label: 'Payroll issue',    panel: 'payroll',    hours: 4 },
     { key: 'terminate', label: 'End assignment',   panel: 'associates', hours: 48 },
     { key: 'system',    label: 'Add to a system',  panel: 'associates', hours: 48 },
-    { key: 'attendance',label: 'Attendance',       panel: 'attendance', hours: 48 },
-    { key: 'note',      label: 'Follow up',        panel: 'tasks',      hours: 48 }
+    { key: 'attendance',label: 'Attendance note',  panel: 'attendance', hours: 48 },
+    /* What the reconciliation says about somebody, raised as a job: chase the
+       system that disagrees. It has no panel of its own -- the answer is on the
+       associate's record -- so it points there. */
+    { key: 'status',    label: 'Status update',    panel: 'associates', hours: 48 },
+    { key: 'note',      label: 'Follow up',        panel: 'tasks',      hours: 48 },
+    // The escape hatch. Everything the other kinds do not describe.
+    { key: 'other',     label: 'Other',            panel: 'tasks',      hours: 48 }
   ];
   var DEFAULT_KIND = 'note';
+  var EXCEPTION_TYPES = ['Absent', 'Late', 'Left early'];
+  var ISSUE_TYPES = ['Not paid', 'Shorted hours', 'PTO not issued', 'Other'];
   var KIND_BY_KEY = {};
   KINDS.forEach(function (k) { KIND_BY_KEY[k.key] = k; });
 
@@ -129,6 +137,16 @@
       // thing twice and the row can link back to it.
       sourceKind: String(rec.sourceKind || ''),
       sourceId: String(rec.sourceId || ''),
+      /* What the kind-specific forms capture. Kept as fields rather than folded
+         into the title, so a payroll issue can be counted by type and an
+         attendance note can be matched to the day it is about -- which is what
+         lets completeTasksFromSourceEvidence() close it when the workbook
+         catches up. A kind that does not use one simply leaves it empty. */
+      exceptionType: String(rec.exceptionType || '').trim(),
+      exceptionDate: String(rec.exceptionDate || '').trim(),
+      weekEnding: String(rec.weekEnding || '').trim(),
+      issueType: String(rec.issueType || '').trim(),
+      currentStatus: String(rec.currentStatus || '').trim(),
       urgentAfterHours: Number(rec.urgentAfterHours) > 0 ? Number(rec.urgentAfterHours) : 0,
       createdAt: rec.createdAt || '',
       createdBy: rec.createdBy || '',
@@ -250,6 +268,8 @@
 
   var api = {
     KINDS: KINDS,
+    EXCEPTION_TYPES: EXCEPTION_TYPES,
+    ISSUE_TYPES: ISSUE_TYPES,
     KIND_KEYS: KINDS.map(function (k) { return k.key; }),
     DEFAULT_KIND: DEFAULT_KIND,
     STATUSES: STATUSES,

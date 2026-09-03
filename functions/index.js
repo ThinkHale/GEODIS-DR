@@ -130,6 +130,8 @@ const COLLECTIONS = {
      the task shape on read, so there is only ever one record to mark done. */
   tasks:        { path: 'tasks/tasks.json',              responseKey: 'tasks',
                   fields: { kind: 'str', title: 'str', detail: 'str', badge: 'str', name: 'str',
+                            exceptionType: 'str', exceptionDate: 'str', weekEnding: 'str',
+                            issueType: 'str', currentStatus: 'str',
                             market: 'str', location: 'str', assignee: 'str', due: 'str', priority: 'str',
                             status: 'str', source: 'str',
                             sourceKind: 'str', sourceId: 'str', urgentAfterHours: 'num',

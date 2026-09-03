@@ -495,6 +495,28 @@
      data through these rather than off state.stores directly. A market of 'all'
      returns everything, so they are safe to call unconditionally. */
   function inMarket(p) { return state.market === 'all' || (!!p && p.market === state.market); }
+
+  /* Is this RECORD in the chosen market?
+
+     One rule, shared, because Tasks and Time Off had two and disagreed. Time Off
+     hid a request whose badge reached no profile; Tasks showed the task derived
+     from that same request. So a market filter made a PTO request vanish from
+     the page that owns it while its task sat in the queue with nowhere to go --
+     which is exactly what happened to Olmes Molina.
+
+     A record whose market cannot be resolved is never hidden. Those are the ones
+     nobody has matched to anybody yet, and they are the ones most likely to be
+     forgotten if they disappear when somebody picks a market. */
+  function recordMarket(rec) {
+    if (!rec) return '';
+    var p = rec.badge ? profile(rec.badge) : null;
+    return (p && p.market) || rec.market || '';
+  }
+  function recordInMarket(rec) {
+    if (state.market === 'all') return true;
+    var m = recordMarket(rec);
+    return !m || m === state.market;
+  }
   function profilesInMarket() { return allProfiles().filter(inMarket); }
   // Records keyed by badge: a row whose badge is not on the roster has no market
   // of its own. Attendance surfaces those separately in its orphan banner.
@@ -965,6 +987,31 @@
       esc(base + '/lightning/r/' + object + '/' + id + '/view') + '">' + esc(label) + ' ↗</a>';
   }
   function rcContactLink(p, label) { return rcLink(p.contactId, 'Contact', label || 'RC profile'); }
+
+  /* The link to somebody's assignment in RC, or why there is not one.
+
+     rcLink() returns an empty string when it cannot build a URL, and an empty
+     string on a row is indistinguishable from "there is nothing to link to".
+     There are two quite different reasons: nobody has set the RC base URL, in
+     which case EVERY link in the tool is off and an administrator has to fix it
+     once; or this particular record carries no assignment id. Saying which is
+     the difference between a setting somebody changes and a mystery. */
+  function rcAssignmentCell(p) {
+    var link = rcAssignmentLink(p, 'Open assignment in RC');
+    if (link) return '<div class="sub">' + link + '</div>';
+    // The missing base URL is reported once for the page, not once per row.
+    if (!rcBase()) return '';
+    return '<div class="sub">No RC assignment id on this record</div>';
+  }
+  /* Said once, where the links would have been. Only to somebody who can act on
+     it -- an administrator sets it, and it is in Settings, not on this page. */
+  function rcLinksOffNote() {
+    if (rcBase() || !showsProvenance()) return '';
+    return '<div class="warn-banner"><strong>Links into RC are switched off</strong>' +
+      '<p>No RC base URL is set, so nothing in the tool can link to a contact or an assignment — ' +
+      'including the assignment links on these tasks. An administrator sets it once under ' +
+      '<b>Settings → App settings</b>.</p></div>';
+  }
   function rcAssignmentLink(p, label) {
     // The object name for an assignment is org-specific, so it is configurable
     // alongside the base URL rather than assumed.
@@ -2837,9 +2884,11 @@
     var q = state.query.trim().toLowerCase();
     var scoped = state.stores.timeOff.filter(function (t) {
       var p = profile(t.badge);
-      // A request from a form carries a name but may have no badge, so it has no
-      // market either. Hiding it would lose a PTO request nobody has actioned.
-      if (p ? !inMarket(p) : state.market !== 'all' && t.badge) return false;
+      /* A request whose badge reaches no profile has no market of its own, and
+         is kept rather than hidden -- see recordInMarket(). Hiding it lost a PTO
+         request nobody had actioned, and left the task derived from it visible
+         in the queue with no page to open. */
+      if (!recordInMarket(t)) return false;
       if (!q) return true;
       return searchText(p, (p ? '' : t.name || '') + ' ' + t.badge + ' ' + t.type + ' ' +
         t.status + ' ' + (t.source || '')).toLowerCase().indexOf(q) !== -1;
@@ -3144,9 +3193,9 @@
   function allTasks() {
     if (taskCache) return taskCache;
     taskCache = storedTasks().concat(derivedTasks()).filter(function (t) {
-      // A task with no market is never hidden: it is usually the ones with no
-      // profile attached that most need chasing.
-      return state.market === 'all' || !t.market || t.market === state.market;
+      // The same rule the owning panels use, so a task and the record it was
+      // derived from can never disagree about whether they are in this market.
+      return recordInMarket(t);
     });
     return taskCache;
   }
@@ -3261,6 +3310,7 @@
     var rows = TasksCore.sort(taskFilter(every, tests, null), now);
 
     return hero('Tasks', 'Everything outstanding, from wherever it was raised. A task stays until somebody marks it complete.') +
+      rcLinksOffNote() +
       '<div class="metric-strip">' +
       metric('Urgent', sum.urgent, 'Past the time they should have moved', sum.urgent ? 'orange' : 'green') +
       metric('Due soon', sum.due, 'In the last quarter of their window') +
@@ -3298,8 +3348,7 @@
       (t.due ? 'Due ' + esc(formatDate(t.due)) : 'No due date') + '</div></td>' +
       '<td>' + (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div>' +
                     '<div class="sub">' + idLine(p) + (t.location ? ' · ' + esc(t.location) : '') + '</div>' +
-                    (rcAssignmentLink(p, 'Open assignment in RC') ? '<div class="sub">' +
-                      rcAssignmentLink(p, 'Open assignment in RC') + '</div>' : '')
+                    rcAssignmentCell(p)
                   : t.name ? '<div class="name">' + esc(t.name) + '</div>' +
                     '<div class="sub warn-text">no profile' + (t.location ? ' · ' + esc(t.location) : '') + '</div>'
                   : '<span class="sub">' + esc(t.location || '—') + '</span>') + '</td>' +
@@ -5313,6 +5362,135 @@
     }
     return '<label class="suite-field"><span>' + esc(label) + '</span>' + input + '</label>';
   }
+  /* What each kind asks for. The list is the form: nothing is asked that the
+     kind does not need, and nothing it does need is left to be buried in a free
+     text box where no report can reach it. */
+  var TASK_FORMS = {
+    note:       ['title', 'associate', 'due', 'owner', 'detail'],
+    pto:        ['associate', 'ptoDates', 'detailOptional'],
+    attendance: ['associate', 'exceptionType', 'exceptionDate', 'detail'],
+    payroll:    ['associate', 'weekEnding', 'issueType', 'detail'],
+    status:     ['associate', 'currentStatus'],
+    terminate:  ['associate', 'due', 'detail'],
+    system:     ['associate', 'due', 'detail'],
+    other:      ['title', 'associate', 'due', 'owner', 'detail']
+  };
+  var TASK_KIND_NOTES = {
+    pto: 'This is filed as a time-off request, not a task — it appears on the Time Off page where it can be approved.',
+    payroll: 'Payroll issues escalate after ' + TasksCore.kindMeta('payroll').hours + ' hours, not the usual 48.',
+    attendance: 'Recorded here so it is not forgotten. The occurrence itself still belongs on the PLX workbook.',
+    status: 'For chasing a system that disagrees about somebody. The current reading is filled in from the reconciliation.',
+    terminate: 'Closes itself when the next RC assignment run shows the assignment ended.',
+    system: 'Closes itself when the person appears in the system it is about.'
+  };
+  function taskKindNote(kind) { return TASK_KIND_NOTES[kind] || ''; }
+
+  // What the reconciliation currently says about somebody, in words.
+  function reconReading(p) {
+    if (!p) return '';
+    return (p.actionLabel || p.status || 'Active') +
+      (p.status === 'Ended' && p.endDate ? ' · ended ' + p.endDate : '');
+  }
+
+  function taskFieldsFor(kind, badge) {
+    var spec = TASK_FORMS[kind] || TASK_FORMS.note;
+    var p = badge ? profile(badge) : null;
+    var out = spec.map(function (name) {
+      switch (name) {
+        case 'title':
+          return field('What needs doing', 'title', 'text', '');
+        case 'associate':
+          // Optional throughout: plenty of work is about a site or a system.
+          return field('Associate' + (kind === 'note' || kind === 'other' ? ' (optional)' : ''),
+            'badge', 'badge-optional', badge || '') +
+            '<div class="field-preview full" id="task-associate-preview" role="status">' +
+            (p ? 'Linked to ' + esc(p.name) + ' · ' + idLine(p) : 'No associate linked') + '</div>';
+        case 'ptoDates':
+          return field('First day off', 'start', 'date', '') +
+            field('Last day off', 'end', 'date', '');
+        case 'exceptionType':
+          return field('Exception', 'exceptionType', 'select', TasksCore.EXCEPTION_TYPES[0],
+            TasksCore.EXCEPTION_TYPES);
+        case 'exceptionDate':
+          return field('Date it happened', 'exceptionDate', 'date', today());
+        case 'weekEnding':
+          return field('Week ending', 'weekEnding', 'date', '');
+        case 'issueType':
+          return field('Issue', 'issueType', 'select', TasksCore.ISSUE_TYPES[0], TasksCore.ISSUE_TYPES);
+        case 'currentStatus':
+          /* Filled in from the reconciliation rather than typed, because the
+             whole point of the kind is what the SYSTEMS currently say -- a
+             remembered answer would be the thing being chased. */
+          return '<label class="suite-field full"><span>Current status</span>' +
+            '<input name="currentStatus" id="task-current-status" readonly value="' +
+            esc(reconReading(p)) + '" placeholder="Pick an associate to read their status"></label>';
+        case 'owner':
+          return field('Owner', 'assignee', 'text', '');
+        case 'due':
+          return field('Due date', 'due', 'date', '');
+        case 'detail':
+          return field('Detail', 'detail', 'textarea', '');
+        case 'detailOptional':
+          return field('Detail (optional)', 'detail', 'textarea', '');
+      }
+      return '';
+    }).join('');
+    return out;
+  }
+
+  /* What is missing, in the words of the kind being raised. The old form asked
+     one question of everybody -- "a task needs a description" -- which was no
+     help at all to somebody filing an attendance note who had left the date
+     blank. */
+  function taskFormProblem(data, p) {
+    var kind = data.kind;
+    var needsWho = ['pto', 'attendance', 'payroll', 'status', 'terminate'];
+    if (needsWho.indexOf(kind) !== -1 && !String(data.badge || '').trim()) {
+      return 'A ' + TasksCore.kindMeta(kind).label.toLowerCase() + ' is about a person — pick an associate.';
+    }
+    if (kind === 'pto') {
+      if (!String(data.start || '').trim()) return 'Which day is the first day off?';
+      var s0 = String(data.start || ''), e0 = String(data.end || '').trim();
+      if (e0 && e0 < s0) return 'The last day off is before the first.';
+    }
+    if (kind === 'attendance' && !String(data.exceptionDate || '').trim()) {
+      return 'Which day did it happen? An undated attendance note cannot be matched to the workbook.';
+    }
+    if (kind === 'payroll' && !String(data.weekEnding || '').trim()) {
+      return 'Which week ending is this about?';
+    }
+    if (kind === 'status' && !p) {
+      return 'Pick an associate whose status can be read from the reconciliation.';
+    }
+    if ((kind === 'note' || kind === 'other') && !String(data.title || '').trim()) {
+      return 'Say what needs doing.';
+    }
+    return '';
+  }
+
+  /* A title the queue can be read from, built out of what the form captured.
+     Typing one was the only way before, so an attendance note and a payroll
+     issue looked identical in the list once saved. */
+  function taskTitleFor(data, p) {
+    var who = (p && p.name) || data.name || data.badge || 'unknown';
+    switch (data.kind) {
+      case 'attendance':
+        return [data.exceptionType || 'Attendance', who, formatDate(data.exceptionDate) || data.exceptionDate]
+          .filter(Boolean).join(' · ');
+      case 'payroll':
+        return ['Payroll', data.issueType || 'issue', who,
+          data.weekEnding ? 'week ending ' + (formatDate(data.weekEnding) || data.weekEnding) : '']
+          .filter(Boolean).join(' · ');
+      case 'status':
+        return ['Status', who, data.currentStatus || ''].filter(Boolean).join(' · ');
+      case 'terminate':
+        return 'End the assignment for ' + who;
+      case 'system':
+        return 'Add ' + who + ' to the system';
+    }
+    return 'Follow up · ' + who;
+  }
+
   function modal(type, badge) {
     var fields = '', title = '';
     /* There is no "new time-off request" form. Requests are raised on the shared
@@ -5321,18 +5499,17 @@
        sheet. Everything on the Time Off page links to the tracker instead. */
     if (type === 'task') {
       title = 'Raise a task';
-      fields = field('What needs doing', 'title', 'text', '') +
-        field('Kind', 'kind', 'select', TasksCore.DEFAULT_KIND,
+      /* The kind comes FIRST and the rest of the form follows from it. One flat
+         form asked everybody for a due date, an owner and a priority whatever
+         they were raising, and asked nobody for the thing that actually
+         identifies the work -- which day the absence was, which week the pay was
+         short. So a payroll issue and a follow-up looked identical once saved. */
+      fields = field('Kind', 'kind', 'select', TasksCore.DEFAULT_KIND,
           TasksCore.KINDS.map(function (k) { return [k.key, k.label]; })) +
-        // Optional: plenty of tasks are about a system or a site, not a person.
-        field('Associate (optional)', 'badge', 'badge-optional', badge || '') +
-        '<div class="field-preview full" id="task-associate-preview" role="status">' +
-        (badge && profile(badge) ? 'Linked to ' + esc(profile(badge).name) + ' · ' + idLine(profile(badge)) : 'No associate linked') + '</div>' +
-        field('Owner', 'assignee', 'text', '') +
-        field('Due date', 'due', 'date', '') +
-        field('Priority', 'priority', 'select', 'Normal', ['Low', 'Normal', 'High', 'Critical']) +
-        field('Location', 'location', 'text', state.market === 'all' ? '' : state.market) +
-        field('Detail', 'detail', 'textarea', '');
+        '<div class="task-kind-note full" id="task-kind-note">' +
+        esc(taskKindNote(TasksCore.DEFAULT_KIND)) + '</div>' +
+        '<div class="task-kind-fields full" id="task-fields">' +
+        taskFieldsFor(TasksCore.DEFAULT_KIND, badge) + '</div>';
     } else {
       title = 'Add off-board request';
       fields = field('Req ID', 'id', 'text', 'REQ-' + Date.now().toString().slice(-6)) +
@@ -6239,6 +6416,21 @@
     }
   });
 
+  /* On `document`, not on the suite root: the dialog is appended to <body>, so a
+     listener bound to the root never sees it. */
+  document.addEventListener('change', function (e) {
+    if (!e.target.matches || !e.target.matches('[data-form="task"] [name="kind"]')) return;
+    var box = document.getElementById('task-fields');
+    var note = document.getElementById('task-kind-note');
+    if (box) {
+      // Whoever was already picked carries across; nothing else can, because the
+      // next kind may not have the field it was typed into.
+      var chosen = box.querySelector('[name="badge"]');
+      box.innerHTML = taskFieldsFor(e.target.value, chosen ? chosen.value : '');
+    }
+    if (note) note.textContent = taskKindNote(e.target.value);
+  });
+
   document.addEventListener('input', function (e) {
     if (e.target.matches('[data-form="task"] [name="badge"]')) {
       var preview = document.getElementById('task-associate-preview');
@@ -6425,7 +6617,6 @@
       data.sourceKind = data.sourceKind || 'local';
     }
     if (type === 'task') {
-      if (!String(data.title || '').trim()) { alert('A task needs a description of what has to be done.'); return; }
       /* The select carries the key. A label is still accepted, because a tab
          left open from before this changed would post one, and quietly filing
          that task under "Follow up" is how a payroll issue goes missing. */
@@ -6435,19 +6626,30 @@
       data.kind = picked ? picked.key : TasksCore.DEFAULT_KIND;
       var p = data.badge ? profile(data.badge) : null;
       if (p) { data.name = p.name; data.market = p.market || ''; data.location = p.locationLabel || ''; }
+
+      var problem = taskFormProblem(data, p);
+      if (problem) { alert(problem); return; }
+
       if (data.kind === 'pto') {
-        // PTO belongs to the Time Off workflow. The task form's due date is the
-        // requested day; its title/detail become the request notes.
+        /* PTO belongs to the Time Off workflow, so this files a REQUEST, not a
+           task -- the form asks for the days off rather than a due date, and
+           those become the request's dates. A request with the wrong dates was
+           the reason these went missing from the Time Off page. */
         var submittedAt = new Date().toISOString();
+        var start = String(data.start || '').trim();
+        var end = String(data.end || '').trim() || start;
         data = {
           id: 'TO' + Date.now(), badge: data.badge || '', name: data.name || '',
-          market: data.market || '', type: 'PTO', start: data.due || '', end: data.due || '',
+          market: data.market || '', type: 'PTO', start: start, end: end,
           hours: 0, status: 'Received', source: 'Raised from Tasks',
-          notes: [data.title, data.detail].filter(Boolean).join(' — '),
+          notes: String(data.detail || '').trim(),
           submittedAt: submittedAt, createdAt: submittedAt, updatedAt: submittedAt
         };
         type = 'timeoff';
       } else {
+        // Most kinds name themselves from what was entered. Only the two
+        // open-ended ones ask somebody to write a title.
+        data.title = String(data.title || '').trim() || taskTitleFor(data, p);
         type = 'tasks';
         data = TasksCore.create(data, currentActor(true) || null, new Date());
       }

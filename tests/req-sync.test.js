@@ -276,6 +276,29 @@ const candAoa = [
   t('with the same requests either way', reqs().some(r => r.beelineReq === 'REQ-7001'));
   t('a single-encoded xlsx still works', (await push(reqAoa, 'reqs.xlsx')).code === 200);
 
+  /* The shape that actually cost two mornings, taken verbatim from a flow run on
+     2026-09-03: the file CONTENT passed into a field called fileBase64. Node's
+     base64 decoder does not complain -- it silently skips every character
+     outside the alphabet -- so a good CSV arrived as 361 rows of mojibake and
+     the only symptom was "No Request-ID column was found". */
+  const asSent = '"Request-ID","Candidate","Job Position","Location Name","Status",' +
+    '"Beeline ID","External ID","Name","Date","Internal Status"\r\n' +
+    '"111007-1",,"Warehouse - Operator 2","4301 - 1815 Couchville Pike,,Mount Juliet,TN,US",' +
+    '"Open",,,"Mahmood, Mohamed","09/08/2026",\r\n' +
+    '"109526-1","Niurka Estrada","Warehouse - Material Handler",' +
+    '"1027 - 4395 W. 88th Street,,Hialeah,FL,US","Open","NEstrada1812",,"Perez, Paola",' +
+    '"08/13/2026","Offer Confirmed"\r\n';
+  const sentRaw = await pushRaw(asSent, 'Candidate Status per Req09-03-2026.csv');
+  t('a body that was never encoded is read as the file', sentRaw.code === 200);
+  t('and the requests in it land', reqs().some(r => r.beelineReq === '111007-1'));
+  t('with the candidates', cands().some(c => c.name === 'Niurka Estrada'));
+  t('the same body base64-encoded still works',
+    (await pushRaw(enc(asSent), 'same.csv')).code === 200);
+  /* A quote or a comma proves a string is not base64, and a CSV is full of
+     both -- so this can never misread a real base64 body. */
+  t('and a genuine base64 body is not mistaken for text',
+    (await pushRaw(enc(csvText), 'reqs.csv')).code === 200);
+
   /* UTF-16 is half NUL bytes, so a rule that calls any NUL "binary" throws away
      a perfectly good CSV. Some systems export exactly that, and big-endian
      needs swapping because it is the one encoding SheetJS will not read. */

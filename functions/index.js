@@ -254,8 +254,47 @@ const NOTES_ORIGIN = 'https://geodis.ebtools.pro';   // the tool's front-end ori
 
    Both forms are accepted instead, because which one a given flow produces is not
    worth a debugging round trip. */
-function decodeWorkbookBody(b64) {
-  const buf = Buffer.from(b64, 'base64');
+/* Base64 is [A-Za-z0-9+/=] and whitespace, nothing else. A quote or a comma
+   proves a string is not base64 -- and a CSV is full of both. */
+function looksLikeBase64(s) {
+  return /^[A-Za-z0-9+/=\s]*$/.test(s);
+}
+
+/* What the flow actually put in the body, whatever shape it took.
+
+   The shape that cost two mornings: a flow that passes the file CONTENT into a
+   field called `fileBase64`. Node's base64 decoder does not complain about that
+   -- it silently skips every character outside the alphabet and returns
+   shredded bytes -- so a perfectly good CSV arrived as 361 rows of mojibake and
+   the only symptom was "No Request-ID column was found". Nothing pointed at the
+   encoding, because nothing had failed loudly enough to point at it.
+
+   `depth` guards the envelope recursion; one level is all any connector
+   produces. */
+function decodeWorkbookBody(b64, depth) {
+  const raw = String(b64 == null ? '' : b64);
+  if (!raw) return Buffer.alloc(0);
+
+  // The connector's envelope, passed through as text rather than as its bytes.
+  const trimmed = raw.trim();
+  if (!depth && trimmed.charAt(0) === '{' && trimmed.indexOf('$content') !== -1) {
+    try {
+      const envelope = JSON.parse(trimmed);
+      if (envelope && typeof envelope.$content === 'string') {
+        return decodeWorkbookBody(envelope.$content, 1);
+      }
+    } catch (err) { /* not an envelope after all; carry on */ }
+  }
+
+  // Not base64 at all: this IS the file.
+  if (!looksLikeBase64(raw)) {
+    console.warn('The attachment arrived as text, not base64 (' + raw.length +
+      ' characters). Reading it as the file itself — the flow is passing the file ' +
+      'content into fileBase64 rather than base64() of it.');
+    return Buffer.from(raw, 'utf8');
+  }
+
+  const buf = Buffer.from(raw, 'base64');
   const head = buf.slice(0, 60).toString('utf8');
   if (head.indexOf('$content') === -1) return buf;
   try {
@@ -352,7 +391,19 @@ function normalizeUtf16(buffer) {
 }
 
 function flowAttachment(b64) {
-  return normalizeUtf16(unwrapDoubleBase64(decodeWorkbookBody(b64)));
+  const decoded = normalizeUtf16(unwrapDoubleBase64(decodeWorkbookBody(b64)));
+  /* A string of only base64 characters that was never base64 -- a table of bare
+     alphanumerics, say -- decodes to noise and passes every check above. If the
+     bytes read as neither a workbook nor a table, and the ORIGINAL text does,
+     the original was the file. */
+  if (!isXlsxZip(decoded) && !looksLikeDelimitedText(decoded)) {
+    const raw = Buffer.from(String(b64 == null ? '' : b64), 'utf8');
+    if (looksLikeDelimitedText(raw)) {
+      console.warn('The decoded attachment was unreadable but the body itself reads as a table; using the body.');
+      return raw;
+    }
+  }
+  return decoded;
 }
 
 async function readRawFile(type) {

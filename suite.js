@@ -1221,38 +1221,24 @@
       }).join('') + '</tbody></table></div>';
   }
 
-  /* Real 7-day attendance rate, computed from logged occurrences. "Rate" is the
-     share of that day's records that were not an absence or no-call. With no
-     attendance data the panel says so rather than drawing an invented line. */
+  /* Today's attendance rate comes from the stored on-premise checks, which carry
+     both who was seen and who was expected but missing. The attendance workbook
+     is an EXCEPTION ledger; using its rows as the denominator made a day of late
+     arrivals look like 100% attendance because no absence row was present. */
   function trend() {
-    var days = [], any = false;
-    var events = byBadgeInMarket(state.stores.attendance);
-    for (var i = 6; i >= 0; i--) {
-      var date = daysBack(i);
-      var rows = events.filter(function (a) { return a.date === date; });
-      if (rows.length) any = true;
-      var bad = rows.filter(function (a) { return a.type === 'Absent' || a.type === 'No Call / No Show'; }).length;
-      days.push({ date: date, total: rows.length, rate: rows.length ? Math.round((rows.length - bad) / rows.length * 100) : null });
+    var day = state.coverage.storedDay;
+    var known = profilesInMarket().filter(function (p) { return p.status === 'Active'; }).map(function (p) {
+      return ScheduleCore.resolveAttendance(day, ScheduleCore.profileKeys(p));
+    }).filter(function (a) { return a.checks > 0; });
+    if (!known.length) {
+      return { latest: null, latestNote: '', html: '<div class="workflow-empty">No on-premise check has established today\'s attendance yet.</div>' };
     }
-    if (!any) {
-      return { latest: null, latestNote: '', html: '<div class="workflow-empty">No attendance has been logged yet. Rates appear here once occurrences are recorded or imported.</div>' };
-    }
-    var pts = days.map(function (d, i) {
-      var y = d.rate == null ? null : 180 - (d.rate - 70) / 30 * 180;   // 70-100% band
-      return { x: i * (700 / 6), y: y == null ? null : Math.max(4, Math.min(176, y)), d: d };
-    }).filter(function (p) { return p.y != null; });
-    var last = days.slice().reverse().find(function (d) { return d.rate != null; });
+    var present = known.filter(function (a) { return a.present; }).length;
+    var rate = Math.round(present / known.length * 100);
     return {
-      latest: last ? last.rate : null,
-      latestNote: last ? last.total + ' records on ' + last.date : '',
-      html: '<div class="trend-chart"><div class="goal-line"></div>' +
-        '<svg class="trend-svg" viewBox="0 0 700 180" preserveAspectRatio="none">' +
-        '<polyline fill="none" stroke="#0b2c5b" stroke-width="3" points="' +
-        pts.map(function (p) { return p.x + ',' + p.y; }).join(' ') + '"/><g fill="#0b2c5b">' +
-        pts.map(function (p) { return '<circle cx="' + p.x + '" cy="' + p.y + '" r="4"/>'; }).join('') +
-        '</g></svg><div class="trend-labels">' +
-        days.map(function (d) { return '<span>' + d.date.slice(5) + '</span>'; }).join('') +
-        '</div></div><div class="chart-legend">– – Attendance goal: 92% · scale 70–100%</div>'
+      latest: rate,
+      latestNote: present + ' of ' + known.length + ' confirmed present today',
+      html: ''
     };
   }
   function activityRow(t) {

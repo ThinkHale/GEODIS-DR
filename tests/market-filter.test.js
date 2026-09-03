@@ -41,7 +41,10 @@ w.fetch = url => {
   const u = String(url);
   if (u.indexOf('plx=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ sync: {} }) });
   if (u.indexOf('schedule=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ schedule: {} }) });
-  if (u.indexOf('coverage=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ coverage: {} }) });
+  if (u.indexOf('coverage=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ coverage: {
+    checks: [{ asOf: today + 'T10:00:00', presentKeys: ['b:C1', 'b:S1'],
+      exceptions: [{ key: 'b:C2', badge: 'C2', status: 'missing' }] }], documented: {}
+  } }) });
   const k = u.match(/\?(\w+)=1/)[1];
   const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions', performance: 'performance', shifts: 'shifts', discrepancies: 'discrepancies' };
   return Promise.resolve({ ok: true, json: () => Promise.resolve({ [map[k]]: stores[map[k]] }) });
@@ -85,9 +88,9 @@ setTimeout(() => {
   m = metrics();
   t('active narrows to 1', m[0] === '1');
   t('pending time-off narrows to 1', m[2] === '1');
-  t('attendance rate is computed from St. Louis only', m[1] === '50%');
+  t('attendance rate is computed from St. Louis only', m[1] === '100%');
   pickMarket('Chicago');
-  t('Chicago attendance rate differs', metrics()[1] === '0%');
+  t('Chicago attendance rate differs', metrics()[1] === '50%');
 
   console.log('— associates —');
   click($('[data-nav="associates"]'));

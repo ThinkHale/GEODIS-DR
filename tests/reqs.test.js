@@ -217,7 +217,7 @@ t('declined is derived from Rejected', sr.declined === 1 && sr.derived.declined 
 t('submitted is still the candidate count', sr.submitted === 4 && sr.derived.submitted === true);
 // No candidate-status combination reproduces Candidates Offered reliably.
 t('offered is NOT derived, because it cannot be derived exactly', sr.offered === null);
-t('the exact breakdown is kept instead', sr.statusCounts['Offer confirmed'] === 1 &&
+t('the exact breakdown uses the operational label', sr.statusCounts['Onboarded'] === 1 &&
   sr.statusCounts['Offer pending'] === 1 && sr.statusCounts['Rejected'] === 1);
 t('stage totals roll up', sb.summary.stages.hired === 1 && sb.summary.stages.declined === 1 &&
   sb.summary.stages.offered === 1 && sb.summary.stages.review === 1);
@@ -316,7 +316,7 @@ t('candidate statuses survive the round trip', (() => {
   const b = Q.buildBoard({ sources: [S] });
   const round = Q.fromRecords(Q.toReqRecords(b), Q.toCandidateRecords(b));
   const r = round.reqs.find(x => x.key === Q.reqKey('R-1'));
-  return r.statusCounts['Offer confirmed'] === 1 && r.hired === 1 &&
+  return r.statusCounts['Onboarded'] === 1 && r.hired === 1 &&
     r.candidates.some(c => c.stage === 'declined');
 })());
 

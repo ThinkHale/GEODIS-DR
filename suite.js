@@ -356,6 +356,67 @@
     });
     validateMarket();
   }
+
+  /* Old builds allowed "PTO request" to be filed as a standalone task even
+     though Time Off is the owning workflow. Surface those existing records in
+     Time Off under a stable id, and keep them out of the task store projection.
+     Once somebody changes the request status it is saved as a normal time-off
+     record; the legacy task can remain as harmless audit history. */
+  function promoteLegacyPtoTasks(stores) {
+    stores = stores || state.stores;
+    var timeOff = stores.timeOff || (stores.timeOff = []);
+    var known = {};
+    timeOff.forEach(function (r) { known[r.id] = true; });
+    (stores.tasks || []).forEach(function (task) {
+      var t = TasksCore.normalize(task);
+      if (t.kind !== 'pto') return;
+      var id = 'TO:' + t.id;
+      if (known[id]) return;
+      timeOff.push({
+        id: id, badge: t.badge, name: t.name, market: t.market,
+        type: 'PTO', start: t.due || '', end: t.due || '', hours: 0,
+        status: TasksCore.isOpen(t) ? 'Received' : 'Completed',
+        notes: [t.title, t.detail].filter(Boolean).join(' — '),
+        source: 'Legacy PTO task', submittedAt: t.createdAt,
+        createdAt: t.createdAt, updatedAt: t.updatedAt,
+        statusHistory: t.statusHistory || []
+      });
+      known[id] = true;
+    });
+  }
+
+  var closingEndedTasks = false;
+  function completeTasksForEndedRcAssignments() {
+    if (closingEndedTasks || !state.storesLoaded || !mayEdit()) return;
+    var ended = {};
+    (state.records || []).forEach(function (r) {
+      // Positive RC evidence only. `endCrm` means RC is still the system that
+      // needs work, so it must not close an assignment-end task.
+      if (r && r.badge && (r.endDate || r.action === 'endBeeline')) {
+        ended[SuiteData.normBadge(r.badge)] = true;
+      }
+    });
+    var actor = PipelineCore.actorOf('Assignment reconciliation', '', 'system');
+    var patches = (state.stores.tasks || []).map(TasksCore.normalize).filter(function (t) {
+      return t.kind === 'terminate' && TasksCore.isOpen(t) && ended[SuiteData.normBadge(t.badge)];
+    }).map(function (t) {
+      var patch = TasksCore.pipeline.applyStatus(t, 'Complete', actor, new Date());
+      patch.updatedAt = patch.statusUpdatedAt;
+      return patch;
+    });
+    if (!patches.length) return;
+    closingEndedTasks = true;
+    Promise.all(patches.map(function (patch) { return SuiteData.saveRecord('tasks', patch); }))
+      .then(function () {
+        patches.forEach(function (patch) {
+          var i = state.stores.tasks.findIndex(function (t) { return t.id === patch.id; });
+          if (i !== -1) state.stores.tasks[i] = patch;
+        });
+        rebuild(); render();
+      }).catch(function (err) {
+        console.warn('Could not automatically complete ended-assignment tasks.', err);
+      }).then(function () { closingEndedTasks = false; });
+  }
   function allProfiles() { return Array.from(state.profiles.values()); }
   /* A market persisted from an earlier session can outlive the snapshot that had
      it. Without this the picker reads "All markets" (no option matches, so none
@@ -2996,10 +3057,18 @@
      would then be two records for one job, and marking one done would leave the
      other lying. They are read-only here and link to the page that owns them. */
   function storedTasks() {
-    return (state.stores.tasks || []).map(TasksCore.normalize);
+    // PTO is owned by Time Off. Legacy PTO-typed tasks are promoted there by
+    // promoteLegacyPtoTasks() and must not appear as a second piece of work.
+    return (state.stores.tasks || []).map(TasksCore.normalize).filter(function (t) {
+      return t.kind !== 'pto';
+    });
   }
   function derivedTasks() {
-    return TasksCore.fromRecords(state.stores.timeOff || [], {
+    return TasksCore.fromRecords((state.stores.timeOff || []).filter(function (r) {
+      // This was already a task before being recovered into its owning panel;
+      // projecting it back would recreate the exact duplicate we removed.
+      return r.source !== 'Legacy PTO task';
+    }), {
       kind: 'pto', sourceKind: 'timeoff', source: 'Time Off',
       needsAction: TimeOffCore.needsAction,
       titleOf: function (r) {
@@ -3186,7 +3255,9 @@
       '<div class="sub' + (t.due && t.due < today() ? ' warn-text' : '') + '">' +
       (t.due ? 'Due ' + esc(formatDate(t.due)) : 'No due date') + '</div></td>' +
       '<td>' + (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div>' +
-                    '<div class="sub">' + idLine(p) + (t.location ? ' · ' + esc(t.location) : '') + '</div>'
+                    '<div class="sub">' + idLine(p) + (t.location ? ' · ' + esc(t.location) : '') + '</div>' +
+                    (rcAssignmentLink(p, 'Open assignment in RC') ? '<div class="sub">' +
+                      rcAssignmentLink(p, 'Open assignment in RC') + '</div>' : '')
                   : t.name ? '<div class="name">' + esc(t.name) + '</div>' +
                     '<div class="sub warn-text">no profile' + (t.location ? ' · ' + esc(t.location) : '') + '</div>'
                   : '<span class="sub">' + esc(t.location || '—') + '</span>') + '</td>' +
@@ -4342,7 +4413,7 @@
       '</div>' +
       (s.stages && (s.stages.offered || s.stages.review || s.stages.declined)
         ? '<div class="req-stages">' +
-          [['hired', 'Offer confirmed'], ['offered', 'Offer pending'], ['review', 'Pending'],
+          [['hired', 'Onboarded'], ['offered', 'Offer pending'], ['review', 'Pending'],
            ['declined', 'Rejected'], ['other', 'Other']]
             .filter(function (x) { return s.stages[x[0]]; })
             .map(function (x) {
@@ -6291,8 +6362,22 @@
       data.kind = picked ? picked.key : TasksCore.DEFAULT_KIND;
       var p = data.badge ? profile(data.badge) : null;
       if (p) { data.name = p.name; data.market = p.market || ''; data.location = p.locationLabel || ''; }
-      type = 'tasks';
-      data = TasksCore.create(data, currentActor(true) || null, new Date());
+      if (data.kind === 'pto') {
+        // PTO belongs to the Time Off workflow. The task form's due date is the
+        // requested day; its title/detail become the request notes.
+        var submittedAt = new Date().toISOString();
+        data = {
+          id: 'TO' + Date.now(), badge: data.badge || '', name: data.name || '',
+          market: data.market || '', type: 'PTO', start: data.due || '', end: data.due || '',
+          hours: 0, status: 'Received', source: 'Raised from Tasks',
+          notes: [data.title, data.detail].filter(Boolean).join(' — '),
+          submittedAt: submittedAt, createdAt: submittedAt, updatedAt: submittedAt
+        };
+        type = 'timeoff';
+      } else {
+        type = 'tasks';
+        data = TasksCore.create(data, currentActor(true) || null, new Date());
+      }
     }
     if (!data.id) data.id = type.slice(0, 2).toUpperCase() + Date.now();
     closeDialog();
@@ -6347,6 +6432,7 @@
     state.updatedAt = e.detail.updatedAt || state.updatedAt;
     rebuild();
     render();
+    completeTasksForEndedRcAssignments();
   });
 
 
@@ -6363,10 +6449,12 @@
   var loaded = false;
   function applyStores(stores) {
     state.stores = stores;
+    promoteLegacyPtoTasks(state.stores);
     state.storesLoaded = true;
     var dom = (stores.appConfig || []).filter(function (r) { return r.key === 'allowedDomains'; })[0];
     AuthCore.setAllowedDomains(dom ? dom.value : '');
     rebuild();
+    completeTasksForEndedRcAssignments();
   }
   function loadEverything(force) {
     if (loaded && !force) return Promise.resolve(state.stores);

@@ -85,7 +85,8 @@
      is kept and counted under 'other' rather than dropped or forced into a bucket:
      a status nobody has seen before is a thing to look at, not to guess about. */
   var CANDIDATE_STATUS = {
-    'offer confirmed': { label: 'Offer confirmed', stage: 'hired',    tone: 'ok' },
+    // Display the operational state while retaining Beeline's raw source value.
+    'offer confirmed': { label: 'Onboarded',       stage: 'hired',    tone: 'ok' },
     'offer pending':   { label: 'Offer pending',   stage: 'offered',  tone: 'warn' },
     'rejected':        { label: 'Rejected',        stage: 'declined', tone: 'bad' },
     'pending':         { label: 'Pending',         stage: 'review',   tone: 'info' }

@@ -29,7 +29,11 @@ const discrepancies = [
   { id: 'D1', badge: 'b2', name: 'Ben Ortiz', details: 'Eight hours missing on Tuesday',
     weekEnding: '2026-08-22', status: 'Received', submittedAt: ago(9) }
 ];
-let tasks = [];
+// A record created by the old UI under the wrong collection. It must be treated
+// as Time Off and must not survive as a second task (the reported Olmes case).
+let tasks = [{ id: 'TK-OLD-PTO', kind: 'pto', title: 'PTO request for Olmes Molina',
+  detail: 'Requested in the old task form', badge: 'b3', name: 'Olmes Molina',
+  due: '2026-09-10', status: 'Open', createdAt: new Date().toISOString() }];
 /* Ben is scheduled across the whole day and not on the clock, so he is an
    exception -- which is what puts a disposition control on his row. */
 const shiftTags = [
@@ -132,6 +136,11 @@ const upload = (kind, aoa, name) => {
   t('it offers a way to the page that owns it instead',
     $$('tbody tr').some(r => r.textContent.indexOf('Eight hours missing') !== -1 &&
       r.querySelector('[data-open-source^="payroll|"]')));
+  t('a legacy PTO task is no longer shown as a task', txt().indexOf('Olmes Molina') === -1);
+  click($('[data-nav="timeoff"]'));
+  t('and the same legacy record flows into Time Off', txt().indexOf('Olmes Molina') !== -1 &&
+    txt().indexOf('Legacy PTO task') !== -1);
+  click($('[data-nav="tasks"]'));
 
   console.log('— escalation —');
   t('the 60-hour PTO request is urgent', /Ann Reed[\s\S]{0,400}?Urgent/.test(txt()));

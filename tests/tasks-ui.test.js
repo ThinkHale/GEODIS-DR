@@ -23,7 +23,9 @@ const records = [
 const timeOff = [
   { id: 'TO1', badge: 'b1', name: 'Ann Reed', type: 'PTO', start: '2026-09-01', end: '2026-09-02',
     status: 'Received', submittedAt: ago(60) },
-  { id: 'TO2', badge: 'b2', name: 'Ben Ortiz', type: 'PTO', start: '2026-09-05', status: 'Approved', submittedAt: ago(60) }
+  { id: 'TO2', badge: 'b2', name: 'Ben Ortiz', type: 'PTO', start: '2026-09-05', status: 'Approved', submittedAt: ago(60) },
+  { id: 'TO3', badge: 'b3', name: 'Olmes Molina', type: 'PTO', start: '2026-09-10',
+    status: 'Completed', submittedAt: ago(60) }
 ];
 const discrepancies = [
   { id: 'D1', badge: 'b2', name: 'Ben Ortiz', details: 'Eight hours missing on Tuesday',
@@ -138,8 +140,13 @@ const upload = (kind, aoa, name) => {
       r.querySelector('[data-open-source^="payroll|"]')));
   t('a legacy PTO task is no longer shown as a task', txt().indexOf('Olmes Molina') === -1);
   click($('[data-nav="timeoff"]'));
-  t('and the same legacy record flows into Time Off', txt().indexOf('Olmes Molina') !== -1 &&
-    txt().indexOf('Legacy PTO task') !== -1);
+  const completedToggle = $('#timeoff-completed');
+  completedToggle.checked = true;
+  completedToggle.dispatchEvent(new w.Event('change', { bubbles: true }));
+  const olmesRow = $$('tbody tr').find(r => r.textContent.indexOf('Olmes Molina') !== -1);
+  t('and the completed PTO record remains authoritative in Time Off', !!olmesRow &&
+    olmesRow.textContent.indexOf('Legacy PTO task') === -1 &&
+    olmesRow.querySelector('[data-status]').value === 'Completed');
   click($('[data-nav="tasks"]'));
 
   console.log('— escalation —');

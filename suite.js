@@ -370,6 +370,23 @@
     (stores.tasks || []).forEach(function (task) {
       var t = TasksCore.normalize(task);
       if (t.kind !== 'pto') return;
+      var badge = SuiteData.normBadge(t.badge);
+      var name = String(t.name || '').trim().toLowerCase();
+      var candidates = timeOff.filter(function (r) {
+        if (!r || r.source === 'Legacy PTO task') return false;
+        var samePerson = badge
+          ? SuiteData.normBadge(r.badge) === badge
+          : name && String(r.name || '').trim().toLowerCase() === name;
+        return samePerson && String(r.type || '').toLowerCase().indexOf('pto') !== -1;
+      });
+      var matchingRequest = candidates.filter(function (r) {
+        if (!t.due) return candidates.length === 1;
+        var start = String(r.start || ''), end = String(r.end || r.start || '');
+        return start && t.due >= start && t.due <= end;
+      })[0];
+      // The tracker/Form record is authoritative. In particular, do not create
+      // a second Received row beside a request that has already been completed.
+      if (matchingRequest) return;
       var id = 'TO:' + t.id;
       if (known[id]) return;
       timeOff.push({

@@ -50,6 +50,14 @@ const onPremAoa = [
   ['Reed, Ann (80-AREED1)', 'true', 'GEODIS/US/CL/CLNCEN/CLCHI/CL1523/1523', 'Boss, B']
 ];
 
+/* Who a task can be handed to. Only Ana can actually work one: a read-only
+   account cannot change the record, and a disabled one cannot sign in. */
+const users = [
+  { id: 'ana@geodis.com', email: 'ana@geodis.com', name: 'Ana Diaz', role: 'colleague', enabled: true },
+  { id: 'sam@geodis.com', email: 'sam@geodis.com', name: 'Sam Poole', role: 'viewer', enabled: true },
+  { id: 'gone@geodis.com', email: 'gone@geodis.com', name: 'Dee Gone', role: 'colleague', enabled: false }
+];
+
 const posts = [];
 let documented = {};
 const dom = new JSDOM(`<!doctype html><html><body class="suite-active">
@@ -80,6 +88,7 @@ w.fetch = (url, opt) => {
   if (u.indexOf('timeoff=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ timeOff }) });
   if (u.indexOf('discrepancies=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ discrepancies }) });
   if (u.indexOf('shifts=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ shifts: shiftTags }) });
+  if (u.indexOf('users=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ users }) });
   const k = u.match(/\?(\w+)=1/)[1];
   const map = { attendance: 'attendance', requisitions: 'requisitions', performance: 'performance',
     associatePto: 'associatePto', locations: 'locations', appConfig: 'appConfig',
@@ -307,6 +316,76 @@ const upload = (kind, aoa, name) => {
   await settle(40);
   t('but Show completed brings it back',
     $$('tbody tr').some(r => r.textContent.indexOf('End the assignment') !== -1));
+
+  /* Work lands on whoever noticed it, which is rarely whoever can do it -- and a
+     status goes stale when the job is finished somewhere this tool cannot see.
+     Both are a manager's call, so both are held at 'roles' rather than the
+     'edit' that lets anybody working the floor move a task along. */
+  console.log('— a manager hands one over, and overrides where it got to —');
+  t('a colleague is not offered it', !$('[data-task-edit]'));
+  w.__setRole('manager');
+  await settle(160);
+  const editBtn = $$('[data-task-edit]').filter(b => b.dataset.taskEdit === termId)[0];
+  t('a manager is', !!editBtn);
+  t('a derived row is not -- it has no owner of its own, and is finished on the page that does',
+    $$('tbody tr').filter(r => r.textContent.indexOf('Eight hours missing') !== -1)
+      .every(r => !r.querySelector('[data-task-edit]')));
+
+  click(editBtn);
+  await settle(30);
+  const editForm = $('[data-task-edit-form]');
+  t('a dialog opens', !!editForm);
+  const who = editForm.querySelector('[name="assigneeEmail"]');
+  const offered = Array.from(who.options).map(o => o.value);
+  t('it offers an account that can work a task', offered.indexOf('ana@geodis.com') !== -1);
+  t('not a read-only one -- a task assigned to somebody who cannot change it is one nobody closes',
+    offered.indexOf('sam@geodis.com') === -1);
+  t('nor a disabled one', offered.indexOf('gone@geodis.com') === -1);
+  t('and Unassigned, so somebody can be taken back off it', offered.indexOf('') !== -1);
+  const statusSel = editForm.querySelector('[name="status"]');
+  t('every status is offered, including the ones the queue would never reach on its own',
+    Array.from(statusSel.options).map(o => o.value).join(',') ===
+      'Open,In Progress,Blocked,Complete,Cancelled');
+  t('and it opens on the one the task is actually in', statusSel.value === 'Complete');
+
+  who.value = 'ana@geodis.com';
+  statusSel.value = 'In Progress';
+  editForm.querySelector('[name="note"]').value = 'RC still shows the assignment open';
+  const writesBeforeEdit = posts.filter(p => p.url && p.url.indexOf('tasks=1') !== -1).length;
+  editForm.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(120);
+  const edited = tasks.filter(x => x.id === termId)[0];
+  t('the dialog closed', !$('[data-task-edit-form]'));
+  t('the owner is stored as a name people read', edited.assignee === 'Ana Diaz');
+  t('joined to the account it was picked from, not to the spelling of the name',
+    edited.assigneeEmail === 'ana@geodis.com');
+  t('the status override took, reopening work the queue had filed as done',
+    edited.status === 'In Progress');
+  t('attributed to whoever made it', edited.statusUpdatedBy === 'Tester');
+  t('with the reason in the change log',
+    /RC still shows the assignment open/.test(JSON.stringify(edited.statusHistory)));
+  t('and who it went to in the same entry, so the two can never disagree',
+    /Assigned to Ana Diaz/.test(JSON.stringify(edited.statusHistory)));
+  t('one write, not two', posts.filter(p => p.url && p.url.indexOf('tasks=1') !== -1).length ===
+    writesBeforeEdit + 1);
+  t('reassigning restarts the clock, so the new owner gets the whole window',
+    edited.updatedAt === edited.statusUpdatedAt);
+
+  click($('[data-nav="tasks"]'));
+  await settle(60);
+  const ownedRow = $$('tbody tr').filter(r => r.textContent.indexOf('End the assignment') !== -1)[0];
+  t('the queue now says who owns it', !!ownedRow && ownedRow.textContent.indexOf('Ana Diaz') !== -1);
+
+  // Opening it to read it is not a change. A write here would put a line in the
+  // log saying somebody looked, and restart the ageing clock for nothing.
+  click($$('[data-task-edit]').filter(b => b.dataset.taskEdit === termId)[0]);
+  await settle(30);
+  const idleWrites = posts.filter(p => p.url && p.url.indexOf('tasks=1') !== -1).length;
+  $('[data-task-edit-form]').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(80);
+  t('opening the dialog and changing nothing writes nothing',
+    posts.filter(p => p.url && p.url.indexOf('tasks=1') !== -1).length === idleWrites);
+  t('and it still closes', !$('[data-task-edit-form]'));
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

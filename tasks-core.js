@@ -129,6 +129,12 @@
       market: String(rec.market || ''),
       location: String(rec.location || ''),
       assignee: String(rec.assignee || '').trim(),
+      /* The account behind that name. The name alone is what somebody typed,
+         and two people called Chris are one person to a string comparison --
+         so the join is on the email the account is keyed by, and the name is
+         carried alongside only so a row still reads as words. Empty for a task
+         assigned before this existed, or to somebody with no account. */
+      assigneeEmail: String(rec.assigneeEmail || '').trim().toLowerCase(),
       due: String(rec.due || '').trim(),
       priority: String(rec.priority || 'Normal').trim(),
       status: pipeline.normalizeStatus(rec.status),
@@ -186,6 +192,58 @@
     return (tasks || []).filter(function (t) { return t && t.id === id; })[0] || null;
   }
 
+  /* ---------- changing one after it was raised ----------
+     Two things about a task turn out to be wrong only once somebody looks at
+     the queue. It landed on nobody in particular -- raised by whoever noticed
+     it, which is rarely whoever can do it. And its status stopped describing
+     reality: the job was finished in Beeline, or handed to another shift, and
+     nothing here saw that happen, so it sits Open and escalates forever.
+
+     Both are ONE decision by one person, so they are one patch and one log
+     entry. Saving a reassignment whose status change then failed would leave
+     the queue telling a new owner they are answerable for a state that never
+     happened.
+
+     `null` back means nothing actually moved: opening the dialog, reading it
+     and closing it must not put a write and a log line on the record. */
+  function applyEdit(task, changes, actor, now) {
+    var when = (now && typeof now.toISOString === 'function') ? now : new Date();
+    var current = normalize(task);
+    changes = changes || {};
+    /* Absent and empty mean different things here. Leaving a key out is "do not
+       touch this", which is what the dialog sends when it could not offer a
+       choice; sending an empty string is "take this off them". */
+    var assignee = changes.assignee === undefined ? current.assignee
+      : String(changes.assignee || '').trim();
+    var email = changes.assigneeEmail === undefined ? current.assigneeEmail
+      : String(changes.assigneeEmail || '').trim().toLowerCase();
+    var status = changes.status === undefined ? current.status
+      : pipeline.normalizeStatus(changes.status);
+    var reason = String(changes.note || '').trim();
+
+    var reassigned = assignee !== current.assignee || email !== current.assigneeEmail;
+    var moved = status !== current.status;
+    if (!reassigned && !moved && !reason) return null;
+
+    /* What the log will say. The status is already a field on the entry, so the
+       note carries only what the entry cannot say for itself: who it went to,
+       and why somebody overrode it. */
+    var said = [];
+    if (reassigned) said.push(assignee ? 'Assigned to ' + assignee : 'Left unassigned');
+    if (reason) said.push(reason);
+    var note = said.join(' — ');
+
+    var patch = moved ? pipeline.applyStatus(current, status, actor, when, note)
+      : pipeline.applyNote(current, note, actor, when);
+    patch.assignee = assignee;
+    patch.assigneeEmail = email;
+    /* Ageing runs off updatedAt, so touching a task has to move it: somebody
+       just handed one gets the whole window to work it, not whatever was left
+       of the last owner's. */
+    patch.updatedAt = patch.statusUpdatedAt || when.toISOString();
+    return patch;
+  }
+
   /* ---------- derived tasks ----------
      Projections of records that live elsewhere. `derived` marks them as
      read-only here: the status control belongs to the page that owns them. */
@@ -200,6 +258,7 @@
       market: rec.market || '',
       location: rec.location || '',
       assignee: rec.assignee || '',
+      assigneeEmail: rec.assigneeEmail || '',
       due: rec.due || '',
       priority: rec.priority || 'Normal',
       status: rec.status,
@@ -280,6 +339,7 @@
     create: create,
     idFor: idFor,
     existing: existing,
+    applyEdit: applyEdit,
     fromRecords: fromRecords,
     lastTouch: lastTouch,
     hoursSince: hoursSince,

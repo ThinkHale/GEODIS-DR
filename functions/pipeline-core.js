@@ -104,11 +104,11 @@
     /* Returns a patch rather than mutating, so the caller decides when it is
        persisted and the same function serves the browser and any future
        server-side automation. */
-    function applyStatus(record, status, actor, now) {
+    function applyStatus(record, status, actor, now, note) {
       record = record || {};
       var when = (now && typeof now.toISOString === 'function') ? now : new Date();
       var next = normalizeStatus(status);
-      var entry = entryFor(next, actor, when);
+      var entry = entryFor(next, actor, when, note);
       var log = appendLog(record, entry, record.status ? normalizeStatus(record.status) : '');
       return {
         id: record.id,
@@ -117,6 +117,19 @@
         statusUpdatedBy: entry.by,
         statusHistory: log
       };
+    }
+
+    /* A decision that moved something OTHER than the status -- who a task was
+       handed to, most of it. It goes in the SAME log, because "assigned to Ana,
+       then blocked, then reassigned" is one story and splitting it across two
+       lists is how the second one stops being read. The entry carries the
+       status the record is already in, so nothing reading the log has to treat
+       it as a special kind of line. */
+    function applyNote(record, note, actor, now) {
+      record = record || {};
+      var when = (now && typeof now.toISOString === 'function') ? now : new Date();
+      var entry = entryFor(normalizeStatus(record.status), actor, when, note);
+      return { id: record.id, statusHistory: appendLog(record, entry, '') };
     }
 
     /* Linking a record that arrived without a badge -- a name typed differently
@@ -149,6 +162,7 @@
       isResolved: isResolved,
       needsAction: needsAction,
       applyStatus: applyStatus,
+      applyNote: applyNote,
       applyConnection: applyConnection,
       actorOf: actorOf,
       describeActor: describeActor,

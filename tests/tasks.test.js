@@ -104,6 +104,53 @@ t('a derived payroll task uses the four-hour window', T.fromRecords(
     hours: 4, titleOf: r => r.name })
   .map(x => T.urgencyOf(x, NOW))[0] === T.URGENT);
 
+console.log('— handing one to somebody, and overriding where it got to —');
+const manager = { id: 'boss@geodis.com', name: 'Mo', source: 'account' };
+const LATER = new Date(NOW.getTime() + 3600000);
+const raised = T.create({ kind: 'system', title: 'Add X to Beeline' }, actor, NOW);
+const handed = T.applyEdit(raised, { assignee: 'Ana Diaz', assigneeEmail: 'ana@geodis.com' },
+  manager, LATER);
+t('the owner is set', handed.assignee === 'Ana Diaz');
+t('and joined to the account, not just to the name', handed.assigneeEmail === 'ana@geodis.com');
+t('an assignment does not move the status', handed.status === undefined);
+t('but it does restart the clock, so the new owner gets the whole window',
+  handed.updatedAt === LATER.toISOString());
+t('and it says in the log who put them on it',
+  handed.statusHistory[handed.statusHistory.length - 1].note === 'Assigned to Ana Diaz' &&
+  handed.statusHistory[handed.statusHistory.length - 1].by === 'Mo');
+t('the log entry carries the status it was already in, not a blank',
+  handed.statusHistory[handed.statusHistory.length - 1].status === 'Open');
+
+const owned = T.normalize(Object.assign({}, raised, handed));
+const overridden = T.applyEdit(owned, { status: 'Complete', note: 'Beeline shows him active' },
+  manager, LATER);
+t('a status override moves the status', overridden.status === 'Complete');
+t('attributed to whoever overrode it', overridden.statusUpdatedBy === 'Mo');
+t('with the reason on the log entry, which is the whole point of asking for one',
+  overridden.statusHistory[overridden.statusHistory.length - 1].note === 'Beeline shows him active');
+t('and it leaves the owner where they were',
+  overridden.assignee === 'Ana Diaz' && overridden.assigneeEmail === 'ana@geodis.com');
+
+const both = T.applyEdit(owned, { assignee: '', assigneeEmail: '', status: 'Blocked' }, manager, LATER);
+t('taking somebody off it and blocking it is one patch, not two',
+  both.assignee === '' && both.status === 'Blocked');
+t('and one log entry, so the two can never disagree about what happened',
+  both.statusHistory.length === owned.statusHistory.length + 1);
+t('which says they came off it', /Left unassigned/.test(both.statusHistory[both.statusHistory.length - 1].note));
+
+t('a field left out of the changes is left alone',
+  T.applyEdit(owned, { status: 'Blocked' }, manager, LATER).assignee === 'Ana Diaz');
+t('opening the dialog and changing nothing writes nothing',
+  T.applyEdit(owned, { assigneeEmail: 'ana@geodis.com', assignee: 'Ana Diaz', status: 'Open' },
+    manager, LATER) === null);
+t('a note on its own is still worth recording',
+  !!T.applyEdit(owned, { status: 'Open', note: 'chased on Teams' }, manager, LATER));
+t('an assignee email is stored lowercase, so the join is not case-sensitive',
+  T.applyEdit(raised, { assignee: 'Ana', assigneeEmail: 'Ana@Geodis.com' }, manager, LATER)
+    .assigneeEmail === 'ana@geodis.com');
+t('and a task carries the field even when nobody has been put on it',
+  'assigneeEmail' in T.normalize({ id: 'z', kind: 'note' }));
+
 console.log('— the queue —');
 const queue = [task('note', 1), task('payroll', 9), task('note', 60), task('note', 30)];
 const sorted = T.sort(queue, NOW);

@@ -147,7 +147,11 @@
     plx: { sync: null, busy: false, note: '' },   // the last PLX workbook uploaded
     ilPto: { sync: null },                        // what the PTO tracker flow last did
     auth: { signedIn: false, email: '', account: null, loading: false, error: '' },
-    admin: { users: [], locations: [], shiftTypes: [], appConfig: [], loaded: false, tab: initialSettingsTab },
+    /* `loaded` is all four settings collections; `usersLoaded` is the account
+       list alone, which the task assignee picker needs on a page that has no
+       use for locations, shifts or the app config. */
+    admin: { users: [], locations: [], shiftTypes: [], appConfig: [], loaded: false,
+      usersLoaded: false, usersLoading: false, tab: initialSettingsTab },
     rosterContext: null,
     returnTaskContext: null,
     shiftKey: null,          // parsed "Geodis Key" vocabulary, when a workbook is loaded
@@ -3303,6 +3307,9 @@
 
   function tasksView() {
     if (!state.storesLoaded) return loadingPanel('tasks');
+    // Only a manager is offered the assignee picker, so only a manager pays for
+    // the request that fills it.
+    if (mayDirectTasks()) loadTaskAssignees();
     var now = new Date();
     var every = allTasks();
     var sum = TasksCore.summarize(every, now);
@@ -3363,7 +3370,9 @@
       '<td>' + (t.derived
         ? '<button class="suite-btn" data-open-source="' + esc(kind.panel) + '|' + esc(t.sourceId || '') + '">Open source ›</button>'
         : mayEdit()
-          ? '<button class="suite-btn" data-task-done="' + esc(t.id) + '"' +
+          ? (mayDirectTasks()
+              ? '<button class="suite-btn" data-task-edit="' + esc(t.id) + '">Edit</button> ' : '') +
+            '<button class="suite-btn" data-task-done="' + esc(t.id) + '"' +
             (TasksCore.isOpen(t) ? '' : ' disabled') + '>Complete</button> ' +
             '<button class="suite-btn danger" data-del="tasks|' + esc(t.id) + '">Remove</button>'
           : '<span class="sub">&mdash;</span>') +
@@ -4230,6 +4239,42 @@
   }
   function allMarkets() { return markets(); }
 
+  /* The account list, for the task assignee picker. Settings pulls all four
+     admin collections at once; a manager who opens the queue needs only this
+     one, and fetching locations, shifts and the app config to fill a dropdown
+     would make every visit to Tasks four requests heavier.
+
+     `usersLoaded` is set on failure as well as success, on purpose: it is
+     called from render(), and a flag that only a success clears would retry on
+     every re-render for the rest of the session. A miss is not fatal -- the
+     dialog falls back to a typed name, which is what the field was before it
+     offered a list at all. */
+  function loadTaskAssignees() {
+    if (state.admin.loaded || state.admin.usersLoaded || state.admin.usersLoading) return;
+    state.admin.usersLoading = true;
+    SuiteData.loadCollection('users').then(function (rows) {
+      state.admin.users = rows || [];
+      state.admin.usersLoaded = true;
+      state.admin.usersLoading = false;
+      render();
+    }).catch(function () {
+      state.admin.usersLoaded = true;
+      state.admin.usersLoading = false;
+    });
+  }
+
+  /* Who a task can be handed to: an account that could actually work one. A
+     read-only, disabled or still-pending account is left out -- assigning to
+     somebody who cannot change the record produces a task nobody will close,
+     and the queue would go on ageing it as though it were being worked. */
+  function assignableAccounts() {
+    return (state.admin.users || []).map(AuthCore.normalizeUser)
+      .filter(function (u) { return u.email && AuthCore.canEdit(u); })
+      .sort(function (a, b) {
+        return String(a.name || a.email).localeCompare(String(b.name || b.email));
+      });
+  }
+
   function loadAdminData() {
     if (state.admin.loading) return;
     state.admin.loading = true;
@@ -5046,6 +5091,12 @@
 
      'roles' is the manager-and-above permission; see auth-core.js. */
   function showsProvenance() { return may('roles'); }
+  /* Handing a task to somebody and overriding its status are the same authority
+     as staffing a team: they say who is answerable for a job, and they can
+     declare one finished that nothing else confirmed. So they ride on 'roles' --
+     manager and above -- rather than the ordinary 'edit' that lets anybody who
+     works the floor move a task along the pipeline it is already in. */
+  function mayDirectTasks() { return may('roles'); }
   function mayImport() { return may('import'); }
   function mayAdmin() { return may('admin'); }
 
@@ -5491,6 +5542,87 @@
     return 'Follow up · ' + who;
   }
 
+  /* ---------- editing a task after it was raised ----------
+     Only two things are offered, because only two of them go wrong often
+     enough to be worth a dialog: the task landed on nobody in particular, and
+     the status stopped describing what has actually happened. Everything else
+     about a task is what it was RAISED as -- which day the absence was, which
+     week the pay was short -- and reopening those for editing would turn a
+     record of what somebody reported into a record of what somebody last
+     thought. Raise a new one instead.
+
+     The sentinel is for a name already on the record that belongs to no
+     account: typed before this picker existed, or an account since disabled.
+     It is offered as an option so a manager who opened the dialog to change the
+     status cannot silently unassign whoever was on it. */
+  var KEEP_ASSIGNEE = '~keep';
+
+  function taskAssigneeField(task) {
+    var accounts = assignableAccounts();
+    /* No list to pick from -- it failed to load, or nobody else has signed in
+       yet. A typed name still beats a dropdown holding one entry; it just has
+       no account to be joined to. */
+    if (!accounts.length) return field('Assigned to', 'assignee', 'text', task.assignee);
+    var known = task.assigneeEmail && accounts.some(function (u) { return u.email === task.assigneeEmail; });
+    var opts = [['', 'Unassigned']];
+    if (task.assignee && !known) opts.push([KEEP_ASSIGNEE, task.assignee + ' (typed name)']);
+    accounts.forEach(function (u) {
+      opts.push([u.email, (u.name || u.email) + ' · ' + AuthCore.roleMeta(u.role).label]);
+    });
+    return field('Assigned to', 'assigneeEmail', 'select',
+      known ? task.assigneeEmail : (task.assignee ? KEEP_ASSIGNEE : ''), opts);
+  }
+
+  function taskEditModal(task) {
+    var meta = TasksCore.pipeline.statusMeta(task.status);
+    var keys = TasksCore.pipeline.STATUS_KEYS.slice();
+    // A status this build does not know stays on the list, so saving an
+    // assignee cannot quietly relabel it as something the dropdown does offer.
+    if (meta.unknown) keys.unshift(meta.key);
+    document.body.insertAdjacentHTML('beforeend',
+      '<div class="suite-modal-backdrop" id="suite-modal"><div class="suite-modal">' +
+      '<div class="suite-modal-head"><h3 id="suite-modal-title">Edit task</h3>' +
+      '<button type="button" class="suite-btn" data-close aria-label="Close dialog">&times;</button></div>' +
+      '<form class="suite-form" data-task-edit-form="' + esc(task.id) + '">' +
+      '<p class="perf-note full"><b>' + esc(task.title) + '</b> · ' +
+      esc(TasksCore.kindMeta(task.kind).label) + '. Handing it to somebody restarts its clock, ' +
+      'so the new owner gets the whole window rather than what was left of the last one\u2019s. ' +
+      'Both changes are recorded against your name.</p>' +
+      taskAssigneeField(task) +
+      field('Status', 'status', 'select', task.status, keys.map(function (k) {
+        return [k, TasksCore.pipeline.statusMeta(k).label];
+      })) +
+      // Full width: a reason is a sentence, not a field to squeeze beside another.
+      '<label class="suite-field full"><span>Note (optional)</span>' +
+      '<input name="note" type="text" placeholder="Why, in a few words"></label>' +
+      '<p class="sub full">A note says why, for whoever reads the change log after you — ' +
+      'especially for a status the work itself does not explain.</p>' +
+      '<div class="suite-modal-actions"><button type="button" class="suite-btn" data-close>Cancel</button>' +
+      '<button class="suite-btn primary">Save changes</button></div></form></div></div>');
+    activateDialog('[name="assigneeEmail"],[name="assignee"]');
+  }
+
+  /* What the dialog is asking for, turned back into a change. Kept out of the
+     submit handler so the two shapes the assignee field can take -- a picker
+     keyed by email, or a plain typed name -- are resolved in one place. */
+  function taskEditChanges(draft, current) {
+    var changes = { status: draft.status, note: draft.note };
+    if (!('assigneeEmail' in draft)) {
+      /* Typed, because there was no account list to offer. It is only still an
+         account if the name came back unchanged: a retyped name has nothing to
+         join it to an account by, and keeping the old email would leave the row
+         pointing at somebody who is no longer on it. */
+      changes.assignee = String(draft.assignee || '').trim();
+      if (changes.assignee !== current.assignee) changes.assigneeEmail = '';
+      return changes;
+    }
+    if (draft.assigneeEmail === KEEP_ASSIGNEE) return changes;   // leave them on it
+    var picked = assignableAccounts().filter(function (u) { return u.email === draft.assigneeEmail; })[0];
+    changes.assignee = picked ? (picked.name || picked.email) : '';
+    changes.assigneeEmail = picked ? picked.email : '';
+    return changes;
+  }
+
   function modal(type, badge) {
     var fields = '', title = '';
     /* There is no "new time-off request" form. Requests are raised on the shared
@@ -5933,6 +6065,21 @@
     }
 
     if (e.target.closest('[data-add-task]')) { modal('task', ''); return; }
+
+    var editTask = e.target.closest('[data-task-edit]');
+    if (editTask) {
+      if (!guard('roles', 'reassign a task or override its status')) return;
+      /* Stored tasks only. A derived row is a view of a PTO request or a
+         discrepancy that lives elsewhere, has no owner of its own, and is
+         finished on the page that owns it -- which is why its Action cell
+         offers a way there instead of this. */
+      var editing = (state.stores.tasks || []).filter(function (x) {
+        return x.id === editTask.dataset.taskEdit;
+      })[0];
+      if (!editing) return;
+      taskEditModal(TasksCore.normalize(editing));
+      return;
+    }
 
     var done = e.target.closest('[data-task-done]');
     if (done) {
@@ -6520,6 +6667,32 @@
     if (phoneForm) {
       e.preventDefault();
       savePhone(phoneForm.dataset.phoneForm, new FormData(phoneForm).get('phone'), phoneForm);
+      return;
+    }
+    var taskEditForm = e.target.closest('[data-task-edit-form]');
+    if (taskEditForm) {
+      e.preventDefault();
+      if (!guard('roles', 'reassign a task or override its status')) return;
+      var editTarget = (state.stores.tasks || []).filter(function (x) {
+        return x.id === taskEditForm.dataset.taskEditForm;
+      })[0];
+      if (!editTarget) { closeDialog(); return; }
+      var editActor = currentActor(true);
+      if (!editActor) return;
+      var editDraft = Object.fromEntries(new FormData(taskEditForm));
+      var editPatch = TasksCore.applyEdit(editTarget,
+        taskEditChanges(editDraft, TasksCore.normalize(editTarget)), editActor, new Date());
+      closeDialog();
+      // Opened, read and closed. Nothing moved, so nothing is written and the
+      // change log does not grow a line saying somebody looked.
+      if (!editPatch) return;
+      state.shell.announcement = 'Saving the task.';
+      persist('tasks', editPatch, 'tasks').then(function (ok) {
+        if (!ok) return;                     // persist has already said why
+        state.shell.announcement = 'Task updated · ' + (editPatch.assignee || 'unassigned') +
+          ' · ' + TasksCore.pipeline.statusMeta(editPatch.status || editTarget.status).label + '.';
+        render();
+      });
       return;
     }
     var shiftForm = e.target.closest('[data-shift-form]');

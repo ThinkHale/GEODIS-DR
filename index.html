@@ -227,6 +227,14 @@
   .chip.act-upd{background:var(--upd-bg);color:var(--upd)} .chip.act-upd::before{background:var(--upd)}
   .chip.act-endb{background:var(--endb-bg);color:var(--endb)} .chip.act-endb::before{background:var(--endb)}
   .duptag{display:inline-block;margin-left:7px;font-family:'IBM Plex Mono';font-size:10px;font-weight:600;color:var(--dup);background:var(--dup-bg);padding:1px 6px;border-radius:4px}
+  /* An end already decided but not yet worked. Deliberately not one of the
+     act-* chips: those are what this tool RECOMMENDS, and this is something a
+     person already did, arriving from outside the crosscheck entirely. */
+  .end-pending{display:inline-flex;align-items:center;gap:5px;margin-top:5px;font-size:10px;font-weight:600;
+    letter-spacing:.3px;text-transform:uppercase;color:var(--endb);background:var(--endb-bg);
+    border-radius:4px;padding:2px 6px}
+  .end-pending::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--endb);flex:0 0 auto}
+  .end-pending-note{display:block;margin-top:2px;font-size:10.5px;color:var(--muted);letter-spacing:0;text-transform:none;font-weight:400}
   tr.is-dup td.badge{color:var(--dup)}
   .detail-col{}
   .tablewrap.hide-details .detail-col{display:none}
@@ -477,7 +485,7 @@
 <script>
 "use strict";
 
-const S = { beeline:null, crm:null, records:[], filterKey:'needsAction', search:'', sortKey:'action', sortDir:1, showDetails:false, _counts:null, marketFilter:'all', notes:{}, overrides:{} };
+const S = { beeline:null, crm:null, records:[], filterKey:'needsAction', search:'', sortKey:'action', sortDir:1, showDetails:false, _counts:null, marketFilter:'all', notes:{}, overrides:{}, pendingEnds:{} };
 try{ S.marketFilter = localStorage.getItem('badgeCrosscheck.market') || 'all'; }catch(e){}
 
 // Aliases into the shared reconciliation module (see reconcile-core.js).
@@ -559,6 +567,9 @@ function computeCounts(recs){
   const dupSet=new Set();
   recs.forEach(r=>{ if(c[r.action]!=null) c[r.action]++; if(r.dup) dupSet.add(r.badge); });
   c.total=recs.length; c.dups=dupSet.size; c.needsAction=recs.length-(c.matched||0);
+  // Not an action this tool recommends -- a decision already taken elsewhere
+  // that the overnight exports have not caught up with yet.
+  c.pendingEnd=recs.filter(r=>S.pendingEnds[r.badge]).length;
   return c;
 }
 function populateMarketOptions(){
@@ -592,6 +603,7 @@ function renderStats(){
   Object.keys(ACTION_STAT_CARD).forEach(k=>{
     if(c[k]>0) cards.push({cls:ACTION_STAT_CARD[k].cls, k:ACTION_STAT_CARD[k].k, v:c[k], filter:k});
   });
+  if(c.pendingEnd>0) cards.push({cls:'endb', k:'End task open', v:c.pendingEnd, filter:'pendingEnd'});
   cards.push({cls:'ok muted', k:'Matched', v:c.matched, filter:c.matched>0?'matched':''});
   if(c.dups>0) cards.push({cls:'dup muted', k:'Duplicate badges', v:c.dups});
   document.getElementById('stats').innerHTML = cards.map(s=>
@@ -606,6 +618,7 @@ function populateFilterOptions(){
   const opts=[];
   opts.push(`<option value="needsAction">Needs action (${c.needsAction})</option>`);
   opts.push(`<option value="all">All records (${c.total})</option>`);
+  if(c.pendingEnd>0) opts.push(`<option value="pendingEnd">End task open (${c.pendingEnd})</option>`);
   Object.keys(ACTIONS).forEach(k=>{
     if(c[k]>0) opts.push(`<option value="${k}">${ACTIONS[k].label} (${c[k]})</option>`);
   });
@@ -618,9 +631,31 @@ function actionPill(action){
   const a=ACTIONS[action]||ACTIONS.matched;
   return `<span class="chip ${a.cls}">${a.label}</span>`;
 }
+/* Somebody has already decided this assignment ends; the paperwork just has not
+   caught up. Both exports are pulled overnight, so RC will not show the end
+   until the task is worked and tomorrow's file lands -- and for that whole day
+   the row reads exactly like one nobody has looked at. Saying so is what stops
+   it being ended twice, or chased by a second person.
+
+   The task itself is not shown or actioned here. It belongs to the Tasks page,
+   and duplicating a control for it would give two places to mark one job done. */
+function endPendingFlag(r){
+  const t = S.pendingEnds[r.badge];
+  if(!t) return '';
+  const age = t.raisedAt ? daysAgo(new Date(t.raisedAt)) : null;
+  const when = age===null ? '' : age===0 ? 'raised today' : age===1 ? 'raised yesterday' : `raised ${age} days ago`;
+  const who = t.assignee ? ` · ${esc(t.assignee)}` : '';
+  const note = [when, t.status && t.status!=='Open' ? t.status.toLowerCase() : ''].filter(Boolean).join(' · ');
+  return `<span class="end-pending" title="An end-assignment task is open for this badge. Beeline will not show the end until it is worked and the next export lands.">End task open</span>` +
+    (note||who ? `<span class="end-pending-note">${esc(note)}${who}</span>` : '');
+}
 function currentRows(){
   let rows=recordsInMarket();
   if(S.filterKey==='needsAction') rows=rows.filter(r=>r.action!=='matched');
+  /* Cuts across the recommended actions rather than being one of them: an
+     assignment on the list to be ended can currently read as anything, matched
+     included, since the crosscheck has not seen the end yet. */
+  else if(S.filterKey==='pendingEnd') rows=rows.filter(r=>S.pendingEnds[r.badge]);
   else if(S.filterKey!=='all') rows=rows.filter(r=>r.action===S.filterKey);
   if(S.search){
     const q=S.search.toLowerCase();
@@ -679,7 +714,7 @@ function renderTable(){
         <td class="empnum mono">${empCell}</td>
         <td class="badge">${esc(r.badge)}${dupTag}</td>
         <td class="person">${personLine}${altLine}<div class="preason">${esc(r.reason)}</div></td>
-        <td class="action">${actionPill(r.action)}<button type="button" class="edit-status" data-badge="${esc(r.badge)}" aria-label="Change recommended action for badge ${esc(r.badge)}">Edit</button>${r.overridden?'<span class="ov-tag" title="Manually set — choose Edit to revert">manual</span>':''}</td>
+        <td class="action">${actionPill(r.action)}<button type="button" class="edit-status" data-badge="${esc(r.badge)}" aria-label="Change recommended action for badge ${esc(r.badge)}">Edit</button>${r.overridden?'<span class="ov-tag" title="Manually set — choose Edit to revert">manual</span>':''}${endPendingFlag(r)}</td>
         <td class="datecell detail-col">${dateCell(r.crmStart)}</td>
         <td class="datecell detail-col">${dateCell(r.endDate)}</td>
         <td class="datecell detail-col">${dateCell(r.beeStart)}</td>
@@ -873,6 +908,14 @@ document.addEventListener('click', ()=>document.querySelectorAll('.ms-panel').fo
   const trigger=document.querySelector('[aria-controls="'+p.id+'"]');
   if(trigger) trigger.setAttribute('aria-expanded','false');
 }));
+
+/* Open end-assignment tasks, from the suite. This tool reads two overnight
+   exports and nothing else, so a decision made today reaches it only through
+   here -- see publishPendingEnds() in suite.js. */
+document.addEventListener('geodis:pending-ends', e=>{
+  S.pendingEnds = (e.detail && e.detail.pendingEnds) || {};
+  populateFilterOptions(); renderStats(); renderTable();
+});
 
 // Kept in step with the suite header's market picker -- one market, both views.
 document.addEventListener('geodis:market', e=>{

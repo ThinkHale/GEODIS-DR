@@ -26,7 +26,7 @@
   };
   var DIRECT_MARKET_COLLECTIONS = { requisitions: true, locations: true, tasks: true };
   var LOCATION_COLLECTIONS = {
-    requisitions: true, shifts: true, shiftTypes: true,
+    requisitions: true, shifts: true, shiftTypes: true, shiftKey: true,
     schedule: true, coverage: true, payroll: true
   };
 

@@ -102,11 +102,8 @@ const rowFor = n => $$('.suite-table tbody tr').find(tr => tr.textContent.indexO
   t('discrepancies open first', $('[data-payroll-tab="discrepancies"]').className.indexOf('primary') !== -1);
 
   console.log('— discrepancies —');
-  // Scoped to the discrepancy table by a column only it has: the payroll page
-  // now carries a second table, and counting every row on the page would make
-  // this assertion fail for a reason that has nothing to do with discrepancies.
   const dscTable = () => $$('.suite-table').filter(x => /Week ending/.test(x.querySelector('thead').textContent))[0];
-  t('both listed', dscTable().querySelectorAll('tbody tr').length === 2);
+  t('both listed', $$('tbody tr').filter(r => /Grachen|Grachan/.test(r.textContent)).length === 2);
   t('details shown', d.body.textContent.indexOf('Missing 4 hours Tuesday') !== -1);
   t('location shown', d.body.textContent.indexOf('LEGO') !== -1);
   t('week ending shown', d.body.textContent.indexOf('2026-08-30') !== -1);
@@ -114,25 +111,64 @@ const rowFor = n => $$('.suite-table tbody tr').find(tr => tr.textContent.indexO
     const m = $$('.metric').filter(x => x.querySelector('.metric-label').textContent.trim() === label)[0];
     return m ? m.querySelector('.metric-value').textContent.trim() : null;
   };
-  t('open count', tile('Open discrepancies') === '2');
+  t('open count spans both kinds', tile('Open') === '3');
   t('unmatched counted', tile('Unmatched') === '1');
   t('and bannered', d.body.textContent.indexOf('could not be matched to an associate') !== -1);
 
   /* A payroll issue raised by hand is a payroll issue. It stays its own record
      -- a discrepancy is a claim about one week's hours and has its own pipeline
-     -- but it is on the page somebody went looking for it on. */
+     -- but it is on the page somebody went looking for it on.
+
+     It used to be a SECOND table stacked above the discrepancies, so answering
+     "what payroll work is outstanding" meant reading the page twice and the
+     shorter table was the one that got skimmed. One list now. */
   t('a payroll task raised by hand is on the payroll page',
     d.body.textContent.indexOf('Chase the missing OT run') !== -1);
-  t('and counted', tile('Payroll tasks') === '1');
+  t('in the same table as the form discrepancies',
+    Array.from(dscTable().querySelectorAll('tbody tr'))
+      .some(r => /Chase the missing OT run/.test(r.textContent)));
+  t('and there is only one table to read',
+    $$('.suite-table').filter(x => /Week ending/.test(x.querySelector('thead').textContent)).length === 1);
+  t('it still reads as hand-raised, not as a form submission',
+    Array.from(dscTable().querySelectorAll('tbody tr'))
+      .filter(r => /Chase the missing OT run/.test(r.textContent))[0].textContent.indexOf('Raised by hand') !== -1);
+  t('and counted', tile('Raised by hand') === '1');
   t('a task of another kind is not dragged in',
     d.body.textContent.indexOf('Not a payroll thing') === -1);
   t('it can be completed from here', $$('[data-task-done]').length === 1);
   t('with a way through to the whole queue',
     $$('[data-nav="tasks"]').some(b => /All tasks/.test(b.textContent)));
 
+  /* Two pipelines in one column. They collide on "Cancelled", so a task status
+     must never be selectable in a way that also matches a discrepancy. */
+  // Re-queried each time: every filter change re-renders the panel, so a
+  // reference taken before one is a detached node afterwards.
+  const setStatus = v => {
+    const el = $('#payroll-status');
+    el.value = v;
+    el.dispatchEvent(new w.Event('change', { bubbles: true }));
+    return settle(60);
+  };
+  t('the status filter offers both vocabularies',
+    $('#payroll-status').querySelectorAll('optgroup').length === 2);
+  t('with the task statuses namespaced apart',
+    Array.from($('#payroll-status').options).some(o => o.value === 'task:Open') &&
+    Array.from($('#payroll-status').options).some(o => o.value === 'Received'));
+  await setStatus('task:Open');
+  t('choosing a task status shows only the hand-raised row',
+    dscTable().querySelectorAll('tbody tr').length === 1 &&
+    /Chase the missing OT run/.test(dscTable().textContent));
+  await setStatus('Received');
+  t('and a form status shows only the discrepancies',
+    dscTable().querySelectorAll('tbody tr').length === 2 &&
+    !/Chase the missing OT run/.test(dscTable().textContent));
+  await setStatus('all');
+
   console.log('— its own pipeline, not time off’s —');
   const sel = rowFor('Luz Grachen').querySelector('.status-select');
-  t('six statuses', sel.querySelectorAll('option').length === 6);
+  t('seven statuses', sel.querySelectorAll('option').length === 7);
+  t('including the billing check after a correction is sent',
+    Array.from(sel.options).some(o => o.value === 'Pending Billing'));
   t('Researching is offered',
     Array.from(sel.querySelectorAll('option')).some(o => o.textContent === 'Researching'));
   t('Corrected is offered',

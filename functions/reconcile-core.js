@@ -52,7 +52,19 @@
       // report plus Actual End Date + End Reason).
       endReason: [/end reason/i, /termination reason/i, /^reason$/i],
       // RC person-level id, shown as the "Employee #" column.
-      emp: [/legacy contact id/i, /contact id/i, /employee number/i, /employee\s*#/i, /associate number/i]
+      emp: [/legacy contact id/i, /contact id/i, /employee number/i, /employee\s*#/i, /associate number/i],
+      /* The associate's number. RC is the system that actually holds it -- it is
+         captured at placement -- so an assignment export is the one file that
+         reliably carries a number for everybody, which is why it is read here
+         rather than left to a workbook somebody maintains by hand.
+
+         Ordered most-callable first: a mobile is what somebody chasing an
+         absence needs at 5am, and a desk or emergency-contact line reached
+         instead is worse than no number at all. A generic "Phone" is taken
+         before "Home Phone" for the same reason, and the loose fallbacks are
+         last so a sheet with an unusual header is not simply ignored. */
+      phone: [/mobile\s*phone/i, /cell\s*phone/i, /^mobile$/i, /^cell$/i, /personal\s*phone/i,
+              /^phone$/i, /^phone\s*number$/i, /home\s*phone/i, /\bmobile\b/i, /\bphone\b/i]
     }
   };
   // Locations with no active Beeline presence to learn a market from, but which are
@@ -137,6 +149,7 @@
     st.accountCol = pickCol(headers, DETECT[side].account || []);
     st.endReasonCol = pickCol(headers, DETECT[side].endReason || []);
     st.empCol = pickCol(headers, DETECT[side].emp || []);
+    st.phoneCol = pickCol(headers, DETECT[side].phone || []);
     if (overrides) { for (var k in overrides) { if (overrides[k] !== undefined) st[k] = overrides[k]; } }
     return st;
   }
@@ -439,10 +452,15 @@
       var start = st.startCol !== -1 ? parseDateVal(row[st.startCol]) : null;
       var acct = st.accountCol !== -1 ? parseCrmAccount(row[st.accountCol]) : null;
       var emp = st.empCol !== -1 && row[st.empCol] != null ? String(row[st.empCol]).trim() : '';
+      /* Carried as written. This file has no opinion about what a valid phone
+         number looks like -- that belongs to contacts-core.js, which is the one
+         place that decides, so the two can never disagree about whether a
+         number is dialable. */
+      var phone = st.phoneCol !== -1 && row[st.phoneCol] != null ? String(row[st.phoneCol]).trim() : '';
       if (map.has(badge)) { map.get(badge).count++; dups.add(badge); }
       else map.set(badge, {
         name: name, region: region, start: start, count: 1,
-        city: acct ? acct.city : '', cityKey: acct ? acct.cityKey : '', emp: emp,
+        city: acct ? acct.city : '', cityKey: acct ? acct.cityKey : '', emp: emp, phone: phone,
         contactId: st.contactIdCol !== -1 && row[st.contactIdCol] != null ? String(row[st.contactIdCol]).trim() : '',
         assignmentId: st.assignmentIdCol !== -1 && row[st.assignmentIdCol] != null ? String(row[st.assignmentIdCol]).trim() : ''
       });
@@ -590,6 +608,8 @@
       records.push({
         badge: badge,
         empNumber: crmRec ? (crmRec.emp || '') : '',
+        // Straight off the RC assignment row, unvalidated -- see indexSide().
+        phone: crmRec ? (crmRec.phone || '') : '',
         // RC record ids, for deep links. Only ever present for a badge RC knows.
         contactId: crmRec ? (crmRec.contactId || '') : '',
         assignmentId: crmRec ? (crmRec.assignmentId || '') : '',

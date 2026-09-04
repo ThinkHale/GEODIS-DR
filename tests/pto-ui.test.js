@@ -12,7 +12,10 @@ const TODAY = d0.getFullYear() + '-' + p2(d0.getMonth() + 1) + '-' + p2(d0.getDa
 const records = [
   { badge: 'b1', person: 'Ada Away', action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago', crmStart: '1/2/2026' },
   { badge: 'b2', person: 'Gus Gone', action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago', crmStart: '1/3/2026' },
-  { badge: 'b3', empNumber: '21407056', person: 'Nate New', action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago', crmStart: '8/25/2026' }
+  /* Nate has no contacts record at all. His number is on the RC assignment row,
+     which is where RC keeps it -- captured at placement -- and it was being
+     dropped, so his profile read as having no number on file. */
+  { badge: 'b3', empNumber: '21407056', person: 'Nate New', action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago', crmStart: '8/25/2026', phone: '(630) 380-0838' }
 ];
 // Ada has approved PTO today. Gus filed a request that nobody has approved.
 const timeOff = [
@@ -147,6 +150,18 @@ const rowFor = name => $$('.cov-row').filter(r => r.textContent.indexOf(name) !=
   t('the unapproved one still carries its point',
     /Attendance points[\s\S]{0,80}?>1</.test(d.body.innerHTML));
   t('and is not marked as cleared', !$('.pts-void'));
+  t('a number typed against the badge is still the one shown',
+    d.body.textContent.indexOf('(773) 639-5639') !== -1);
+
+  console.log('— the number RC already has —');
+  click($('[data-nav="associates"]'));
+  click($('[data-profile="b3"]'));
+  await settle(40);
+  t('reaches a profile with nothing else on file',
+    d.body.textContent.indexOf('(630) 380-0838') !== -1);
+  t('and says where it came from', d.body.textContent.indexOf('RC assignment') !== -1);
+  t('so it is dialable', !!$('a[href="tel:+16303800838"]'));
+  t('and copyable for TextUs or Vonage', !!$('[data-phone-copy]'));
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

@@ -129,6 +129,21 @@ const tile = label => {
   t('alongside the person on shift', !!rowFor('Onshift, Ada'));
   t('and leaves out whoever is not here', !rowFor('Skipped, Sam'));
 
+  /* "On shift now" is the filter a supervisor reaches for by name, and it used
+     to answer the narrower question of who was EXPECTED -- so Vic, standing on
+     the floor on voluntary OT, was the one person it left out. */
+  $('#cov-status').value = 'onshift';
+  $('#cov-status').dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(60);
+  t('"On shift now" keeps the person on the floor with no shift', !!rowFor('Volunteer, Vic'));
+  t('alongside the person working theirs', !!rowFor('Onshift, Ada'));
+  t('and still names whoever was expected but never arrived', !!rowFor('Skipped, Sam'));
+
+  /* Widening the filter must not widen the denominator: somebody picking up
+     voluntary OT cannot make the floor read as short-staffed. */
+  t('coverage still counts only who was expected',
+    $$('.metric-note').some(n => /\b1 of 2 on-shift associates present\b/.test(n.textContent)));
+
   console.log('— documenting it costs nothing —');
   $('#cov-status').value = 'exceptions';
   $('#cov-status').dispatchEvent(new w.Event('change', { bubbles: true }));

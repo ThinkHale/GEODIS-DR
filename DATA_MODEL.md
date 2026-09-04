@@ -861,6 +861,7 @@ timeoff/requests.json              [] PTO / VTO / sick requests (manual + form i
 requisitions/requisitions.json     [] open positions (not badge-keyed)
 performance/metrics.json           [] scorecard metrics per badge per period
 shifts/assignments.json            [] shift tag per associate (EID- or name-keyed)
+shifts/key.json                    [] the Geodis Key: shifts each building runs, by client account
 associates/pto.json                 [] transition-associate flag and remaining transition PTO
 payroll/discrepancies.json          [] payroll discrepancy workflow records
 ```

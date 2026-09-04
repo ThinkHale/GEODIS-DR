@@ -163,6 +163,15 @@ const COLLECTIONS = {
                   fields: { code: 'str', name: 'str', market: 'str', active: 'bool', notes: 'str' } },
   shiftTypes:   { path: 'admin/shift-types.json',        responseKey: 'shiftTypes',
                   fields: { key: 'str', label: 'str', location: 'str', hours: 'str', active: 'bool' } },
+  /* The "Geodis Key" tab of the PLX workbook: which shifts each building runs,
+     for which client account, on what hours. Stored rather than held in memory
+     for the length of one import, so the vocabulary survives a reload and a
+     shift with nobody on it today is still a shift the site runs. Keyed by
+     building + account + shift + job -- see toKeyRecords() in shift-key.js. */
+  shiftKey:     { path: 'shifts/key.json',               responseKey: 'shiftKey',
+                  fields: { building: 'str', shift: 'str', account: 'str', accountNum: 'str',
+                            job: 'str', beelineShift: 'str', hours: 'str', supervisor: 'str',
+                            source: 'str' } },
   performance:  { path: 'performance/metrics.json',      responseKey: 'performance',
                   fields: { badge: 'str', period: 'str', quality: 'num', productivity: 'num', safety: 'num',
                             units: 'num', hours: 'num', notes: 'str' } }
@@ -2540,6 +2549,10 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
         empNumber: r.empNumber || '',
         contactId: r.contactId || '',
         assignmentId: r.assignmentId || '',
+        // RC holds the associate's number, captured at placement. Carried on the
+        // snapshot so a profile has one without anybody re-keying a sheet; what
+        // counts as dialable is decided once, in contacts-core.js.
+        phone: r.phone || '',
         person: r.person,
         altName: r.altName,
         action: r.action,

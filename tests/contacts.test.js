@@ -139,6 +139,43 @@ console.log('— the timeclock id reaches a profile —');
       withShift.get('b9'), SC.rosterKey) === null);
 }
 
+/* The RC assignment export carries a number for everybody -- it is captured at
+   placement -- so it is the one file that can fill a profile in without anybody
+   re-keying a sheet. It was being dropped on the floor. */
+console.log('— the number RC already holds —');
+{
+  const RC = require('../reconcile-core.js');
+  const headers = ['Badge Number', 'Person Placed Name', 'Assignment Status', 'Mobile Phone', 'Home Phone'];
+  const st = RC.buildState([headers, ['b1', 'Reed, Ava', 'Active', '(773) 639-5639', '(312) 555-0100']], 'crm');
+  t('a phone column is found by header', st.phoneCol === 3);
+  t('and the mobile is preferred over the desk line',
+    headers[st.phoneCol] === 'Mobile Phone');
+
+  const phoneOf = (rc, stored) => {
+    const built = SD.buildProfiles([{ badge: 'b1', person: 'Ava Reed', action: 'matched', phone: rc }], {
+      phoneNormalize: C.normalize,
+      phoneOf: () => stored || null
+    });
+    return built.get('b1');
+  };
+  t('it reaches the profile', phoneOf('(773) 639-5639').phone === '7736395639');
+  t('and says where it came from', phoneOf('(773) 639-5639').phoneSource === 'RC assignment');
+  t('a column of junk yields no number rather than a wrong one',
+    phoneOf('n/a').phone === '' && phoneOf('000-000-0000').phone === '');
+
+  /* Precedence. A record somebody linked to THIS badge is a deliberate answer
+     about one known person; RC is keyed by badge by construction; a record
+     reached only by a shared name is the weakest join in the tool. */
+  const byBadge = { badge: 'b1', phone: '6303800838', source: 'Entered by hand' };
+  const byName = { badge: '', nameKey: 'ava reed', phone: '6303800838', source: 'Matched on name' };
+  t('a number typed against the badge beats RC',
+    phoneOf('7736395639', byBadge).phone === '6303800838');
+  t('but one matched only on a name does not',
+    phoneOf('7736395639', byName).phone === '7736395639');
+  t('and the loose match is still used when RC has nothing',
+    phoneOf('', byName).phone === '6303800838');
+}
+
 console.log('— matching harvested rows onto the roster —');
 const profs = [
   { badge: 'b1', timeclockId: '80-AEID1', name: 'Ada Away' },

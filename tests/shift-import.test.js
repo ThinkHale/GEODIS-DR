@@ -29,6 +29,7 @@ const hcAoa = [
 
 const posts = [];
 let stored = [];
+let storedKey = [];
 const dom = new JSDOM(`<!doctype html><html><body class="suite-active">
  <div id="suite-root"></div><header>legacy</header><main id="recon-main"><div id="tbody">R</div></main>
 </body></html>`, { runScripts: 'outside-only', url: 'https://geodis.ebtools.pro/' });
@@ -50,6 +51,7 @@ w.fetch = (url, opt) => {
   if (opt && opt.method === 'POST') {
     const body = JSON.parse(opt.body);
     posts.push({ url: u, body });
+    if (u.indexOf('shiftKey=1') !== -1 && Array.isArray(body.records)) storedKey = body.records;
     if (u.indexOf('shifts=1') !== -1) {
       if (Array.isArray(body.records)) stored = body.records;
       else if (body._delete) stored = stored.filter(r => r.id !== body.id);
@@ -60,7 +62,14 @@ w.fetch = (url, opt) => {
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
   }
+  if (u.indexOf('shiftKey=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ shiftKey: storedKey }) });
   if (u.indexOf('shifts=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ shifts: stored }) });
+  // 1502 is a Chicago site, so the workbook shifts on it can be placed in a market.
+  if (u.indexOf('locations=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({
+    locations: [{ id: 'L1', code: '1502', name: 'Romeoville', market: 'Chicago', active: true }] }) });
+  if (u.indexOf('users=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ users: [] }) });
+  if (u.indexOf('shiftTypes=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ shiftTypes: [] }) });
+  if (u.indexOf('appConfig=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ appConfig: [] }) });
   if (u.indexOf('plx=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ sync: {} }) });
   if (u.indexOf('schedule=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ schedule: {} }) });
   if (u.indexOf('coverage=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ coverage: {} }) });
@@ -158,6 +167,47 @@ const shiftCellFor = name => {
   click($$('.shift-chip.none')[0]);
   await settle(40);
   t('no write issued', posts.filter(p => p.url && p.url.indexOf('shifts=1') !== -1).length === before);
+
+  /* The Key half of the workbook. It used to be parsed, used to stamp hours onto
+     each person, and then dropped -- so the vocabulary lived only in the tab
+     that did the import, and a shift with nobody on it was never recorded at
+     all. Settings then showed a hand-maintained list under a note saying it
+     "supplements the workbook", with no way on the page to see the workbook. */
+  console.log('— the Geodis Key is kept, not just read —');
+  const keyPost = posts.filter(p => p.url && p.url.indexOf('shiftKey=1') !== -1).pop();
+  t('the Key is stored too', !!keyPost && Array.isArray(keyPost.body.records));
+  t('one record per row of the Key', keyPost.body.records.length === 2);
+  const redbull = keyPost.body.records.find(r => r.account === 'REDBULL');
+  t('with the account it belongs to', !!redbull && redbull.accountNum === '67510');
+  t('the building it runs at', redbull.building === '1502');
+  t('the shift it is', redbull.shift === '1st');
+  t('and the hours the Key gives it', redbull.hours === '6am-2:30pm Mon-Fri');
+  t('under an id stable enough to re-import over',
+    redbull.id === keyPost.body.records.find(r => r.account === 'REDBULL').id &&
+    redbull.id.length <= 64);
+  t('the import report says the Key was read',
+    /shifts from the Geodis Key/.test(d.body.textContent));
+
+  console.log('— and Settings shows them —');
+  w.__setRole('admin');
+  await settle(60);
+  click($('[data-nav="settings"]'));
+  await settle(120);
+  click($('[data-settings-tab="shifts"]'));
+  await settle(120);
+  const keyTable = $$('.suite-table').filter(x => /Job titles/.test(x.querySelector('thead').textContent))[0];
+  t('a workbook shift table is on the page', !!keyTable);
+  const rowText = n => Array.from(keyTable.querySelectorAll('tbody tr'))
+    .filter(r => r.textContent.indexOf(n) !== -1)[0];
+  t('both accounts are listed', !!rowText('REDBULL') && !!rowText('CCM'));
+  t('each with its site', /1502/.test(rowText('REDBULL').textContent));
+  t('its account number', /67510/.test(rowText('REDBULL').textContent));
+  t('its hours', /6am-2:30pm Mon-Fri/.test(rowText('REDBULL').textContent));
+  t('its job title', /OPR2/.test(rowText('REDBULL').textContent));
+  const lastCell = r => { const c = r.querySelectorAll('td'); return c[c.length - 1].textContent.trim(); };
+  t('and how many associates are on it', lastCell(rowText('REDBULL')) === '1');
+  t('the hand-maintained list is still offered beneath it',
+    d.body.textContent.indexOf('Add here only') !== -1);
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

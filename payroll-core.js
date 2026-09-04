@@ -20,11 +20,20 @@
 
   /* ---------- discrepancy pipeline ----------
      `resolved` means the hours were actually put right. "Submitted to Payroll"
-     is not resolved: it has been handed over, not yet fixed. */
+     is not resolved: it has been handed over, not yet fixed.
+
+     "Pending Billing" is the step after that hand-off. The correction has gone
+     out, but a corrected hour is only half the job: it has to land in Beeline
+     correctly before the client can be invoiced for it, and nobody knows it did
+     until somebody looks. It is deliberately NOT resolved and NOT terminal --
+     an unverified correction is exactly the kind of thing that gets forgotten
+     because it feels finished, so it keeps counting as open work until the
+     billing side is checked. */
   var STATUSES = [
     { key: 'Received', label: 'Received', cls: 'pending', resolved: false },
     { key: 'Researching', label: 'Researching', cls: 'pending', resolved: false },
     { key: 'Submitted to Payroll', label: 'Submitted to payroll', cls: 'pending', resolved: false },
+    { key: 'Pending Billing', label: 'Pending billing', cls: 'pending', resolved: false },
     { key: 'Corrected', label: 'Corrected', cls: '', resolved: true, terminal: true },
     { key: 'No Adjustment Needed', label: 'No adjustment needed', cls: 'closed', resolved: false, terminal: true },
     { key: 'Cancelled', label: 'Cancelled', cls: 'closed', resolved: false, terminal: true }

@@ -65,6 +65,7 @@ const SUITES = [
   { file: 'market-filter.test.js', name: 'market filter across every view (DOM)', dom: true },
   { file: 'coverage-ui.test.js', name: 'coverage persistence + spreadsheet paste (DOM)', dom: true },
   { file: 'suite-ui.test.js', name: 'suite modules + reconciliation mount', dom: true },
+  { file: 'pending-end.test.js', name: 'end-assignment tasks on the reconciliation (DOM)', dom: true },
   { file: 'page.test.js', name: 'index.html end to end', dom: true }
 ];
 

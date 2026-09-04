@@ -513,6 +513,47 @@
     });
   }
 
+  /* ---------- the Key as records ----------
+     The Key is the site's own answer to "which shifts does this building run,
+     for which client, on what hours" -- and it was being read at import, used
+     to stamp hours onto each person, and then thrown away. Nothing kept it, so
+     the moment the page reloaded the only trace of the vocabulary left was
+     whatever happened to be denormalised onto an associate. A shift with nobody
+     on it today -- a client between orders, a lane about to start -- had no
+     trace at all.
+
+     Flattened to one record per row of the Key so it stores like every other
+     collection. Rows that say the same thing twice collapse; rows that differ
+     only by job title stay apart, because they do. */
+  function toKeyRecords(key) {
+    if (!key || !key.entries) return [];
+    var seen = {}, out = [];
+    key.entries.forEach(function (e) {
+      var base = ['SK', e.building, e.accountNum || '0', e.shift, e.job || '']
+        .join('-').replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 58);
+      // Truncation can collide where two long job titles share a prefix. The
+      // suffix keeps them separate rather than letting one overwrite the other.
+      var id = base, n = 1;
+      while (seen[id]) { id = base + '~' + (++n); }
+      seen[id] = true;
+      out.push({
+        id: id,
+        building: e.building,
+        shift: e.shift,
+        account: e.account || '',
+        accountNum: e.accountNum || '',
+        job: e.job || '',
+        beelineShift: e.beelineShift || '',
+        // The window as the Key writes it. Blank where the Key gave no hours,
+        // or gave something this file would only be guessing at.
+        hours: e.schedule ? e.schedule.raw : '',
+        supervisor: e.supervisor || '',
+        source: 'PLX workbook'
+      });
+    });
+    return out;
+  }
+
   /* A shift the building does not run is a typo in the sheet, not a new shift.
      Reported rather than stored silently -- a mistyped tag puts someone in the
      wrong headcount block, where nobody is looking for them. */
@@ -726,6 +767,7 @@
     parseKeySchedule: parseKeySchedule,
     parseShiftKey: parseShiftKey,
     parseHeadcount: parseHeadcount,
+    toKeyRecords: toKeyRecords,
     windowFor: windowFor,
     accountNumOf: accountNumOf,
     toShiftRecords: toShiftRecords,

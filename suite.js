@@ -348,6 +348,8 @@
         var ix = ContactsCore.index(state.stores.contacts, SuiteData.normBadge);
         return function (p) { return ContactsCore.lookup(ix, p, ScheduleCore.rosterKey); };
       })(),
+      // What counts as a dialable number, decided in one place for every source.
+      phoneNormalize: ContactsCore.normalize,
       // Approved time off clears the points for the day it covers.
       ptoCover: function (requests, iso) {
         for (var i = 0; i < (requests || []).length; i++) {
@@ -883,17 +885,31 @@
           .concat(hc.warnings)
           .concat(ShiftKey.validateAgainstKey(hc, key));
 
+        var keyRecords = ShiftKey.toKeyRecords(key);
+
         state.shiftKey = key;
         state.shiftImport = { headline: 'Reading ' + records.length + ' shift tags…', warnings: [] };
         render();
 
+        /* Both halves of the workbook, stored together. The Key used to be read
+           and thrown away, which meant the shift vocabulary lived only in this
+           browser tab until it was reloaded -- and a shift with nobody on it
+           was never recorded at all. Saved in the same pass so the two can
+           never describe different imports. */
         SuiteData.replaceCollection('shifts', records).then(function () {
           state.stores.shifts = records;
+          return keyRecords.length
+            ? SuiteData.replaceCollection('shiftKey', keyRecords).then(function () {
+                state.stores.shiftKey = keyRecords;
+              })
+            : null;
+        }).then(function () {
           rebuild();
           var matched = allProfiles().filter(function (p) { return !!p.shift; }).length;
           state.shiftImport = {
             headline: records.length + ' shift tags imported from ' + hc.sheets.length + ' site tabs · ' +
-              matched + ' matched a roster profile by name',
+              matched + ' matched a roster profile by name' +
+              (keyRecords.length ? ' · ' + keyRecords.length + ' shifts from the Geodis Key' : ''),
             warnings: warnings
           };
           render();
@@ -917,6 +933,11 @@
     if (!p) return;
     var known = {};
     state.stores.shifts.forEach(function (r) { if (r.shift) known[r.shift] = true; });
+    /* The Key, from the store rather than from this tab's last import. It used
+       to come only from state.shiftKey, which is set during an import and lost
+       on reload -- so the picker offered a full vocabulary to whoever had just
+       uploaded the workbook and a thin one to everybody else. */
+    (state.stores.shiftKey || []).forEach(function (r) { if (r.shift) known[r.shift] = true; });
     if (state.shiftKey) {
       Object.keys(state.shiftKey.byBuilding).forEach(function (b) {
         state.shiftKey.byBuilding[b].forEach(function (sh) { known[sh] = true; });
@@ -1956,10 +1977,14 @@
     var c = state.coverage;
     var locs = {};
     res.rows.forEach(function (r) { var l = locLeaf(r.location); if (l) locs[l] = (locs[l] || 0) + 1; });
-    /* "On shift now" is who was EXPECTED; "On the clock now" is who is actually
-       here, which includes anybody working voluntary OT that no shift covers.
-       Both questions get asked on a floor walk and they have different answers,
-       so both are offered rather than one standing in for the other. */
+    /* "On shift now" is the shift as it actually stands: everybody a shift
+       expects right now, plus everybody on the floor whether or not anything
+       expected them. It used to be the expected half alone, which meant a
+       supervisor asking who was on shift got back a list that included people
+       who had not turned up and excluded people standing in the building on
+       voluntary OT -- the opposite of the question being asked on a floor walk.
+       "On the clock now" stays the stricter question, presence and nothing
+       else, so the two still differ by whoever is expected but not here. */
     var opts = [['exceptions', 'Exceptions only'], ['onclock', 'On the clock now'],
         ['onshift', 'On shift now'], ['all', 'Everyone']]
       .concat(ScheduleCore.STATUS_ORDER.map(function (k) {
@@ -1990,7 +2015,12 @@
          go looking -- see STATUS.unscheduled in schedule-core.js. */
       if (c.statusFilter === 'exceptions') { if (r.severity !== 'bad' && r.severity !== 'warn') return false; }
       else if (c.statusFilter === 'onclock') { if (!r.present) return false; }
-      else if (c.statusFilter === 'onshift') { if (!ScheduleCore.STATUS[r.status].onShift) return false; }
+      /* Presence counts on its own here. STATUS.onShift stays untouched, so the
+         coverage percentage keeps measuring only who was expected -- somebody
+         picking up voluntary OT must never make the floor read as short. */
+      else if (c.statusFilter === 'onshift') {
+        if (!ScheduleCore.STATUS[r.status].onShift && !r.present) return false;
+      }
       else if (c.statusFilter !== 'all' && r.status !== c.statusFilter) return false;
       if (!q) return true;
       return searchText(r.badge ? profile(r.badge) : null,
@@ -2626,15 +2656,23 @@
         }));
       state.shell.announcement = changes.length + ' filtered hour changes exported.';
     } else {
-      var rows = state.payroll.filteredDiscrepancies || [];
-      downloadCsvFile('Payroll_Discrepancies_' + suffix,
-        ['Associate', 'Badge', 'Site', 'Date', 'Week ending', 'Details', 'Status', 'Source'],
+      var rows = state.payroll.filteredIssues || [];
+      downloadCsvFile('Payroll_Issues_' + suffix,
+        /* "Raised" says which of the two kinds a line is, and "Date" says what
+           its date means -- the two pipelines are otherwise indistinguishable
+           in a spreadsheet, and a hand-raised task's date is when it was
+           raised, not when the pay went wrong. */
+        ['Associate', 'Badge', 'Site', 'Raised', 'Date', 'Date means', 'Week ending', 'Details', 'Status', 'Source'],
         rows.map(function (row) {
           var person = profile(row.badge);
-          return [person ? person.name : row.name || '', row.badge || '', row.location || '', row.date || '',
-            row.weekEnding || '', row.details || '', PayrollCore.pipeline.statusMeta(row.status).label, row.source || ''];
+          var rec = row.rec;
+          return [person ? person.name : row.name || '', row.badge || '', row.location || '',
+            row.kind === 'task' ? 'By hand' : 'Discrepancy form', row.date || '',
+            row.dateIsRaised ? 'Raised' : 'Issue date', row.weekEnding || '',
+            [row.heading, row.detail].filter(Boolean).join(' — '),
+            row.pipeline.statusMeta(rec.status).label, rec.source || ''];
         }));
-      state.shell.announcement = rows.length + ' filtered discrepancies exported.';
+      state.shell.announcement = rows.length + ' filtered payroll issues exported.';
     }
     var live = root.querySelector('.suite-live');
     if (live) live.textContent = state.shell.announcement;
@@ -3397,131 +3435,207 @@
       (pr.tab === 'hours' ? payrollHours() : payrollDiscrepancies()) + '</div>';
   }
 
-  /* Payroll issues arrive two ways and used to be visible in only one place
-     each. A discrepancy comes off the GEODIS form and lands on this page; a
-     payroll task is raised by hand from the + button and landed only on Tasks.
-     Somebody who raised one here went looking for it here and found nothing.
+  /* Payroll issues arrive two ways: a discrepancy comes off the GEODIS form,
+     and a task is raised by hand from the + button. They were shown as two
+     stacked tables on this page, so answering "what payroll work is
+     outstanding" meant reading the page twice -- and the hand-raised table,
+     being the shorter one, was the half that got skimmed.
 
-     They are NOT merged into one list. A discrepancy is a claim about a specific
-     week's hours with its own pipeline; a task is a job somebody took on. Both
-     belong on the payroll page, as themselves. */
+     They stay separate RECORDS. A discrepancy is a claim about one week's hours
+     with its own pipeline; a task is a job somebody took on, with its own. What
+     is merged is the LIST, so the page answers the question in one pass. Each
+     row keeps its own status vocabulary and its own actions. */
   function payrollTasks() {
     return allTasks().filter(function (t) {
       // Stored only: a derived payroll task IS a discrepancy, and it is already
-      // in the table below this panel.
+      // in the list as itself.
       return !t.derived && TasksCore.kindMeta(t.kind).key === 'payroll';
     });
   }
-  function payrollTaskPanel() {
-    var now = new Date();
-    var all = TasksCore.sort(payrollTasks(), now);
-    var open = all.filter(TasksCore.isOpen);
-    if (!all.length) return '';
-    var rows = open.length ? open : all;
-    return '<section class="suite-panel"><div class="suite-panel-head">' +
-      '<h2>Payroll tasks</h2><div class="suite-actions">' +
-      '<button class="suite-btn" data-nav="tasks">All tasks &rsaquo;</button></div></div>' +
-      '<p class="perf-note">Raised by hand from the <b>+ Task</b> button rather than off the ' +
-      'discrepancy form. They escalate after ' + TasksCore.kindMeta('payroll').hours +
-      ' hours, and are the same records as the payroll ones on the Tasks page.' +
-      (open.length ? '' : ' Nothing outstanding — the ' + all.length + ' below are complete.') + '</p>' +
-      '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
-      '<th>Task</th><th>Associate</th><th>Raised</th><th>Age</th><th>Status</th><th></th>' +
-      '</tr></thead><tbody>' +
-      rows.slice(0, MAX_ROWS).map(function (t) {
-        var pr = t.badge ? profile(t.badge) : null;
-        return '<tr class="' + (TasksCore.urgencyOf(t, now) === TasksCore.URGENT ? 'cov-row bad'
-          : TasksCore.urgencyOf(t, now) === TasksCore.DUE ? 'cov-row warn' : '') + '">' +
-          '<td class="detail-cell"><div class="name detail-text">' + esc(t.title) + '</div>' +
-          detailText(t.detail, 'sub') + '</td>' +
-          '<td>' + (pr ? '<div class="name link" data-profile="' + esc(pr.badge) + '">' + esc(pr.name) +
-              '</div><div class="sub">' + idLine(pr) + '</div>'
-            : t.name ? '<div class="name">' + esc(t.name) + '</div><div class="sub warn-text">no profile</div>'
-            : '<span class="sub">&mdash;</span>') + '</td>' +
-          '<td>' + esc(shortWhen(t.createdAt) || '—') + '</td>' +
-          '<td>' + urgencyChip(t, now) + '</td>' +
-          '<td>' + pipelineSelect(t, TasksCore.pipeline, 'tasks') + '</td>' +
-          '<td><button class="suite-btn" data-task-done="' + esc(t.id) + '"' +
-          (TasksCore.isOpen(t) ? '' : ' disabled') + '>Complete</button></td></tr>';
-      }).join('') + '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length) +
-      '</section>';
+
+  /* Both records reduced to the row the merged table draws. What the two
+     genuinely share becomes a field; what they do not -- the pipeline, the
+     actions, the collection a status change is written to -- is carried
+     alongside the record itself, so a row is still worked in its own terms. */
+  function payrollRow(rec, kind) {
+    if (kind === 'task') {
+      return {
+        id: rec.id, kind: 'task', rec: rec, badge: rec.badge, name: rec.name,
+        location: rec.location || '',
+        /* A hand-raised task has no "the day this went wrong" -- the form does
+           not ask, because somebody raising one is describing a week, not a
+           day. The date shown is when it was raised, and the cell says so
+           rather than letting it read as an issue date. */
+        date: String(rec.createdAt || '').slice(0, 10), dateIsRaised: true,
+        weekEnding: rec.weekEnding || '',
+        /* The issue type when the form captured one -- the generated title is
+           then just the associate and the week, which have columns of their
+           own. A task raised any other way has only its title to say what it
+           is about, so that is what shows instead of dropping it. */
+        heading: rec.issueType || rec.title || '', detail: rec.detail || '',
+        pipeline: TasksCore.pipeline, collection: 'tasks',
+        open: TasksCore.isOpen(rec)
+      };
+    }
+    return {
+      id: rec.id, kind: 'discrepancy', rec: rec, badge: rec.badge, name: rec.name,
+      location: rec.location || '',
+      date: rec.date || '', dateIsRaised: false,
+      weekEnding: rec.weekEnding || '',
+      heading: '', detail: rec.details || '',
+      pipeline: PayrollCore.pipeline, collection: 'discrepancies',
+      open: PayrollCore.pipeline.needsAction(rec.status)
+    };
+  }
+
+  /* The status filter spans two vocabularies, and they collide: both pipelines
+     have a "Cancelled". Task statuses are prefixed so one choice can never
+     select rows of the other kind by accident. */
+  var PAYROLL_TASK_STATUS = 'task:';
+  function payrollStatusFilter(row) {
+    var want = state.payroll.discrepancyStatus;
+    if (want === 'all') return true;
+    if (want === 'open') return row.open;
+    if (want.indexOf(PAYROLL_TASK_STATUS) === 0) {
+      return row.kind === 'task' &&
+        row.pipeline.statusMeta(row.rec.status).key === want.slice(PAYROLL_TASK_STATUS.length);
+    }
+    return row.kind === 'discrepancy' && row.pipeline.statusMeta(row.rec.status).key === want;
+  }
+  function payrollStatusOptions() {
+    var current = state.payroll.discrepancyStatus;
+    var opt = function (value, label) {
+      return '<option value="' + esc(value) + '"' + (current === value ? ' selected' : '') + '>' +
+        esc(label) + '</option>';
+    };
+    var group = function (label, keys, pipe, prefix) {
+      return '<optgroup label="' + esc(label) + '">' + keys.map(function (k) {
+        return opt(prefix + k, pipe.statusMeta(k).label);
+      }).join('') + '</optgroup>';
+    };
+    return opt('all', 'All statuses') + opt('open', 'Anything still open') +
+      group('From the discrepancy form', PayrollCore.pipeline.STATUS_KEYS, PayrollCore.pipeline, '') +
+      group('Raised by hand', TasksCore.pipeline.STATUS_KEYS, TasksCore.pipeline, PAYROLL_TASK_STATUS);
   }
 
   function payrollDiscrepancies() {
     if (!state.storesLoaded) return loadingPanel('discrepancies');
     var q = state.query.trim().toLowerCase();
+    var now = new Date();
     var scoped = (state.stores.discrepancies || []).filter(function (dsc) {
       var p = profile(dsc.badge);
       if (p ? !inMarket(p) : state.market !== 'all' && dsc.badge) return false;
       if (!q) return true;
       return searchText(p, (p ? '' : dsc.name || '') + ' ' + dsc.badge + ' ' + dsc.location + ' ' +
         dsc.details + ' ' + dsc.status).toLowerCase().indexOf(q) !== -1;
-    });
-    var all = scoped.filter(function (dsc) {
-      if (state.payroll.discrepancyStatus !== 'all' &&
-          PayrollCore.pipeline.statusMeta(dsc.status).key !== state.payroll.discrepancyStatus) return false;
-      if (state.payroll.discrepancyLocation !== 'all' && String(dsc.location || '') !== state.payroll.discrepancyLocation) return false;
-      if (state.payroll.missingDate && dsc.date) return false;
+    }).map(function (dsc) { return payrollRow(dsc, 'discrepancy'); });
+
+    // allTasks() has already applied the market filter, by the same rule the
+    // owning panels use.
+    var taskRows = payrollTasks().filter(function (t) {
+      if (!q) return true;
+      var p = t.badge ? profile(t.badge) : null;
+      return searchText(p, (p ? '' : t.name || '') + ' ' + t.badge + ' ' + t.location + ' ' +
+        t.title + ' ' + t.detail + ' ' + t.issueType + ' ' + t.status)
+        .toLowerCase().indexOf(q) !== -1;
+    }).map(function (t) { return payrollRow(t, 'task'); });
+
+    var everything = scoped.concat(taskRows);
+    var all = everything.filter(function (row) {
+      if (!payrollStatusFilter(row)) return false;
+      if (state.payroll.discrepancyLocation !== 'all' && row.location !== state.payroll.discrepancyLocation) return false;
+      /* "Missing date" is a question about the FORM -- somebody submitted one
+         without saying which day. A hand-raised task never carries an issue
+         date at all, so counting every one of them as "missing" would bury the
+         handful of form rows this is meant to surface. */
+      if (state.payroll.missingDate && (row.kind !== 'discrepancy' || row.date)) return false;
       return true;
     }).sort(function (a, b) {
-      var aOpen = PayrollCore.pipeline.needsAction(a.status) ? 1 : 0;
-      var bOpen = PayrollCore.pipeline.needsAction(b.status) ? 1 : 0;
-      return bOpen - aOpen || String(b.date || '').localeCompare(String(a.date || ''));
+      return (b.open ? 1 : 0) - (a.open ? 1 : 0) ||
+        String(b.date || '').localeCompare(String(a.date || ''));
     });
     var rows = all.slice(0, MAX_ROWS);
-    var open = all.filter(function (dsc) { return PayrollCore.pipeline.needsAction(dsc.status); }).length;
+    var open = all.filter(function (row) { return row.open; }).length;
     var orphans = (state.stores.discrepancies || []).filter(function (dsc) { return !profile(dsc.badge); });
 
-    var openTaskCount = payrollTasks().filter(TasksCore.isOpen).length;
-    var payrollLocations = Array.from(new Set(scoped.map(function (dsc) { return dsc.location; }).filter(Boolean))).sort();
-    state.payroll.filteredDiscrepancies = all;
+    var byHand = everything.filter(function (row) { return row.kind === 'task'; }).length;
+    var payrollLocations = Array.from(new Set(everything.map(function (row) { return row.location; })
+      .filter(Boolean))).sort();
+    // What the export writes is what is on screen, both kinds -- an export that
+    // silently dropped half the filtered list would be worse than no export.
+    state.payroll.filteredIssues = all;
 
     return '<div class="metric-strip">' +
-      metric('Open discrepancies', open, 'Not yet corrected or closed', open ? 'orange' : 'green') +
+      metric('Open', open, 'Not yet corrected or closed', open ? 'orange' : 'green') +
       metric('Total raised', all.length, 'In this market') +
-      metric('Payroll tasks', openTaskCount, 'Raised by hand, still open', openTaskCount ? 'orange' : 'green') +
+      metric('Raised by hand', byHand, 'Not off the discrepancy form', byHand ? 'orange' : 'green') +
       metric('Unmatched', orphans.length, 'Need connecting to an associate', orphans.length ? 'orange' : 'green') +
       '</div>' +
-      payrollTaskPanel() +
       (orphans.length ? '<div class="warn-banner"><b>' + orphans.length + '</b> discrepanc' +
         (orphans.length === 1 ? 'y' : 'ies') + ' could not be matched to an associate — usually a name ' +
         'typed differently on the form. Use Connect to link them.</div>' : '') +
       '<section class="suite-panel">' +
+      '<div class="suite-panel-head"><h2>Payroll issues</h2><div class="suite-actions">' +
+      '<button class="suite-btn" data-nav="tasks">All tasks &rsaquo;</button></div></div>' +
+      '<p class="perf-note">Everything raised about pay, however it arrived: the GEODIS ' +
+      'discrepancy form, and issues raised by hand from the <b>+ Task</b> button. Hand-raised ' +
+      'ones escalate after ' + TasksCore.kindMeta('payroll').hours +
+      ' hours and are the same records as the payroll ones on the Tasks page.</p>' +
       '<div class="filter-row payroll-filter-row"><label class="filter-control filter-search"><span>Search</span>' +
       '<input class="suite-input" id="suite-search" value="' + esc(state.query) +
       '" placeholder="EID, name, location, detail, or status…"></label>' +
-      attendanceSelect('payroll-status', 'Status', state.payroll.discrepancyStatus,
-        [['all', 'All statuses']].concat(PayrollCore.pipeline.STATUS_KEYS.map(function (key) {
-          return [key, PayrollCore.pipeline.statusMeta(key).label];
-        }))) + attendanceSelect('payroll-location', 'Site', state.payroll.discrepancyLocation,
-          [['all', 'All sites']].concat(payrollLocations.map(function (location) { return [location, location]; }))) +
+      '<label class="filter-control"><span>Status</span>' +
+      '<select class="suite-select" id="payroll-status">' + payrollStatusOptions() + '</select></label>' +
+      attendanceSelect('payroll-location', 'Site', state.payroll.discrepancyLocation,
+        [['all', 'All sites']].concat(payrollLocations.map(function (location) { return [location, location]; }))) +
       '<label class="cov-ctl"><input type="checkbox" id="payroll-missing-date"' +
       (state.payroll.missingDate ? ' checked' : '') + '> <span>Missing date only</span></label>' +
       '<button type="button" class="suite-btn" data-payroll-export="discrepancies">Export filtered</button></div>' +
       (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
         '<th>Associate</th><th>Location</th><th>Date</th><th>Week ending</th><th>Details</th>' +
         '<th>Status</th><th></th></tr></thead><tbody>' +
-        rows.map(function (dsc) {
-          var p = profile(dsc.badge);
-          return '<tr id="record-' + esc(dsc.id) + '" tabindex="-1" class="' +
-            (p ? '' : 'cov-row warn ') + (state.highlightId === dsc.id ? 'record-highlight' : '') + '"><td>' +
-            (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div>' +
-                 '<div class="sub">' + idLine(p) + '</div>'
-               : '<div class="name">' + esc(dsc.name || 'Unknown') + '</div>' +
-                 '<div class="sub warn-text">Not matched to a profile</div>') + '</td>' +
-            '<td>' + esc(dsc.location || '—') + '</td>' +
-            '<td>' + (dsc.date ? esc(formatDate(dsc.date)) : '<span class="warn-text">Not set</span>') + '</td>' +
-            '<td>' + esc(dsc.weekEnding || '—') + '</td>' +
-            '<td class="detail-cell">' + (detailText(dsc.details) || '<span class="sub">&mdash;</span>') + '</td>' +
-            '<td>' + pipelineSelect(dsc, PayrollCore.pipeline, 'discrepancies') + '</td>' +
-            '<td>' + (mayEdit()
-              ? (p ? '' : '<button class="suite-btn" data-connect="' + esc(dsc.id) +
-                  '" data-connect-kind="discrepancies">Connect…</button> ') +
-                '<button class="suite-btn danger" data-del="discrepancies|' + esc(dsc.id) + '">Remove</button>'
-              : '<span class="sub">&mdash;</span>') + '</td></tr>';
-        }).join('') + '</tbody></table></div>' + rowCap(rows.length, all.length)
-        : empty('No discrepancies yet', 'They arrive from the GEODIS Payroll Discrepancy Form.')) +
+        rows.map(function (row) { return payrollRowHtml(row, now); }).join('') +
+        '</tbody></table></div>' + rowCap(rows.length, all.length)
+        : empty('Nothing raised yet', 'Payroll issues arrive from the GEODIS Payroll Discrepancy Form, ' +
+            'or from the + Task button.')) +
       '</section>';
+  }
+
+  function payrollRowHtml(row, now) {
+    var p = profile(row.badge);
+    var task = row.kind === 'task' ? row.rec : null;
+    var urgency = task ? TasksCore.urgencyOf(task, now) : TasksCore.NONE;
+    return '<tr id="record-' + esc(row.id) + '" tabindex="-1" class="' +
+      (urgency === TasksCore.URGENT ? 'cov-row bad ' : urgency === TasksCore.DUE ? 'cov-row warn ' :
+        p ? '' : 'cov-row warn ') +
+      (state.highlightId === row.id ? 'record-highlight' : '') + '"><td>' +
+      (p ? '<div class="name link" data-profile="' + esc(p.badge) + '">' + esc(p.name) + '</div>' +
+           '<div class="sub">' + idLine(p) + '</div>'
+         : '<div class="name">' + esc(row.name || 'Unknown') + '</div>' +
+           '<div class="sub warn-text">Not matched to a profile</div>') + '</td>' +
+      '<td>' + esc(row.location || '—') + '</td>' +
+      '<td>' + (row.date
+        ? esc(formatDate(row.date) || row.date) + (row.dateIsRaised ? '<div class="sub">raised</div>' : '')
+        : '<span class="warn-text">Not set</span>') + '</td>' +
+      '<td>' + esc(row.weekEnding || '—') + '</td>' +
+      /* Where a hand-raised row says what it is. The associate and the week
+         already have columns of their own, so the generated title would only
+         repeat them; what it adds is the kind of issue and whatever was typed. */
+      '<td class="detail-cell">' +
+      (task ? '<div class="name detail-text">' + esc(row.heading || 'Raised by hand') + '</div>' +
+        '<div class="sub">Raised by hand</div>' : '') +
+      (detailText(row.detail, task ? 'sub' : '') ||
+        (task ? '' : '<span class="sub">&mdash;</span>')) + '</td>' +
+      '<td>' + pipelineSelect(row.rec, row.pipeline, row.collection) +
+      (task ? urgencyChip(task, now) : '') + '</td>' +
+      '<td>' + (mayEdit()
+        ? (task
+            ? '<button class="suite-btn" data-task-done="' + esc(task.id) + '"' +
+              (TasksCore.isOpen(task) ? '' : ' disabled') + '>Complete</button>'
+            : (p ? '' : '<button class="suite-btn" data-connect="' + esc(row.id) +
+                '" data-connect-kind="discrepancies">Connect…</button> ') +
+              '<button class="suite-btn danger" data-del="discrepancies|' + esc(row.id) + '">Remove</button>')
+        : '<span class="sub">&mdash;</span>') + '</td></tr>';
   }
 
   /* Hours pulled from Beeline, period by period. The interesting number is what
@@ -3698,7 +3812,11 @@
         : state.admin.tab === 'locations' ? listPanel('locations', admin)
         : state.admin.tab === 'connections' ? connectionsPanel()
         : state.admin.tab === 'links' ? appConfigPanel(admin)
-        : listPanel('shiftTypes', admin)) + '</div>';
+        /* The workbook first, because it is where almost every shift actually
+           comes from; the hand-maintained list below it is for the handful it
+           does not cover. Showing only the second was what made the tab read
+           as though the workbook was not being pulled in at all. */
+        : shiftKeyPanel() + listPanel('shiftTypes', admin)) + '</div>';
   }
 
   /* ---------- connections ----------
@@ -4208,6 +4326,98 @@
       (valueOf('rcBaseUrl')
         ? '<p class="perf-note">Links are live, and show only where RC actually has a record id.</p>'
         : '<p class="perf-note">No base URL set, so no links appear anywhere — the ids are stored either way.</p>') +
+      '</section>';
+  }
+
+  /* ---------- shifts, as the workbook states them ----------
+     Settings used to show only the hand-maintained list, under a note saying
+     these "supplement what the PLX workbook already provides" -- with no way on
+     the page to see what the workbook provided. So the one question the tab
+     exists to answer, which shifts does this site run and for whom, could only
+     be answered by opening the workbook.
+
+     The Key is one row per (building, account, shift, job). Jobs are collapsed
+     into the shift they belong to, because "1517 · 1st · 32 Degrees" is the
+     thing a person means by a shift; the job titles on it are detail. */
+  function shiftKeyRows() {
+    var byMarket = ReqsCore.siteMarketIndex(state.stores.locations);
+    var onIt = {};
+    (state.stores.shifts || []).forEach(function (r) {
+      var acct = ShiftKey.resolveAccount(r.building, ShiftKey.accountNumOf(r.dept));
+      onIt[r.building + '|' + acct + '|' + r.shift] = (onIt[r.building + '|' + acct + '|' + r.shift] || 0) + 1;
+      // Also counted without the account, for a site whose dept codes are blank.
+      onIt[r.building + '||' + r.shift] = (onIt[r.building + '||' + r.shift] || 0) + 1;
+    });
+    var groups = {};
+    (state.stores.shiftKey || []).forEach(function (r) {
+      var key = r.building + '|' + (r.accountNum || '') + '|' + r.shift;
+      var g = groups[key] || (groups[key] = {
+        key: key, building: r.building, shift: r.shift,
+        account: r.account || '', accountNum: r.accountNum || '',
+        market: byMarket.get(String(r.building)) || '',
+        hours: [], jobs: [], supervisors: [], beelineShift: r.beelineShift || '',
+        onIt: onIt[r.building + '|' + (r.accountNum || '') + '|' + r.shift] ||
+              onIt[r.building + '||' + r.shift] || 0
+      });
+      if (r.hours && g.hours.indexOf(r.hours) === -1) g.hours.push(r.hours);
+      if (r.job && g.jobs.indexOf(r.job) === -1) g.jobs.push(r.job);
+      if (r.supervisor && g.supervisors.indexOf(r.supervisor) === -1) g.supervisors.push(r.supervisor);
+    });
+    return Object.keys(groups).map(function (k) { return groups[k]; })
+      .filter(function (g) {
+        /* A building the Locations list does not place stays visible on "All
+           markets" but cannot be claimed by one -- the alternative is a shift
+           that exists in the workbook and appears on no screen anywhere. */
+        return state.market === 'all' || g.market === state.market;
+      })
+      .sort(function (a, b) {
+        return String(a.building).localeCompare(String(b.building)) ||
+          String(a.account).localeCompare(String(b.account)) ||
+          String(a.shift).localeCompare(String(b.shift));
+      });
+  }
+
+  function shiftKeyPanel() {
+    var rows = shiftKeyRows();
+    var total = (state.stores.shiftKey || []).length;
+    return '<section class="suite-panel"><div class="suite-panel-head">' +
+      '<h2>Shifts in the PLX workbook</h2>' +
+      (mayImport() ? '<div class="suite-actions"><label class="suite-btn cov-pick' +
+        (total ? '' : ' primary') + '">Import PLX workbook' +
+        '<input type="file" accept=".xlsx,.xls" data-shift-book aria-label="Import PLX workbook"></label></div>' : '') +
+      '</div>' +
+      '<p class="perf-note">Straight off the workbook: the <b>Geodis Key</b> tab says which shifts each ' +
+      'building runs and for which client account, and the <b>site HC</b> tabs say who is on each one. ' +
+      'This is a read of the workbook — correct it there, then import again.</p>' +
+      (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
+        '<th>Site</th><th>Account</th><th>Shift</th><th>Hours</th><th>Job titles</th><th>On it</th>' +
+        '</tr></thead><tbody>' +
+        rows.slice(0, MAX_ROWS).map(function (g) {
+          var name = siteName(g.building);
+          return '<tr><td><div class="name">' + esc(g.building) + '</div>' +
+            (name || g.market ? '<div class="sub">' + esc(name || g.market) + '</div>' : '') + '</td>' +
+            '<td>' + (g.account ? '<div class="name">' + esc(g.account) + '</div>' +
+                (g.accountNum ? '<div class="sub">' + esc(g.accountNum) + '</div>' : '')
+              : '<span class="sub">&mdash;</span>') + '</td>' +
+            '<td><div class="name">' + esc(g.shift) + '</div>' +
+            (g.beelineShift && g.beelineShift !== g.shift
+              ? '<div class="sub">Beeline: ' + esc(g.beelineShift) + '</div>' : '') + '</td>' +
+            /* More than one set of hours is the ambiguity coverage already
+               reports -- named here rather than silently showing the first,
+               because this is the page where somebody can go and fix it. */
+            '<td>' + (g.hours.length === 1 ? esc(g.hours[0])
+              : g.hours.length ? '<span class="warn-text">' + esc(g.hours.join(' / ')) +
+                  '</span><div class="sub warn-text">more than one set of hours</div>'
+              : '<span class="warn-text">Not stated in the Key</span>') + '</td>' +
+            '<td class="detail-cell">' + (g.jobs.length
+              ? '<div class="sub">' + esc(g.jobs.join(', ')) + '</div>'
+              : '<span class="sub">&mdash;</span>') + '</td>' +
+            '<td>' + (g.onIt || '<span class="sub">0</span>') + '</td></tr>';
+        }).join('') + '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length)
+        : empty(total ? 'No workbook shifts in this market'
+            : 'The workbook has not been imported yet',
+          total ? 'Choose another market, or check the site is on the Locations list.'
+            : 'Import the PLX workbook to read the Geodis Key and the site HC tabs.')) +
       '</section>';
   }
 
@@ -5301,7 +5511,48 @@
       feedbackToast() + '<div class="suite-live" aria-live="polite" aria-atomic="true">' + esc(state.shell.announcement) + '</div>';
     if (state.view === 'reconciliation') mountRecon();
     enhanceRenderedUi();
+    publishPendingEnds();
     syncRoute(true);
+  }
+
+  /* ---------- telling the reconciliation what is already in hand ----------
+     The reconciliation is a crosscheck of two overnight exports, so it only
+     ever knows what those two systems knew this morning. An assignment somebody
+     decided to end TODAY is invisible to it until the task is worked, RC is
+     updated and tomorrow's export lands -- which is a whole day of the tool
+     telling a supervisor to end somebody who is already on the list to be
+     ended, and a whole day of somebody doing it a second time.
+
+     The open task is the missing evidence, and the suite is the only side that
+     holds it. It is published rather than injected, the same way the roster
+     travels the other way, so neither script has to know how the other stores
+     anything. Only the badges matter -- the reconciliation shows a flag, never
+     the task itself, which stays owned by the Tasks page.
+
+     Dispatched only when the set actually changes: render() runs on every
+     keystroke in a filter box, and a re-render of the reconciliation table
+     behind an unchanged flag list is work nobody asked for. */
+  var lastPendingEnds = null;
+  function publishPendingEnds() {
+    if (!state.storesLoaded) return;
+    var pending = {};
+    (state.stores.tasks || []).map(TasksCore.normalize).forEach(function (t) {
+      if (t.kind !== 'terminate' || !t.badge || !TasksCore.isOpen(t)) return;
+      var badge = SuiteData.normBadge(t.badge);
+      // The oldest open one wins: if the same assignment was raised twice, the
+      // first is the one whose age says how long this has been waiting.
+      if (pending[badge] && String(pending[badge].raisedAt || '') <= String(t.createdAt || '')) return;
+      pending[badge] = {
+        raisedAt: t.createdAt || '',
+        status: TasksCore.pipeline.statusMeta(t.status).label,
+        assignee: t.assignee || '',
+        due: t.due || ''
+      };
+    });
+    var signature = JSON.stringify(pending);
+    if (signature === lastPendingEnds) return;
+    lastPendingEnds = signature;
+    document.dispatchEvent(new CustomEvent('geodis:pending-ends', { detail: { pendingEnds: pending } }));
   }
   function syncRoute(replace) {
     if (!history || !history.pushState) return;

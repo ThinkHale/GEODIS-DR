@@ -7,11 +7,21 @@ let pass = 0, fail = 0;
 const t = (n, c) => { if (c) pass++; else { fail++; console.log('  FAIL: ' + n); } };
 
 console.log('— the discrepancy pipeline —');
-t('six statuses', P.pipeline.STATUS_KEYS.length === 6);
+t('seven statuses', P.pipeline.STATUS_KEYS.length === 7);
 t('starts at Received', P.pipeline.DEFAULT_STATUS === 'Received');
 t('Corrected is the resolved state', P.pipeline.isResolved('Corrected'));
 t('handed to payroll is NOT resolved yet', !P.pipeline.isResolved('Submitted to Payroll'));
 t('and still needs action', P.pipeline.needsAction('Submitted to Payroll'));
+/* A correction that has been sent but not yet checked against Beeline. It
+   feels finished, which is exactly why it must keep counting as open work --
+   an hour that never reached Beeline correctly cannot be invoiced. */
+t('Pending Billing sits between the hand-off and the fix',
+  P.pipeline.STATUS_KEYS.indexOf('Pending Billing') === P.pipeline.STATUS_KEYS.indexOf('Submitted to Payroll') + 1 &&
+  P.pipeline.STATUS_KEYS.indexOf('Pending Billing') < P.pipeline.STATUS_KEYS.indexOf('Corrected'));
+t('it is not treated as resolved', !P.pipeline.isResolved('Pending Billing'));
+t('and still needs action', P.pipeline.needsAction('Pending Billing'));
+t('it reads as its own thing, not as Corrected',
+  P.pipeline.statusMeta('Pending Billing').label === 'Pending billing');
 t('Researching needs action', P.pipeline.needsAction('Researching'));
 t('Corrected does not', !P.pipeline.needsAction('Corrected'));
 t('No adjustment needed is finished', !P.pipeline.needsAction('No Adjustment Needed'));

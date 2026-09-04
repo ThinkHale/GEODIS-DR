@@ -31,6 +31,7 @@
     users: 'users',
     locations: 'locations',
     shiftTypes: 'shiftTypes',
+    shiftKey: 'shiftKey',
     appConfig: 'appConfig',
     timeclockLinks: 'timeclockLinks',
     tasks: 'tasks',
@@ -123,6 +124,8 @@
       transitionAssociate: false, transitionPtoInitial: 0, transitionPtoBalance: 0,
       shift: '', shiftBuilding: '', shiftHours: '', shiftSource: '',
       phone: '', phoneSource: '', phoneUpdatedAt: '',
+      // The number as the RC assignment export wrote it, before validation.
+      rcPhone: '',
       /* The WFM id, "80-JALCAL5986". Note this is NOT empNumber: the PLX
          workbook heads its column "EID", but that column is the timeclock id,
          while the EID the team searches by is RC's Legacy Contact ID, which
@@ -165,6 +168,10 @@
       p.beeStart = r.beeStart || null;
       p.endDate = r.endDate || null;
       p.endReason = r.endReason || '';
+      /* Off the RC assignment row. Kept raw and unjudged here -- whether it is a
+         dialable number is decided below, by the one function that decides that
+         for every source. */
+      p.rcPhone = r.phone || '';
       byBadge.set(badge, p);
     });
 
@@ -326,10 +333,31 @@
       p.score = scoreOf(p);
       p.note = notes[p.badge] ? notes[p.badge].note : '';
       /* The phone number, by whichever key reaches it. Injected like the shift
-         lookup so this file need not know how numbers are matched. */
-      if (stores.phoneOf) {
-        var ph = stores.phoneOf(p);
-        if (ph) { p.phone = ph.phone || ''; p.phoneSource = ph.source || ''; p.phoneUpdatedAt = ph.updatedAt || ''; }
+         lookup so this file need not know how numbers are matched.
+
+         Two sources can answer, and they are not equally trustworthy:
+
+           A stored contact record found BY BADGE is somebody's deliberate
+           answer about one known person -- typed in, or harvested and then
+           linked -- so it wins outright.
+
+           RC comes next. It is keyed by badge by construction, which makes it
+           stronger than the last case even though nobody here chose it.
+
+           A stored record reached only by EID or name is last. Two people share
+           a name often enough that it is the weakest join in the tool, and
+           ringing the wrong person is the failure worth avoiding.
+
+         RC is read through the same validator as everything else, so a blank,
+         a placeholder or a truncated column yields no number rather than a
+         number that reaches nobody. */
+      var stored = stores.phoneOf ? stores.phoneOf(p) : null;
+      var storedByBadge = stored && normBadge(stored.badge) === p.badge;
+      var rc = stores.phoneNormalize ? stores.phoneNormalize(p.rcPhone) : '';
+      if (stored && (storedByBadge || !rc)) {
+        p.phone = stored.phone || ''; p.phoneSource = stored.source || ''; p.phoneUpdatedAt = stored.updatedAt || '';
+      } else if (rc) {
+        p.phone = rc; p.phoneSource = 'RC assignment'; p.phoneUpdatedAt = '';
       }
       /* Candidates in confidence order: rosterKey()'s own answer first, so a
          person who matches today matches by exactly the route they take now.
@@ -745,7 +773,7 @@
   function loadAll() {
     return Promise.all(['attendance', 'timeoff', 'requisitions', 'performance', 'shifts',
       'discrepancies', 'associatePto', 'locations', 'appConfig', 'timeclockLinks', 'tasks',
-      'contacts', 'reqCandidates']
+      'contacts', 'reqCandidates', 'shiftKey']
       .map(function (n) { return loadCollection(n); }))
       .then(function (r) {
         return {
@@ -754,7 +782,11 @@
           // Loaded for everyone, not just admins: it supplies the default account
           // name for sites the Key does not spell out.
           locations: r[7], appConfig: r[8], timeclockLinks: r[9], tasks: r[10], contacts: r[11],
-          reqCandidates: r[12]
+          reqCandidates: r[12],
+          /* Loaded for everyone rather than with the admin lists: it is the
+             vocabulary the shift picker offers, which every editor reaches,
+             not just an administrator opening Settings. */
+          shiftKey: r[13]
         };
       });
   }

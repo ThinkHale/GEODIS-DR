@@ -411,20 +411,35 @@
   /* The transition workbook and the live IL tracker overlap historically. The
      tracker may carry no badge when its EID is from a former assignment, so id
      and badge dedupe cannot see that "Olmes Molina · 2026-08-21" is one request.
-     A completed processed-tracker row is the newer authoritative outcome and
-     suppresses the older in-flight transition copy for the same name and day. */
-  function suppressCompletedTrackerDuplicates(stores) {
+     A settled tracker row is the newer authoritative outcome and suppresses the
+     older in-flight transition copy for the same name and day.
+
+     "Settled" is the pipeline's own needsAction, not the single status
+     'Completed' this used to test for. A request the tracker has handed to
+     payroll is settled as far as this tool is concerned -- it sits on a working
+     tab waiting for payroll to run, and nothing here moves it. Testing only for
+     'Completed' left the older copy alive for the whole time a request sat at
+     "Submitted to Payroll", and that copy is usually still at "Received" --
+     which is what kept raising a task for a request nobody could act on. The
+     tracker row itself is untouched: it stays "Submitted to Payroll" until it
+     appears on the processed tab, because that is what is true. */
+  function suppressSettledTrackerDuplicates(stores) {
     var rows = stores.timeOff || [];
-    var completed = {};
-    rows.forEach(function (r) {
-      if (r.source !== PTO_TRACKER_SOURCE || TimeOffCore.normalizeStatus(r.status) !== 'Completed') return;
+    var settled = {};
+    var dayKey = function (r) {
       var name = String(r.name || '').trim().toLowerCase().replace(/\s+/g, ' ');
-      if (name && r.start) completed[name + '|' + r.start + '|' + String(r.end || r.start)] = true;
+      if (!name || !r.start) return '';
+      return name + '|' + r.start + '|' + String(r.end || r.start);
+    };
+    rows.forEach(function (r) {
+      if (r.source !== PTO_TRACKER_SOURCE || TimeOffCore.needsAction(r.status)) return;
+      var k = dayKey(r);
+      if (k) settled[k] = true;
     });
     stores.timeOff = rows.filter(function (r) {
       if (r.source !== 'Geodis Chicago PTO Payroll Tracker.xlsx') return true;
       var name = String(r.name || '').trim().toLowerCase().replace(/\s+/g, ' ');
-      return !completed[name + '|' + String(r.start || '') + '|' + String(r.end || r.start || '')];
+      return !settled[name + '|' + String(r.start || '') + '|' + String(r.end || r.start || '')];
     });
   }
 
@@ -880,12 +895,22 @@
         if (!hc.people.length) {
           throw new Error('No "<site> - HC" tabs with an "Employee  Name" column were found.');
         }
-        var records = ShiftKey.toShiftRecords(hc, key);
+        /* Hours somebody supplied by hand outlive the import that had none.
+           The Key is re-read every time; an override is a decision about a gap
+           in it, and re-importing must not silently undo it. */
+        var overrides = ShiftKey.overrideIndex(state.stores.shiftKey);
+        var records = ShiftKey.toShiftRecords(hc, key, overrides);
         var warnings = (key ? key.warnings : ['No "Geodis Key" tab was found, so shift hours are unknown.'])
           .concat(hc.warnings)
           .concat(ShiftKey.validateAgainstKey(hc, key));
 
-        var keyRecords = ShiftKey.toKeyRecords(key);
+        var keyRecords = ShiftKey.toKeyRecords(key).map(function (r) {
+          var manual = ShiftKey.overrideFor(overrides, r.building, r.shift, r.accountNum);
+          if (!manual) return r;
+          var prior = (state.stores.shiftKey || []).filter(function (x) { return x.id === r.id; })[0] || {};
+          return Object.assign({}, r, { hoursOverride: manual,
+            hoursSetBy: prior.hoursSetBy || '', hoursSetAt: prior.hoursSetAt || '' });
+        });
 
         state.shiftKey = key;
         state.shiftImport = { headline: 'Reading ' + records.length + ' shift tags…', warnings: [] };
@@ -4356,9 +4381,17 @@
         account: r.account || '', accountNum: r.accountNum || '',
         market: byMarket.get(String(r.building)) || '',
         hours: [], jobs: [], supervisors: [], beelineShift: r.beelineShift || '',
+        // Every Key row behind this one shift, so an hours edit reaches them all.
+        ids: [], override: '', overrideBy: '', overrideAt: '',
         onIt: onIt[r.building + '|' + (r.accountNum || '') + '|' + r.shift] ||
               onIt[r.building + '||' + r.shift] || 0
       });
+      if (r.id) g.ids.push(r.id);
+      if (r.hoursOverride && !g.override) {
+        g.override = r.hoursOverride;
+        g.overrideBy = r.hoursSetBy || '';
+        g.overrideAt = r.hoursSetAt || '';
+      }
       if (r.hours && g.hours.indexOf(r.hours) === -1) g.hours.push(r.hours);
       if (r.job && g.jobs.indexOf(r.job) === -1) g.jobs.push(r.job);
       if (r.supervisor && g.supervisors.indexOf(r.supervisor) === -1) g.supervisors.push(r.supervisor);
@@ -4375,6 +4408,119 @@
           String(a.account).localeCompare(String(b.account)) ||
           String(a.shift).localeCompare(String(b.shift));
       });
+  }
+
+  /* The hours for one shift, and the way to supply them. Three states worth
+     telling apart: the Key stated them, somebody supplied them because it did
+     not, and nobody has -- which is the one that silently drops people out of
+     coverage, so it is the one that shouts. */
+  function shiftHoursCell(g) {
+    var edit = mayAdmin()
+      ? '<button class="suite-btn tiny" data-shift-hours="' + esc(g.key) + '">' +
+        (g.override || g.hours.length ? 'Edit' : 'Add hours') + '</button>'
+      : '';
+    if (g.override) {
+      return '<div class="name">' + esc(g.override) + '</div>' +
+        '<div class="sub">Set here' +
+        (g.overrideBy ? ' by ' + esc(g.overrideBy) : '') +
+        (g.overrideAt ? ' · ' + esc(shortWhen(g.overrideAt)) : '') +
+        (g.hours.length ? ' · Key says ' + esc(g.hours.join(' / ')) : ' · not in the Key') +
+        '</div>' + edit;
+    }
+    if (g.hours.length === 1) return esc(g.hours[0]) + ' ' + edit;
+    if (g.hours.length) {
+      return '<span class="warn-text">' + esc(g.hours.join(' / ')) + '</span>' +
+        '<div class="sub warn-text">more than one set of hours</div>' + edit;
+    }
+    return '<span class="warn-text">Not stated in the Key</span>' +
+      '<div class="sub warn-text">nobody on this shift can be scheduled</div>' + edit;
+  }
+
+  /* Supplying hours the Key does not give. Validated with the Key's own parser,
+     so what is typed here has to be something the scheduler can actually read --
+     storing "days" or "6-2" would put the shift right back where it started,
+     except now it would look answered. */
+  function shiftHoursModal(groupKey) {
+    var g = shiftKeyRows().filter(function (x) { return x.key === groupKey; })[0];
+    if (!g) return;
+    var current = g.override || (g.hours.length === 1 ? g.hours[0] : '');
+    document.body.insertAdjacentHTML('beforeend',
+      '<div class="suite-modal-backdrop" id="suite-modal"><div class="suite-modal">' +
+      '<div class="suite-modal-head"><h3 id="suite-modal-title">Hours for ' +
+      esc(g.shift) + ' at ' + esc(g.building) + '</h3>' +
+      '<button type="button" class="suite-btn" data-close aria-label="Close dialog">&times;</button></div>' +
+      '<form class="suite-form" data-shift-hours-form="' + esc(groupKey) + '">' +
+      '<p class="perf-note full">' +
+      (g.account ? '<b>' + esc(g.account) + '</b> at site ' + esc(g.building) + '. ' : '') +
+      (g.hours.length ? 'The Geodis Key says <b>' + esc(g.hours.join(' / ')) + '</b>. '
+        : 'The Geodis Key gives no hours for this shift, so nobody on it can be scheduled. ') +
+      'The real fix is in the workbook — this stands in until it is made there, and survives ' +
+      'the next import.</p>' +
+      '<label class="suite-field"><span>Hours</span>' +
+      '<input class="suite-input" name="hours" value="' + esc(current) +
+      '" placeholder="6am-2:30pm Mon-Fri" autofocus></label>' +
+      '<p class="perf-note full">Written the way the Key writes them: a start, an end, and the ' +
+      'days — <b>6am-2:30pm Mon-Fri</b>, <b>3:30pm-12am Mon-Thurs</b>. Leave it empty to go back ' +
+      'to what the Key says.</p>' +
+      '<div class="suite-modal-actions"><button type="button" class="suite-btn" data-close>Cancel</button>' +
+      '<button class="suite-btn primary">Save hours</button></div></form></div></div>');
+    activateDialog('[name="hours"]');
+  }
+
+  /* One edit, two writes. The Key record is where the override LIVES, so it
+     survives a re-import; the per-associate shift tags are what the schedule is
+     actually built from (see scheduleFromShifts), so leaving them alone would
+     make this a cosmetic change to a page nobody schedules from. */
+  function saveShiftHours(groupKey, raw) {
+    var g = shiftKeyRows().filter(function (x) { return x.key === groupKey; })[0];
+    if (!g) return Promise.resolve(false);
+    if (!guard('admin', 'change shift hours')) return Promise.resolve(false);
+    var next = String(raw || '').trim();
+    /* Exactly the test the scheduler applies -- see scheduleFromShifts(), which
+       treats a window with no start as no window at all. parseKeySchedule()
+       keeps the raw text and returns `start: null` rather than failing, so a
+       truthiness check here would accept "mornings-ish", store it, and leave
+       the shift as unschedulable as before while looking answered. */
+    var win = next ? ShiftKey.parseKeySchedule(next) : null;
+    if (next && (!win || win.start == null)) {
+      alert('Those hours could not be read.\n\nWrite them the way the Key does — a start, an ' +
+        'end and the days, like "6am-2:30pm Mon-Fri". Anything the scheduler cannot read would ' +
+        'leave this shift exactly as it is now.');
+      return Promise.resolve(false);
+    }
+    var now = new Date().toISOString();
+    var who = (account() && (account().name || account().email)) || '';
+    var keyRows = (state.stores.shiftKey || []).map(function (r) {
+      if (g.ids.indexOf(r.id) === -1) return r;
+      return Object.assign({}, r, {
+        hoursOverride: next,
+        hoursSetBy: next ? who : '',
+        hoursSetAt: next ? now : ''
+      });
+    });
+    // What the schedule reads. Only the tags this shift actually covers.
+    var effective = next || (g.hours.length === 1 ? g.hours[0] : '');
+    var shiftRows = (state.stores.shifts || []).map(function (r) {
+      if (r.building !== g.building || r.shift !== g.shift) return r;
+      var acct = ShiftKey.resolveAccount(r.building, ShiftKey.accountNumOf(r.dept));
+      if (g.accountNum && acct && acct !== g.accountNum) return r;
+      return Object.assign({}, r, { hours: effective });
+    });
+    state.shell.announcement = 'Saving hours.';
+    return SuiteData.replaceCollection('shiftKey', keyRows).then(function () {
+      state.stores.shiftKey = keyRows;
+      return SuiteData.replaceCollection('shifts', shiftRows);
+    }).then(function () {
+      state.stores.shifts = shiftRows;
+      rebuild();
+      state.shell.announcement = next ? 'Hours saved.' : 'Hours cleared.';
+      closeDialog();
+      render();
+      return true;
+    }).catch(function (err) {
+      alert('Those hours could not be saved.\n\n' + err.message);
+      return false;
+    });
   }
 
   function shiftKeyPanel() {
@@ -4405,10 +4551,7 @@
             /* More than one set of hours is the ambiguity coverage already
                reports -- named here rather than silently showing the first,
                because this is the page where somebody can go and fix it. */
-            '<td>' + (g.hours.length === 1 ? esc(g.hours[0])
-              : g.hours.length ? '<span class="warn-text">' + esc(g.hours.join(' / ')) +
-                  '</span><div class="sub warn-text">more than one set of hours</div>'
-              : '<span class="warn-text">Not stated in the Key</span>') + '</td>' +
+            '<td>' + shiftHoursCell(g) + '</td>' +
             '<td class="detail-cell">' + (g.jobs.length
               ? '<div class="sub">' + esc(g.jobs.join(', ')) + '</div>'
               : '<span class="sub">&mdash;</span>') + '</td>' +
@@ -6214,6 +6357,11 @@
       else SuiteAuth.signIn(email, pw);
       return;
     }
+    var hoursBtn = e.target.closest('[data-shift-hours]');
+    if (hoursBtn) {
+      shiftHoursModal(hoursBtn.dataset.shiftHours);
+      return;
+    }
     var addTo = e.target.closest('[data-list-add]');
     if (addTo) {
       listDraftModal(addTo.dataset.listAdd, '');
@@ -6987,6 +7135,13 @@
       }).catch(function (err) { alert('The settings could not be saved.\n\n' + err.message); });
       return;
     }
+    var hoursForm = e.target.closest('[data-shift-hours-form]');
+    if (hoursForm) {
+      e.preventDefault();
+      saveShiftHours(hoursForm.dataset.shiftHoursForm,
+        new FormData(hoursForm).get('hours'));
+      return;
+    }
     var adminListForm = e.target.closest('[data-admin-list-form]');
     if (adminListForm) {
       e.preventDefault();
@@ -7150,7 +7305,7 @@
     state.stores = stores;
     state.stores.dismissedTimeOff = (state.stores.timeOff || []).filter(function (r) { return r.dismissed; });
     state.stores.timeOff = (state.stores.timeOff || []).filter(function (r) { return !r.dismissed; });
-    suppressCompletedTrackerDuplicates(state.stores);
+    suppressSettledTrackerDuplicates(state.stores);
     promoteLegacyPtoTasks(state.stores);
     state.storesLoaded = true;
     var dom = (stores.appConfig || []).filter(function (r) { return r.key === 'allowedDomains'; })[0];

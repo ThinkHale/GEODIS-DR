@@ -17,7 +17,8 @@ const ago = h => new Date(Date.now() - h * 3600000).toISOString();
 
 const records = [
   { badge: 'b1', person: 'Ann Reed', action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago', crmStart: '1/2/2026' },
-  { badge: 'b2', person: 'Ben Ortiz', action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago', crmStart: '1/3/2026' }
+  { badge: 'b2', person: 'Ben Ortiz', action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago', crmStart: '1/3/2026' },
+  { badge: 'b4', person: 'Pia Nunez', action: 'matched', actionLabel: 'Matched', reason: '', market: 'Chicago', crmStart: '1/4/2026' }
 ];
 // One waiting, one already approved. Only the first is work.
 const timeOff = [
@@ -27,6 +28,15 @@ const timeOff = [
   { id: 'TO3', badge: 'b3', name: 'Olmes Molina', type: 'PTO', start: '2026-09-10',
     status: 'Completed', source: 'IL Shared PTO Tracker', submittedAt: ago(60) },
   { id: 'TO-OLD-OLMES', badge: 'b3', name: 'Olmes Molina', type: 'PTO', start: '2026-09-10',
+    status: 'Received', source: 'Geodis Chicago PTO Payroll Tracker.xlsx', submittedAt: ago(90) },
+  /* The same overlap one step earlier in the pipeline. The tracker has handed
+     Pia's request to payroll -- it sits on a working tab until payroll runs,
+     and nothing in this tool moves it -- while the older transition copy is
+     still at Received. Suppression used to test for 'Completed' alone, so this
+     pair kept raising a task for a request nobody could act on. */
+  { id: 'TO-PIA', badge: 'b4', name: 'Pia Nunez', type: 'PTO', start: '2026-09-12',
+    status: 'Submitted to Payroll', source: 'IL Shared PTO Tracker', submittedAt: ago(60) },
+  { id: 'TO-OLD-PIA', badge: 'b4', name: 'Pia Nunez', type: 'PTO', start: '2026-09-12',
     status: 'Received', source: 'Geodis Chicago PTO Payroll Tracker.xlsx', submittedAt: ago(90) }
 ];
 const discrepancies = [
@@ -150,6 +160,11 @@ const upload = (kind, aoa, name) => {
     $$('tbody tr').some(r => r.textContent.indexOf('Eight hours missing') !== -1 &&
       r.querySelector('[data-open-source^="payroll|"]')));
   t('a legacy PTO task is no longer shown as a task', txt().indexOf('Olmes Molina') === -1);
+  /* Handed to payroll is out of this tool's hands. It must not sit in the queue
+     as work somebody can do, and it must NOT be forced to Completed to get out
+     of there -- it is completed when it reaches the processed tab, not before. */
+  t('a request already with payroll is not queued as work',
+    txt().indexOf('Pia Nunez') === -1);
   click($('[data-nav="timeoff"]'));
   const completedToggle = $('#timeoff-completed');
   completedToggle.checked = true;
@@ -158,6 +173,11 @@ const upload = (kind, aoa, name) => {
   t('and the completed PTO record remains authoritative in Time Off', !!olmesRow &&
     olmesRow.textContent.indexOf('Legacy PTO task') === -1 &&
     olmesRow.querySelector('[data-status]').value === 'Completed');
+  const piaRow = $$('tbody tr').find(r => r.textContent.indexOf('Pia Nunez') !== -1);
+  t('but it is still on Time Off, still saying it is with payroll', !!piaRow &&
+    piaRow.querySelector('[data-status]').value === 'Submitted to Payroll');
+  t('and only the one record survives, not the stale duplicate',
+    $$('tbody tr').filter(r => r.textContent.indexOf('Pia Nunez') !== -1).length === 1);
   click($('[data-nav="tasks"]'));
 
   console.log('— escalation —');

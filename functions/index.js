@@ -169,8 +169,13 @@ const COLLECTIONS = {
      shift with nobody on it today is still a shift the site runs. Keyed by
      building + account + shift + job -- see toKeyRecords() in shift-key.js. */
   shiftKey:     { path: 'shifts/key.json',               responseKey: 'shiftKey',
+                  /* `hours` is what the Key states; `hoursOverride` is what
+                     somebody supplied because it stated nothing (or stated it
+                     wrongly). Kept apart so a re-import can refresh the first
+                     without discarding the second. */
                   fields: { building: 'str', shift: 'str', account: 'str', accountNum: 'str',
                             job: 'str', beelineShift: 'str', hours: 'str', supervisor: 'str',
+                            hoursOverride: 'str', hoursSetBy: 'str', hoursSetAt: 'str',
                             source: 'str' } },
   performance:  { path: 'performance/metrics.json',      responseKey: 'performance',
                   fields: { badge: 'str', period: 'str', quality: 'num', productivity: 'num', safety: 'num',

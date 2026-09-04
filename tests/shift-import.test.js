@@ -17,7 +17,11 @@ const records = [
 const keyAoa = [
   ['CHI', '', '', '', '', '', '', 'Building', 'Job Title', 'Account Name', 'Account Num', 'Beeline Shift', 'Shift', 'Schedule', 'Rate', 'Supervisor'],
   ['', '', '', '', '', '', '', '1502', 'OPR2', 'REDBULL', '67510', '1', '1st', '6am-2:30pm Mon-Fri', '$19', 'P, C'],
-  ['', '', '', '', '', '', '', '1502', 'MATH1', 'CCM', '18845', '4', '2nd', '3pm-11:30pm Mon-Fri', '$19', 'S, M']
+  ['', '', '', '', '', '', '', '1502', 'MATH1', 'CCM', '18845', '4', '2nd', '3pm-11:30pm Mon-Fri', '$19', 'S, M'],
+  /* A shift the Key lists but gives no hours for. Nobody on it can be
+     scheduled, so they drop out of coverage entirely rather than reading as
+     absent -- the quiet kind of missing this edit exists to fix. */
+  ['', '', '', '', '', '', '', '1502', 'PACK1', 'LEGO', '19001', '2', '3rd', '', '$19', 'T, R']
 ];
 const hcAoa = [
   ['PLX - 1ST SHIFT HEADCOUNT', '', '', '', '', '', '', '', 'Expected', 'Onsite', 'Short', '', 'PLX - 2ND SHIFT HEADCOUNT'],
@@ -176,7 +180,7 @@ const shiftCellFor = name => {
   console.log('— the Geodis Key is kept, not just read —');
   const keyPost = posts.filter(p => p.url && p.url.indexOf('shiftKey=1') !== -1).pop();
   t('the Key is stored too', !!keyPost && Array.isArray(keyPost.body.records));
-  t('one record per row of the Key', keyPost.body.records.length === 2);
+  t('one record per row of the Key', keyPost.body.records.length === 3);
   const redbull = keyPost.body.records.find(r => r.account === 'REDBULL');
   t('with the account it belongs to', !!redbull && redbull.accountNum === '67510');
   t('the building it runs at', redbull.building === '1502');
@@ -208,6 +212,56 @@ const shiftCellFor = name => {
   t('and how many associates are on it', lastCell(rowText('REDBULL')) === '1');
   t('the hand-maintained list is still offered beneath it',
     d.body.textContent.indexOf('Add here only') !== -1);
+
+  console.log('— hours the Key does not give —');
+  // The previous section left a shift dialog open; a second #suite-modal would
+  // make every query below read the stale one.
+  $$('#suite-modal [data-close]').forEach(click);
+  await settle(40);
+  const gapRow = () => Array.from(
+    $$('.suite-table').filter(x => /Job titles/.test(x.querySelector('thead').textContent))[0]
+      .querySelectorAll('tbody tr')).filter(r => r.textContent.indexOf('LEGO') !== -1)[0];
+  t('the gap is named, not left blank', /Not stated in the Key/.test(gapRow().textContent));
+  t('and says what it costs', /nobody on this shift can be scheduled/.test(gapRow().textContent));
+  const addBtn = gapRow().querySelector('[data-shift-hours]');
+  t('with a way to supply them', !!addBtn && /Add hours/.test(addBtn.textContent));
+
+  click(addBtn);
+  const hoursForm = $('[data-shift-hours-form]');
+  t('a dialog opens', !!hoursForm);
+  t('naming the account it is for', /LEGO/.test($('#suite-modal').textContent));
+  t('and saying the workbook is the real fix', /fix is in the workbook/.test($('#suite-modal').textContent));
+
+  /* Validated with the Key's own parser. Storing something the scheduler cannot
+     read would leave the shift exactly as broken, but now looking answered. */
+  const postsBefore = posts.filter(p => p.url && p.url.indexOf('shiftKey=1') !== -1).length;
+  hoursForm.querySelector('[name="hours"]').value = 'mornings-ish';
+  hoursForm.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(60);
+  t('unreadable hours are refused',
+    posts.filter(p => p.url && p.url.indexOf('shiftKey=1') !== -1).length === postsBefore);
+  t('and say why', posts.some(p => p.alert && /could not be read/.test(p.alert)));
+
+  $('[data-shift-hours-form]').querySelector('[name="hours"]').value = '10pm-6:30am Mon-Fri';
+  $('[data-shift-hours-form]').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(80);
+  const keyWrite = posts.filter(p => p.url && p.url.indexOf('shiftKey=1') !== -1).pop();
+  const saved = keyWrite.body.records.find(r => r.account === 'LEGO');
+  t('the hours are stored on the Key record', saved.hoursOverride === '10pm-6:30am Mon-Fri');
+  t('beside what the Key itself said, not over it', saved.hours === '');
+  t('and attributed', !!saved.hoursSetBy && !!saved.hoursSetAt);
+  t('the row now shows them', /10pm-6:30am Mon-Fri/.test(gapRow().textContent));
+  t('and marks them as supplied here', /Set here/.test(gapRow().textContent));
+
+  console.log('— and they survive the next import —');
+  const input2 = $$('[data-shift-book]')[0];
+  Object.defineProperty(input2, 'files', { value: [new w.File([new Uint8Array([1])], 'PLX.xlsx')], configurable: true });
+  input2.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(120);
+  const reKey = posts.filter(p => p.url && p.url.indexOf('shiftKey=1') !== -1).pop();
+  const reSaved = reKey.body.records.find(r => r.account === 'LEGO');
+  t('a re-import does not undo them', reSaved.hoursOverride === '10pm-6:30am Mon-Fri');
+  t('while the Key half is still re-read', reSaved.hours === '');
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

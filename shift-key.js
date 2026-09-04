@@ -493,10 +493,47 @@
     return key.accounts[building + '|' + num.trim()] || '';
   }
 
-  function toShiftRecords(headcount, key) {
+  /* ---------- hours somebody supplied by hand ----------
+     The Key does not state hours for every shift it lists -- a new lane, a
+     client whose row was never filled in -- and an associate on a shift with no
+     hours cannot be scheduled at all. They fall out of coverage entirely rather
+     than reading as absent, which is the quiet kind of missing.
+
+     The fix belongs in the workbook, and this does not pretend otherwise: it is
+     stored as `hoursOverride`, beside the Key's own `hours`, so a re-import
+     refreshes what the Key says without touching what a person supplied, and
+     the two can always be told apart. An override wins where both exist,
+     because somebody chose it on purpose. */
+  function effectiveHours(rec) {
+    if (!rec) return '';
+    return String(rec.hoursOverride || rec.hours || '');
+  }
+  /* 'building|accountNum|shift' -> the hours to use. Built from the stored Key
+     records so an import can apply overrides that were set after the last one. */
+  function overrideIndex(keyRecords) {
+    var out = {};
+    (keyRecords || []).forEach(function (r) {
+      if (!r || !r.hoursOverride || !r.building || !r.shift) return;
+      out[r.building + '|' + (r.accountNum || '') + '|' + r.shift] = String(r.hoursOverride);
+      // Also without the account, so a site whose dept codes are blank still
+      // picks the override up.
+      out[r.building + '||' + r.shift] = String(r.hoursOverride);
+    });
+    return out;
+  }
+  function overrideFor(overrides, building, shift, accountNum) {
+    if (!overrides) return '';
+    return overrides[building + '|' + (accountNum || '') + '|' + shift] ||
+      overrides[building + '||' + shift] || '';
+  }
+
+  function toShiftRecords(headcount, key, overrides) {
     return headcount.people.map(function (p) {
       var acct = resolveAccount(p.building, accountNumOf(p.dept));
       var w = windowFor(key, p.building, p.shift, acct);
+      // A hand-supplied window beats the Key's, and stands in where the Key has
+      // nothing -- otherwise this person is unschedulable for another week.
+      var manual = overrideFor(overrides, p.building, p.shift, acct);
       return {
         id: p.eid ? 'eid:' + p.eid : 'name:' + p.nameKey,
         eid: p.eid,
@@ -507,7 +544,7 @@
         dept: p.dept,
         // Denormalised so a profile can show the site and hours without the Key.
         account: accountOf(key, p.building, p.building + '-' + acct),
-        hours: w ? w.raw : '',
+        hours: manual || (w ? w.raw : ''),
         source: 'PLX workbook'
       };
     });
@@ -768,6 +805,9 @@
     parseShiftKey: parseShiftKey,
     parseHeadcount: parseHeadcount,
     toKeyRecords: toKeyRecords,
+    effectiveHours: effectiveHours,
+    overrideIndex: overrideIndex,
+    overrideFor: overrideFor,
     windowFor: windowFor,
     accountNumOf: accountNumOf,
     toShiftRecords: toShiftRecords,

@@ -86,7 +86,7 @@ body.suite-active>header,body.suite-active>main,body.suite-active>.foot{display:
 @media(max-width:1050px){.cov-sources{grid-template-columns:1fr}.cov-asof-note{margin-left:0;width:100%}}
 
 /* ---- coverage: documentation + saved schedule ---- */
-.cov-saved{font:600 11px Inter;color:var(--suite-green);margin-bottom:12px}.cov-saved.saving{color:var(--suite-muted)}
+.cov-saved{font:600 11px Inter;color:var(--suite-green);margin-bottom:12px}.cov-saved.saving{color:var(--suite-muted)}.cov-saved.held{color:var(--suite-amber)}
 .cov-doc{display:flex;flex-direction:column;gap:5px;min-width:190px}
 .cov-doc .suite-select,.cov-doc .suite-input{font-size:11.5px;padding:5px 7px}
 .cov-occ{align-self:flex-start;font:600 10px 'Barlow Semi Condensed';text-transform:uppercase;letter-spacing:.3px;color:var(--suite-amber)}

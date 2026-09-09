@@ -26,6 +26,7 @@ const SUITES = [
   { file: 'connect-flow.test.js', name: 'making a connection from Settings', dom: true },
   { file: 'coverage.test.js', name: 'schedule vs. on-premise coverage (schedule-core.js)', dom: false },
   { file: 'persistence.test.js', name: 'schedule + coverage persistence', dom: false },
+  { file: 'coverage-hold.test.js', name: 'a pull held until there is a schedule for it', dom: true },
   { file: 'sheet-export.test.js', name: 'GEODIS headcount spreadsheet export', dom: false },
   { file: 'shift-tags.test.js', name: 'shift tags from the PLX workbook', dom: false },
   { file: 'attendance-state.test.js', name: 'one attendance state per day + Present override', dom: false },

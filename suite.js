@@ -169,7 +169,7 @@
       exportOpen: false, exportShift: '1st', exportLoc: 'all',
       // Loaded back from Firebase: this week's stored plan and today's stored
       // checks. These are what make a schedule and an absence outlive the tab.
-      storedWeek: null, storedDay: null, saving: '', savedAt: '',
+      storedWeek: null, storedDay: null, saving: '', savedAt: '', pendingCheck: '',
       feedback: {},
       // Reviewing a check someone already uploaded, rather than the live compare.
       dates: [], reviewDate: '', reviewId: '', reviewDay: null
@@ -1569,9 +1569,19 @@
      not lives in Firebase: partitioned by week for the plan and by day for the
      checks. See DATA_MODEL.md. */
   function persistCheck(fileName) {
-    if (!state.coverage.capturedAt) return;
+    if (!state.coverage.capturedAt) return;   // the capture-time panel is already asking
     var res = buildCoverageResult();
-    if (!res) return;   // no schedule loaded yet; the check is saved once there is one
+    /* No schedule to compare against yet -- the stores may still be loading, or
+       the workbook may never have been imported, so there are no shift tags.
+       The pull itself is real and sitting in this browser, so it is HELD and
+       filed the moment a schedule exists. Returning quietly here is what made a
+       daily upload look like it had worked and stored nothing. */
+    if (!res) {
+      state.coverage.pendingCheck = fileName;
+      render();
+      return;
+    }
+    state.coverage.pendingCheck = '';
     var date = ScheduleCore.isoDate(coverageAsOf());
     var check = ScheduleCore.toCheck(res, { fileName: fileName });
     check.reportCapturedAt = state.coverage.capturedAt.toISOString();
@@ -1588,6 +1598,13 @@
     }).catch(function (err) { saveFailed('on-premise check', err); });
   }
 
+  /* The held pull, once a schedule turns up. Nobody has to drop the same file a
+     second time, and nothing has to notice that it worked. */
+  function flushPendingCheck() {
+    var pending = state.coverage.pendingCheck;
+    if (!pending || !state.coverage.presence || !activeSchedule()) return;
+    persistCheck(pending);
+  }
   function savedOk() {
     state.coverage.saving = '';
     state.coverage.savedAt = new Date().toLocaleTimeString();
@@ -1713,6 +1730,11 @@
        there is worse than any note. It stops naming Firebase, which tells the
        person at the keyboard nothing they can use. */
     if (c.saving) return '<div class="cov-saved saving">Saving ' + esc(c.saving) + '…</div>';
+    /* An upload nobody can compare yet is not a saved upload, and silence here
+       reads exactly like one. */
+    if (c.pendingCheck) return '<div class="cov-saved held">Holding ' + esc(c.pendingCheck) +
+      ' \u2014 it is not stored yet. The schedule comes from the PLX workbook; import it and ' +
+      'this pull files itself.</div>';
     if (c.savedAt) return '<div class="cov-saved">Saved and shared at ' + esc(c.savedAt) + '</div>';
     return '';
   }
@@ -6599,6 +6621,7 @@
       state.coverage.presenceFile = '';
       state.coverage.capturedAt = null;
       state.coverage.asOf = null;
+      state.coverage.pendingCheck = '';
       try { sessionStorage.removeItem(SCHED_CACHE); } catch (err) { /* nothing cached */ }
       render();
       return;
@@ -7323,6 +7346,7 @@
     var dom = (stores.appConfig || []).filter(function (r) { return r.key === 'allowedDomains'; })[0];
     AuthCore.setAllowedDomains(dom ? dom.value : '');
     rebuild();
+    flushPendingCheck();
     completeTasksFromSourceEvidence();
   }
   function loadEverything(force) {

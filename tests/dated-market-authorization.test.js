@@ -247,6 +247,30 @@ auth.as({ email: 'chi-admin@geodis.com', name: 'Chicago Admin', role: 'admin', e
   t('a new wholly authorized check is appended without removing the mixed check',
     response.code === 200 && json(coveragePath).checks.length === 2 &&
     json(coveragePath).checks.some(check => check.id === 'CK-MIXED'));
+  /* The whole point of storing rows[] is that it names everybody on the floor --
+     which means a site-wide export can essentially never be filed by a scoped
+     account. That refusal is correct, and it has to SAY so: "outside your
+     assigned markets" reads as one stray row and gets the same file retried
+     tomorrow. */
+  before = raw(coveragePath);
+  response = await call(handleCoverage, 'POST', { date: DAY }, { check: {
+    id: 'CK-FULL', asOf: DAY + 'T12:00:00',
+    exceptions: [{ key: 'b:C2', badge: 'C2', status: 'missing', location: chiPath }],
+    presentKeys: ['b:C1'],
+    rows: [{ key: 'b:C1', badge: 'C1', location: chiPath },
+           { key: 'b:S1', badge: 'S1', location: stlPath }]
+  } });
+  t('a site-wide report is refused for a scoped account, exceptions clean or not',
+    response.code === 403 && raw(coveragePath) === before);
+  t('the refusal says which way the report reaches',
+    /outside your markets/.test(response.body.error));
+  t('names the scope the account actually has',
+    /covers Chicago/.test(response.body.error));
+  t('and says who can file it instead',
+    /no market restriction/.test(response.body.error));
+  t('and that reading it back needs no upload',
+    /stored check/.test(response.body.error));
+
   before = raw(coveragePath);
   response = await call(handleCoverage, 'POST', { date: DAY }, { check: {
     id: 'CK-EMPTY', asOf: DAY + 'T11:00:00', exceptions: [], presentKeys: []

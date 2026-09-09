@@ -553,6 +553,32 @@ function denyMarketWrite(res) {
   res.status(403).json({ ok: false, forbidden: true,
     error: 'That record is outside your assigned markets or has no verified market.' });
 }
+
+/* Why a market-scoped account could not store this pull.
+
+   The generic refusal above is right about one stray record and wrong about a
+   whole report. The "On Premise - Simple" export names everybody on the floor,
+   so a scoped account can essentially never store one -- and a message that
+   sounds like a single bad row invites the same file again tomorrow. What is
+   actually happening is the access model working: you may not write what you
+   could not read back, and a check's counts cannot be split by market after the
+   fact. So say that, and say who CAN file it -- reading a pull somebody else
+   uploaded is already the supported path. */
+function denyCoverageWrite(res, actor, decision) {
+  const mine = (actor && Array.isArray(actor.markets) ? actor.markets : [])
+    .filter(Boolean).join(' and ');
+  const reason = decision && decision.reason;
+  const cause = reason === 'unassigned'
+    ? 'it names people the roster cannot place in any market'
+    : reason === 'conflicting-market'
+      ? 'it names people whose market is ambiguous'
+      : 'it reaches people outside your markets';
+  res.status(403).json({ ok: false, forbidden: true, scoped: true,
+    error: 'This pull cannot be stored by your account because ' + cause +
+      (mine ? ', and your account covers ' + mine : '') +
+      '. A site-wide On Premise export has to be filed by an account with no market ' +
+      'restriction. Once it is, your part of it is here as a stored check to review and document.' });
+}
 /* Does this request carry the shared secret the automations post with?
 
    It LOGS a refusal. Until now a flow posting with a stale or missing key was
@@ -1095,13 +1121,16 @@ async function handleCoverage(req, res) {
          write what you could not read back. */
       const incoming = MarketAccess.coverageCheckDecision(
         actor, Object.assign({}, check, { rows: fullRows }), marketContext);
-      if (!incoming.allowed) { denyMarketWrite(res); return; }
+      if (!incoming.allowed) { denyCoverageWrite(res, actor, incoming); return; }
       // A matching id owned partly or wholly by another market cannot be safely
       // replaced: its compact aggregate cannot be split after the fact. Reject
       // atomically, preserving the stored check byte-for-byte.
       if (i !== -1 && !MarketAccess.coverageCheckDecision(
         actor, doc.checks[i], marketContext).allowed) {
-        denyMarketWrite(res); return;
+        res.status(403).json({ ok: false, forbidden: true, scoped: true,
+          error: 'A pull with this id is already stored and part of it belongs to another ' +
+            'market. Its counts cannot be split after the fact, so it is left exactly as it is.' });
+        return;
       }
     }
     savedCheck = check;

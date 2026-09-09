@@ -1745,6 +1745,19 @@
       ' open orders · ' + ageLabel(sync.syncedAt);
   }
 
+  /* A market-scoped account cannot store a site-wide On Premise export: the
+     report names the whole floor, and the rule is that you may not write what
+     you could not read back. Said here, BEFORE the file is chosen -- the
+     refusal arrives after the upload and reads as a broken button. Reading a
+     pull somebody else filed is the supported path, and it needs no upload. */
+  function covScopeNote() {
+    var mk = (account() && account().markets) || [];
+    if (!mk.length || !mayImport()) return '';
+    return '<p class="perf-note warn-text">Your account covers ' + esc(mk.join(' and ')) +
+      '. A site-wide On Premise export names the whole floor, so filing one takes an account ' +
+      'with no market restriction. Once somebody files it, your part of it is here as a stored ' +
+      'check you can review and document \u2014 no upload needed.</p>';
+  }
   function covSources() {
     var c = state.coverage;
     var presMeta = '';
@@ -1760,7 +1773,7 @@
       covDrop('presence', 2, 'On premise now',
         'The "On Premise - Simple" export (.csv). Drop a fresh one any time to re-check the floor.',
         c.presenceFile, presMeta) +
-      '</div>';
+      '</div>' + covScopeNote();
   }
 
   // The on-premise rows carry no timestamp of their own; the export time in the

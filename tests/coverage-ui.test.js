@@ -68,7 +68,13 @@ w.fetch = (url, opt) => {
   }
   if (u.indexOf('plx=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ sync: {} }) });
   if (u.indexOf('schedule=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ schedule: storedWeek }) });
-  if (u.indexOf('coverage=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ coverage: storedDay }) });
+  if (u.indexOf('coverage=1') !== -1) {
+    // Bare ?coverage=1 is the index of stored days; ?coverage=1&date=... is one day.
+    const payload = u.indexOf('date=') !== -1
+      ? { coverage: storedDay }
+      : { dates: (storedDay.checks || []).length ? ['2026-08-25'] : [] };
+    return Promise.resolve({ ok: true, json: () => Promise.resolve(payload) });
+  }
   if (u.indexOf('shifts=1') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ shifts: shiftTags }) });
   const k = u.match(/\?(\w+)=1/)[1];
   const map = { attendance: 'attendance', timeoff: 'timeOff', requisitions: 'requisitions', performance: 'performance', discrepancies: 'discrepancies' };
@@ -107,6 +113,34 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   t('the absent person is an exception', chk.body.check.exceptions.some(e => e.name === 'Porras, Fernando'));
   t('the present people are recorded', chk.body.check.presentKeys.length === 2);
   t('badge resolved despite reversed name order', chk.body.check.exceptions[0].badge === '80-FPORRA4387');
+
+  /* The status filter is one field shared by the live view and the stored-check
+     review, and it rides in the URL. "Everyone on the report" exists only in the
+     review -- so the live view has to have an answer for it, or choosing it once
+     leaves every later visit looking at an empty table under a dropdown still
+     claiming to be on "Exceptions only". */
+  console.log('— "Everyone on the report" does not wedge the live view —');
+  click($('[data-nav="coverage"]'));
+  const reviewPick = $('#review-date');
+  t('a stored check can be reopened', !!reviewPick);
+  reviewPick.value = '2026-08-25';
+  reviewPick.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(60);
+  const revStatus = $('#cov-status');
+  t('the review offers the whole report',
+    !!revStatus && Array.from(revStatus.options).some(o => o.value === 'everyone'));
+  revStatus.value = 'everyone';
+  revStatus.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(40);
+  t('the review shows more than the exceptions',
+    $$('.suite-table tbody tr').length > (storedDay.checks[0].exceptions || []).length);
+  click($('[data-review-exit]'));
+  await settle(60);
+  t('the live table still has rows', $$('.suite-table tbody tr').length > 0);
+  t('and the filter says what is actually in force', $('#cov-status').value === 'all');
+  $('#cov-status').value = 'exceptions';
+  $('#cov-status').dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(40);
 
   console.log('— documenting an absence —');
   click($('[data-nav="coverage"]'));

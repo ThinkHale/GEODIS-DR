@@ -1998,8 +1998,20 @@
       (notes.length > 12 ? '<li>…and ' + (notes.length - 12) + ' more.</li>' : '') + '</ul></div>';
   }
 
+  /* The status filter is ONE field shared by the live view and the stored-check
+     review, and it rides in the URL -- so a value chosen in one outlives the
+     other. "Everyone on the report" is the review's, and it means "the whole
+     report" -- which in the live view is every row it already holds, i.e. All.
+     Anything else the live view cannot honour reads as All too, because the
+     alternative is a table that silently empties with a dropdown still claiming
+     to be on "Exceptions only". */
+  function liveStatus() {
+    var v = state.coverage.statusFilter;
+    if (v === 'exceptions' || v === 'onclock' || v === 'onshift' || v === 'all') return v;
+    return ScheduleCore.STATUS[v] ? v : 'all';
+  }
   function covFilters(res) {
-    var c = state.coverage;
+    var c = state.coverage, live = liveStatus();
     var locs = {};
     res.rows.forEach(function (r) { var l = locLeaf(r.location); if (l) locs[l] = (locs[l] || 0) + 1; });
     /* "On shift now" is the shift as it actually stands: everybody a shift
@@ -2019,7 +2031,7 @@
       '<input class="suite-input" id="suite-search" value="' + esc(state.query) +
       '" placeholder="Search by EID, name, badge, timeclock id, or supervisor…">' +
       '<select class="suite-select" id="cov-status">' + opts.map(function (o) {
-        return '<option value="' + o[0] + '" ' + (c.statusFilter === o[0] ? 'selected' : '') + '>' + esc(o[1]) + '</option>';
+        return '<option value="' + o[0] + '" ' + (live === o[0] ? 'selected' : '') + '>' + esc(o[1]) + '</option>';
       }).join('') + '</select>' +
       '<select class="suite-select" id="cov-loc"><option value="all">All locations</option>' +
       Object.keys(locs).sort().map(function (l) {
@@ -2028,7 +2040,7 @@
   }
 
   function covFilter(rows) {
-    var c = state.coverage, q = state.query.trim().toLowerCase();
+    var c = state.coverage, q = state.query.trim().toLowerCase(), status = liveStatus();
     return rows.filter(function (r) {
       // A row that never reached the roster has no market of its own. It stays
       // visible rather than vanishing on a market change -- this is the view
@@ -2038,15 +2050,15 @@
       /* Exceptions keeps every 'bad' and 'warn', which is what puts somebody on
          the clock with no shift in front of a supervisor without them having to
          go looking -- see STATUS.unscheduled in schedule-core.js. */
-      if (c.statusFilter === 'exceptions') { if (r.severity !== 'bad' && r.severity !== 'warn') return false; }
-      else if (c.statusFilter === 'onclock') { if (!r.present) return false; }
+      if (status === 'exceptions') { if (r.severity !== 'bad' && r.severity !== 'warn') return false; }
+      else if (status === 'onclock') { if (!r.present) return false; }
       /* Presence counts on its own here. STATUS.onShift stays untouched, so the
          coverage percentage keeps measuring only who was expected -- somebody
          picking up voluntary OT must never make the floor read as short. */
-      else if (c.statusFilter === 'onshift') {
+      else if (status === 'onshift') {
         if (!ScheduleCore.STATUS[r.status].onShift && !r.present) return false;
       }
-      else if (c.statusFilter !== 'all' && r.status !== c.statusFilter) return false;
+      else if (status !== 'all' && r.status !== status) return false;
       if (!q) return true;
       return searchText(r.badge ? profile(r.badge) : null,
         r.name + ' ' + r.badge + ' ' + r.wfmId + ' ' + r.manager + ' ' + r.job)

@@ -10,11 +10,13 @@ const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 console.log('— route vocabulary —');
 t('every suite destination is an allowed view',
   ['overview', 'tasks', 'associates', 'profile', 'coverage', 'attendance', 'timeoff',
-    'payroll', 'requisitions', 'reconciliation', 'settings']
+    'payroll', 'requisitions', 'reconciliation', 'data', 'settings']
     .every(view => R.VIEWS.indexOf(view) !== -1));
 t('the URL vocabulary is explicit',
   ['view', 'badge', 'tab', 'market', 'q', 'status', 'source', 'filter']
     .every(key => R.PARAMS.indexOf(key) !== -1));
+t('all assignment statuses survive a Data export link',
+  R.parse(R.serialize({ view: 'data', status: 'all' })).status === 'all');
 t('page-specific filters are explicit too',
   ['kind', 'urgency', 'showDone', 'site', 'when', 'health', 'coverageStatus',
     'location', 'reviewDate', 'reviewId']

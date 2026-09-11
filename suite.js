@@ -89,6 +89,7 @@
     { key: 'payroll', label: 'Payroll', group: 'Workforce admin' },
     { key: 'requisitions', label: 'Beeline Requests', group: 'Workforce admin' },
     { key: 'reconciliation', label: 'Assignment Reconciliation', group: 'Workforce admin' },
+    { key: 'data', label: 'Data', group: 'Workforce admin' },
     { key: 'settings', label: 'Settings', group: 'Workforce admin' }
   ];
   var VALID_VIEWS = NAV.map(function (n) { return n.key; }).concat(['profile']);
@@ -118,6 +119,7 @@
        that look impossible. The filter is still there for narrowing down. */
     statusFilter: 'all',
     associateQuick: 'all',
+    dataExport: { status: 'Active', feedback: '', failed: false },
     records: null,          // null = snapshot has not arrived yet
     notes: {},              // shared badge -> note, published with the roster
     updatedAt: null,
@@ -180,7 +182,10 @@
     return allowed.indexOf(value) !== -1 ? value : fallback;
   }
   function applyRouteFilters(params) {
-    if (state.view === 'associates') {
+    if (state.view === 'data') {
+      state.dataExport.status = routeChoice(params, 'status', ['Active', 'Ended', 'all'], 'Active');
+      state.dataExport.feedback = '';
+    } else if (state.view === 'associates') {
       state.statusFilter = routeChoice(params, 'status', ['all', 'Active', 'Ended'], 'all');
       state.associateQuick = routeChoice(params, 'quick', ['all', 'exceptions', 'points', 'missing-eid',
         'missing-shift', 'former', 'unscored'], 'all');
@@ -223,6 +228,7 @@
   function setMarket(m, fromRecon) {
     if (state.market === m) return;
     state.market = m;
+    state.dataExport.feedback = '';
     // A site belongs to a market, so a site chosen in the previous one would filter
     // the new market to nothing and read as an empty tab.
     state.reqSite = 'all';
@@ -612,6 +618,7 @@
       attendance: '<rect x="3" y="5" width="18" height="16" rx="1"/><path d="M8 3v4m8-4v4M3 10h18m-13 5l2 2 5-5"/>',
       timeoff: '<path d="M3 12a9 9 0 0118 0H3zm9 0v9m-4 0h8"/>',
       payroll: '<rect x="3" y="6" width="18" height="12" rx="1"/><circle cx="12" cy="12" r="2.5"/>',
+      data: '<path d="M12 3v12m-4-4l4 4 4-4M4 16v5h16v-5"/>',
       settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10l2 2M19 5l-2 2M7 17l-2 2"/>',
       requisitions: '<path d="M6 3h9l4 4v14H6zM14 3v5h5M9 13h7M9 17h7"/>',
       reconciliation: '<rect x="5" y="4" width="14" height="17" rx="1"/><path d="M9 4V2h6v2M8 9h8m-8 4h5m-5 4h7"/>'
@@ -623,13 +630,15 @@
     if (view === 'profile' && badge) params.set('badge', badge);
     if (state.market && state.market !== 'all') params.set('market', state.market);
     Object.keys(extras || {}).forEach(function (key) {
-      if (extras[key] != null && extras[key] !== '' && extras[key] !== 'all') params.set(key, extras[key]);
+      if (extras[key] != null && extras[key] !== '' &&
+          (extras[key] !== 'all' || (view === 'data' && key === 'status'))) params.set(key, extras[key]);
     });
     return '?' + params.toString();
   }
   function currentRouteExtras() {
     var extras = { q: state.query || '', record: state.highlightId || '' };
     if (state.view === 'settings') extras.tab = state.admin.tab;
+    else if (state.view === 'data') extras.status = state.dataExport.status;
     else if (state.view === 'payroll') {
       extras.tab = state.payroll.tab; extras.status = state.payroll.discrepancyStatus;
       extras.site = state.payroll.discrepancyLocation; extras.missing = state.payroll.missingDate ? '1' : '';
@@ -714,6 +723,7 @@
       attendance: ['Attendance', 'Occurrences and points'],
       timeoff: ['Time Off', 'PTO and VTO tracking'],
       payroll: ['Payroll', 'Hours changes and discrepancy tracking'],
+      data: ['Data', 'Workforce reports and exports'],
       settings: ['Settings', 'Accounts, locations and shifts'],
       requisitions: ['Beeline Requests', 'Staffing demand and fulfillment'],
       reconciliation: ['Assignment Reconciliation', 'Beeline ⇆ RC active-assignment crosscheck']
@@ -1363,7 +1373,8 @@
     });
     var rows = all.slice(0, MAX_ROWS);
     var tagged = all.filter(function (p) { return !!p.shift; }).length;
-    return hero('Associate roster', 'Built from the RC / Beeline assignment snapshot. Profiles cannot be added by hand — a profile exists because an assignment does.', '', '') +
+    return '<div class="module-toolbar"><p>Download the LEGO roster with a separate worksheet for each shift.</p>' +
+      '<a class="suite-btn" href="' + routeHref('data') + '" data-nav="data">Export LEGO roster</a></div>' +
       policyNotice() +
       '<section class="suite-panel">' + filters() +
       '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
@@ -1395,6 +1406,115 @@
       '</tbody></table></div>' + rowCap(rows.length, all.length) + '</section>' +
       sourceDisclosure('Roster source & shift tags', tagged + ' of ' + all.length + ' associates have a shift tag',
         shiftImportPanel(all.length, tagged), !tagged);
+  }
+
+  /* ---------- data exports ---------- */
+  function exportProfiles() {
+    // Server reads already enforce access. Recheck the current account so an
+    // open page cannot export a wider cached roster after its scope changes.
+    var acct = account(), allowed = acct && acct.markets || [];
+    return profilesInMarket().filter(function (p) {
+      return !allowed.length || (p.marketVerified && allowed.indexOf(p.market) !== -1);
+    });
+  }
+  function rosterExportProblem() {
+    if (!state.records) return 'Waiting for the assignment roster to load.';
+    if (!state.storesLoaded) return 'Loading account and shift assignments…';
+    if (SuiteData.getSourceState) {
+      var sources = ['shifts', 'locations', 'timeclockLinks'];
+      for (var i = 0; i < sources.length; i++) {
+        var source = SuiteData.getSourceState(sources[i]);
+        if (['loading', 'refreshing'].indexOf(source.status) !== -1) return 'Refreshing account and shift data…';
+        if (['error', 'stale', 'denied'].indexOf(source.status) !== -1) {
+          return 'Account or shift data could not refresh. Use Refresh all data before exporting.';
+        }
+      }
+    }
+    if (typeof RosterExportCore === 'undefined' || typeof XLSX === 'undefined' ||
+        !XLSX.utils || typeof XLSX.writeFile !== 'function') {
+      return 'The Excel export could not load. Reload the page and try again.';
+    }
+    return '';
+  }
+  function dataView() {
+    var problem = rosterExportProblem();
+    var people = exportProfiles();
+    var model = typeof RosterExportCore === 'undefined' ? { rows: [], groups: [], unassigned: 0 }
+      : RosterExportCore.build(people, { status: state.dataExport.status });
+    var unknown = people.filter(function (p) {
+      return !String(p.account || '').trim() && (state.dataExport.status === 'all' || p.status === state.dataExport.status);
+    }).length;
+    var market = state.market === 'all' ? 'All authorized markets' : state.market;
+    return '<section class="suite-panel data-roster-panel" aria-labelledby="data-roster-title">' +
+      '<div class="suite-panel-head"><div><h2 id="data-roster-title">LEGO associates by shift</h2></div>' +
+      '<span class="data-format">Excel .xlsx</span></div>' +
+      '<div class="suite-panel-body"><p class="data-description">A summary and one worksheet per shift, with associates listed alphabetically. Includes LEGO accounts such as LEGO SAH and LEGO EDU.</p>' +
+      '<div class="data-export-controls"><label class="suite-field"><span>Assignments</span>' +
+      '<select class="suite-select" id="data-roster-status">' +
+      [['Active', 'Active associates'], ['all', 'Active and ended associates'], ['Ended', 'Ended associates']].map(function (option) {
+        return '<option value="' + option[0] + '"' + (state.dataExport.status === option[0] ? ' selected' : '') + '>' + option[1] + '</option>';
+      }).join('') + '</select></label><div class="data-export-scope"><span>Market scope</span><b>' + esc(market) + '</b></div>' +
+      '<button type="button" class="suite-btn primary" data-roster-export' + (problem || !model.rows.length ? ' disabled' : '') +
+      '>Export Excel</button></div>' +
+      '<div class="data-export-totals"><span><b>' + model.rows.length + '</b> associates</span><span><b>' +
+      (model.groups.length - (model.unassigned ? 1 : 0)) + '</b> assigned shifts</span><span><b>' + model.unassigned +
+      '</b> without a shift</span></div>' +
+      (problem ? '<p class="data-export-notice" role="status">' + esc(problem) + '</p>' : '') +
+      (model.unassigned ? '<p class="data-export-notice">Associates without a shift are included in the Unassigned worksheet.</p>' : '') +
+      (unknown ? '<p class="data-export-notice">' + unknown + ' associate' + (unknown === 1 ? '' : 's') +
+        ' in this scope ' + (unknown === 1 ? 'has' : 'have') + ' no account recorded and cannot be identified as LEGO. ' +
+        '<a href="' + routeHref('associates') + '" data-nav="associates">Review associates</a>.</p>' : '') +
+      '<p class="data-export-feedback' + (state.dataExport.failed ? ' warn-text' : '') + '" data-roster-feedback role="status">' +
+      esc(state.dataExport.feedback) + '</p></div>' +
+      (model.rows.length ? '<div class="suite-table-wrap"><table class="suite-table data-shift-table"><thead><tr>' +
+        '<th>Shift</th><th>Associates</th><th>Accounts</th><th>Sites</th></tr></thead><tbody>' +
+        model.groups.map(function (group) {
+          function values(key) {
+            return Array.from(new Set(group.rows.map(function (p) { return p[key]; }).filter(Boolean))).sort(cmp).join(', ');
+          }
+          return '<tr><td><b>' + esc(group.shift) + '</b></td><td>' + group.rows.length + '</td><td>' +
+            esc(values('account')) + '</td><td>' + esc(values('location') || 'Not recorded') + '</td></tr>';
+        }).join('') + '</tbody></table></div>' : !problem ? '<div class="workflow-empty">No LEGO associates match this market and assignment status.</div>' : '') +
+      '<div class="data-export-footnote">Includes name, EID, badge, account, site, market, shift, shift hours, and assignment status. Uses the roster currently loaded in the tool.' +
+      (state.updatedAt ? ' Roster updated ' + esc(formatDate(state.updatedAt)) + '.' : '') + '</div></section>' +
+      '<section class="suite-panel data-other-exports"><div class="suite-panel-head"><h2>More exports</h2></div>' +
+      '<div class="data-export-links">' +
+      [['attendance', 'Attendance', 'Filter and export occurrences and points.'],
+        ['payroll', 'Payroll', 'Export filtered discrepancies and hour changes.'],
+        ['coverage', 'On-Premise headcount', 'Build a shift and branch list to paste into the headcount sheet.']].map(function (item) {
+        return '<a href="' + routeHref(item[0]) + '" data-nav="' + item[0] + '"><b>' + item[1] + '</b><span>' + item[2] + '</span></a>';
+      }).join('') + '</div></section>';
+  }
+  function exportLegoRoster() {
+    if (!state.auth.signedIn || !may('view')) return;
+    var problem = rosterExportProblem();
+    state.dataExport.failed = false;
+    if (problem) {
+      state.dataExport.feedback = problem;
+      state.dataExport.failed = true;
+      render();
+      return;
+    }
+    var model = RosterExportCore.build(exportProfiles(), { status: state.dataExport.status });
+    if (!model.rows.length) {
+      state.dataExport.feedback = 'No LEGO associates match this market and assignment status.';
+      render();
+      return;
+    }
+    try {
+      var workbook = RosterExportCore.workbook(model, XLSX, {
+        market: state.market === 'all' ? 'All authorized markets' : state.market,
+        status: state.dataExport.status, exportedAt: new Date().toISOString(), rosterUpdatedAt: state.updatedAt || ''
+      });
+      var market = state.market === 'all' ? 'All_Markets' : state.market.replace(/[^A-Za-z0-9_-]+/g, '_');
+      XLSX.writeFile(workbook, 'LEGO_Associates_' + market + '_' + state.dataExport.status + '_' + today() + '.xlsx');
+      state.dataExport.feedback = model.rows.length + ' associates exported in ' + model.groups.length +
+        ' shift worksheets, plus a summary.';
+    } catch (err) {
+      state.dataExport.failed = true;
+      state.dataExport.feedback = 'Could not export the LEGO roster. ' + (err.message || 'Please try again.');
+    }
+    render();
   }
 
   /* ---------- profile ----------
@@ -5637,7 +5757,7 @@
     overview: overview, associates: associates, profile: profileView,
     coverage: coverageView, attendance: attendance, timeoff: timeoff,
     payroll: payrollView, requisitions: requisitions, reconciliation: reconciliation,
-    settings: settingsView, tasks: tasksView
+    settings: settingsView, tasks: tasksView, data: dataView
   };
   function enhanceRenderedUi() {
     root.querySelectorAll('div[data-profile],span[data-profile]').forEach(function (el) {
@@ -6180,6 +6300,7 @@
 
   /* ---------- events ---------- */
   root.addEventListener('click', function (e) {
+    if (e.target.closest('[data-roster-export]')) { exportLegoRoster(); return; }
     var returnTasks = e.target.closest('[data-return-tasks]');
     if (returnTasks) {
       var taskContext = state.returnTaskContext || {};
@@ -6776,6 +6897,15 @@
   }
 
   root.addEventListener('change', function (e) {
+    if (e.target.id === 'data-roster-status') {
+      state.dataExport.status = ['Active', 'Ended', 'all'].indexOf(e.target.value) !== -1 ? e.target.value : 'Active';
+      state.dataExport.feedback = '';
+      state.dataExport.failed = false;
+      render();
+      var statusSelect = root.querySelector('#data-roster-status');
+      if (statusSelect) statusSelect.focus();
+      return;
+    }
     if (e.target.dataset && e.target.dataset.userRole) {
       var accountRow = (state.admin.users || []).filter(function (row) {
         return AuthCore.normalizeEmail(row.email) === AuthCore.normalizeEmail(e.target.dataset.userRole);

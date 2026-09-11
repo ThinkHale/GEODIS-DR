@@ -13,7 +13,7 @@
 
   var VIEWS = [
     'overview', 'tasks', 'associates', 'profile', 'coverage', 'attendance',
-    'timeoff', 'payroll', 'requisitions', 'reconciliation', 'settings'
+    'timeoff', 'payroll', 'requisitions', 'reconciliation', 'data', 'settings'
   ];
 
   /* Tabs are route-specific.  A valid Settings tab must not accidentally become
@@ -256,7 +256,9 @@
         if (value === true) pairs.push([key, '1']);
         return;
       }
-      if (value && value !== 'all') pairs.push([key, value]);
+      // Data defaults to Active, so an explicit all-status export must survive
+      // copying the link or reloading the page.
+      if (value && (value !== 'all' || (route.view === 'data' && key === 'status'))) pairs.push([key, value]);
     });
     var search = encodePairs(pairs);
     return search ? '?' + search : '';

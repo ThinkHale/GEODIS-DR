@@ -277,6 +277,38 @@ const upload = (kind, aoa, name) => {
     posts.filter(p => p.url && p.url.indexOf('tasks=1') !== -1).length === writesBefore);
   if ($('[data-close]')) click($('[data-close]'));
 
+  /* A follow-up about a site has no associate to take a market from, and the
+     server refuses a market-scoped account any record it cannot place. An admin
+     limited to one market hit exactly that: "outside your assigned markets or
+     has no verified market". */
+  console.log('— a market-scoped account raises a task with no associate —');
+  w.__setAuth({ account: { email: 'tester@geodis.com', name: 'Tester', role: 'admin',
+    enabled: true, markets: ['Chicago'] } });
+  await settle(160);
+  click($('.suite-add'));
+  await settle(30);
+  const mkt = $('[data-form="task"] [name="market"]');
+  t('a follow-up asks which market it is for', !!mkt);
+  t('offering only the markets the account covers',
+    Array.from(mkt.options).map(o => o.value).filter(Boolean).join(',') === 'Chicago');
+  t('and starts on the only one it could be', mkt.value === 'Chicago');
+  await pickKind('other');
+  t('so does Other', !!$('[data-form="task"] [name="market"]'));
+  $('[data-form="task"] [name="title"]').value = 'Restock the break room';
+  $('[data-form="task"] [name="market"]').value = '';
+  const scopedBefore = posts.filter(p => p.url && p.url.indexOf('tasks=1') !== -1).length;
+  await submitNow();
+  t('with no market it is refused here, in words, before the server refuses it',
+    posts.some(p => p.alert && /Pick the market/.test(p.alert)) &&
+    posts.filter(p => p.url && p.url.indexOf('tasks=1') !== -1).length === scopedBefore);
+  $('[data-form="task"] [name="market"]').value = 'Chicago';
+  await submitNow();
+  const scopedTask = posts.filter(p => p.url && p.url.indexOf('tasks=1') !== -1).pop();
+  t('with one, it is saved carrying that market', !!scopedTask &&
+    scopedTask.body.kind === 'other' && scopedTask.body.market === 'Chicago');
+  w.__setRole('colleague');
+  await settle(160);
+
   console.log('— marking somebody Terminated leaves a task behind —');
   click($('[data-nav="coverage"]'));
   upload('presence', onPremAoa, 'On Premise - Simple_' + TODAY + 'T09_00_00.000.csv');

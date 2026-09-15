@@ -5978,15 +5978,24 @@
      kind does not need, and nothing it does need is left to be buried in a free
      text box where no report can reach it. */
   var TASK_FORMS = {
-    note:       ['title', 'associate', 'due', 'owner', 'detail'],
+    note:       ['title', 'associate', 'market', 'due', 'owner', 'detail'],
     pto:        ['associate', 'ptoDates', 'detailOptional'],
     attendance: ['associate', 'exceptionType', 'exceptionDate', 'detail'],
     payroll:    ['associate', 'weekEnding', 'issueType', 'detail'],
     status:     ['associate', 'currentStatus'],
     terminate:  ['associate', 'due', 'detail'],
-    system:     ['associate', 'due', 'detail'],
-    other:      ['title', 'associate', 'due', 'owner', 'detail']
+    system:     ['associate', 'market', 'due', 'detail'],
+    other:      ['title', 'associate', 'market', 'due', 'owner', 'detail']
   };
+  /* The markets a task may be filed under. A task about a site or a system has
+     no associate to take a market from, and the server refuses a market-scoped
+     account any record it cannot place -- so the form has to ask, and may only
+     offer what the account could read back. */
+  function accountMarkets() { return AuthCore.normalizeUser(account()).markets; }
+  function taskMarketChoices() {
+    var scope = accountMarkets();
+    return scope.length ? scope.slice().sort() : markets();
+  }
   var TASK_KIND_NOTES = {
     pto: 'This is filed as a time-off request, not a task — it appears on the Time Off page where it can be approved.',
     payroll: 'Payroll issues escalate after ' + TasksCore.kindMeta('payroll').hours + ' hours, not the usual 48.',
@@ -6036,6 +6045,14 @@
           return '<label class="suite-field full"><span>Current status</span>' +
             '<input name="currentStatus" id="task-current-status" readonly value="' +
             esc(reconReading(p)) + '" placeholder="Pick an associate to read their status"></label>';
+        case 'market':
+          /* Only consulted when no associate is linked: a linked associate's
+             roster market wins, because that is what the server checks first. */
+          var choices = taskMarketChoices(), scoped = accountMarkets().length > 0;
+          var start = state.market !== 'all' && choices.indexOf(state.market) !== -1 ? state.market
+            : choices.length === 1 ? choices[0] : '';
+          return field(scoped ? 'Market' : 'Market (optional)', 'market', 'select', start,
+            [['', scoped ? 'Pick a market' : 'No market']].concat(choices));
         case 'owner':
           return field('Owner', 'assignee', 'text', '');
         case 'due':
@@ -6076,6 +6093,18 @@
     }
     if ((kind === 'note' || kind === 'other') && !String(data.title || '').trim()) {
       return 'Say what needs doing.';
+    }
+    /* A market-scoped account may only store what it could read back, and the
+       server places a record by its market or its associate's. With neither the
+       write is refused as "outside your assigned markets", which reads as a
+       permissions fault rather than a missing answer -- so ask here instead. */
+    var scope = accountMarkets();
+    if (scope.length && !String(data.market || '').trim()) {
+      var covers = 'your account covers only ' + scope.join(' and ');
+      return (TASK_FORMS[kind] || []).indexOf('market') !== -1
+        ? 'Pick the market this is for — ' + covers + ', so a task with no market cannot be saved.'
+        : 'That associate has no verified market on the roster, and ' + covers +
+          ', so this cannot be saved from your account.';
     }
     return '';
   }
@@ -7150,7 +7179,10 @@
       // Whoever was already picked carries across; nothing else can, because the
       // next kind may not have the field it was typed into.
       var chosen = box.querySelector('[name="badge"]');
+      var chosenMarket = box.querySelector('[name="market"]');
       box.innerHTML = taskFieldsFor(e.target.value, chosen ? chosen.value : '');
+      var nextMarket = box.querySelector('[name="market"]');
+      if (chosenMarket && nextMarket) nextMarket.value = chosenMarket.value;
     }
     if (note) note.textContent = taskKindNote(e.target.value);
   });
@@ -7382,7 +7414,9 @@
       })[0];
       data.kind = picked ? picked.key : TasksCore.DEFAULT_KIND;
       var p = data.badge ? profile(data.badge) : null;
-      if (p) { data.name = p.name; data.market = p.market || ''; data.location = p.locationLabel || ''; }
+      // The associate's roster market is what the server checks; the picked one
+      // stands in only when nobody is linked, or the roster cannot place them.
+      if (p) { data.name = p.name; data.market = p.market || data.market || ''; data.location = p.locationLabel || ''; }
 
       var problem = taskFormProblem(data, p);
       if (problem) { alert(problem); return; }

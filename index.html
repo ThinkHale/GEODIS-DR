@@ -1103,8 +1103,9 @@ document.getElementById('tbody').addEventListener('change', e=>{
   saveOverride(e.target.dataset.badge, e.target.value==='__auto'?'':e.target.value);
 });
 
-async function loadSyncedSnapshot(){
-  if(!SNAPSHOT_URL){ showUploadSection(); return; }
+async function loadSyncedSnapshot(opts){
+  const keepView = !!(opts && opts.keepView);
+  if(!SNAPSHOT_URL){ if(!keepView) showUploadSection(); return; }
   try{
     const res = await authedGet(SNAPSHOT_URL);
     /* A 401 or 403 is not "there is no snapshot yet". It means this browser was
@@ -1127,10 +1128,31 @@ async function loadSyncedSnapshot(){
   }catch(err){
     if(err.denied) console.warn('The roster was refused: '+err.message, err);
     else console.warn('No synced snapshot available yet, falling back to manual upload.', err);
-    showUploadSection();
+    /* A REFRESH that fails keeps the roster already on screen. Falling back to
+       the manual upload section here would take a working page apart over one
+       flaky request, and the last good roster is still the best answer. */
+    if(!keepView) showUploadSection();
     return false;
   }
 }
+
+/* The roster was fetched once per page load and then latched, so a tab left
+   open all day compared every on-premise pull against whatever the roster was
+   when the tab opened. That is how a check came to be stored against a badge
+   the roster had already retired: the person is re-badged mid-morning, the tab
+   never hears about it, and their presence is filed under the old badge, where
+   their own profile can no longer find it.
+ *
+ * So the suite's Refresh re-asks for the roster too. Skipped while a manual
+ * upload is on screen: those records are the person's own working set, and
+ * replacing them underneath is not a refresh, it is losing their work. */
+document.addEventListener('geodis:refresh', function(){
+  if(snapshotPending || !syncedSnapshot) return;
+  const upload = document.getElementById('upload-section');
+  if(upload && !upload.classList.contains('hidden')) return;
+  snapshotPending = true;
+  loadSyncedSnapshot({ keepView: true }).then(()=>{ snapshotPending = false; });
+});
 
 /* The roster needs a signed-in account, and sign-in resolves LONG after this
    script runs -- the Firebase SDK is not even fetched until suite.js calls

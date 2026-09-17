@@ -119,7 +119,8 @@ form.querySelector('[name="title"]').value='End this assignment';
 form.querySelector('[name="badge"]').value='1001';
 form.querySelector('[name="detail"]').value='Left on Friday.';
 form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
-setTimeout(()=>{
+const settle=ms=>new Promise(r=>setTimeout(r,ms));
+setTimeout(async ()=>{
   const p=posted.filter(x=>x.url&&x.url.includes('tasks=1'));
   t('one POST issued', p.length===1);
   t('POST carries the badge, not a fake associate id', p[0].body.badge==='1001');
@@ -155,6 +156,21 @@ note2.dispatchEvent(new w.Event('change', {bubbles:true}));
    survives the dispatch means the guard let it through -- checked this way
    rather than on the POST, which is a tick away and this block is not async. */
 t('and can write a note again', $('#tbody .note-input').value === 'a real note');
+
+/* The roster was fetched once per page load and then latched, so a tab left open
+   all day compared every on-premise pull against the roster as it stood when the
+   tab opened -- and filed checks under badges that had since been retired. A
+   re-badged associate's presence then lands where their own profile cannot see
+   it. Refresh has to re-ask for the roster, not just the collections. */
+console.log('— refresh re-asks for the roster —');
+  const before = fetched.filter(u=>u.includes('snapshot=1')).length;
+  snapshot.records[0].person = 'Ava Reed-Marsh';
+  click($('[data-refresh]'));
+  await settle(60);
+  const after = fetched.filter(u=>u.includes('snapshot=1')).length;
+  t('the roster is asked for again', after > before);
+  t('and the fresh roster reached the suite',
+    !!w.GEODISSuite.profile('1001') && w.GEODISSuite.profile('1001').name === 'Ava Reed-Marsh');
 
 console.log('— one market across both views —');
   click($('[data-nav="overview"]'));

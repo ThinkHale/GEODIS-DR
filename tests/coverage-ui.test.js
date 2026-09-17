@@ -211,6 +211,63 @@ const settle = ms => new Promise(r => setTimeout(r, ms));
   t('the on-premise check is shown', txt.indexOf('Not on premise') !== -1 || txt.indexOf('Not clocked in') !== -1);
   t('the documentation is shown', txt.indexOf('Badge / system issue') !== -1);
 
+  /* Searching for somebody who is on the floor, working their shift, used to
+     answer "Nothing matches those filters" -- because the status filter starts
+     on Exceptions only and drops them before the search box ever runs. Read as
+     "that person is not on the report", which is the one thing it does not
+     mean, and the reason a present associate was reported missing. */
+  console.log('— searching for somebody the filter is hiding —');
+  click($('[data-nav="coverage"]'));
+  const status = $('#cov-status');
+  status.value = 'exceptions';
+  status.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(40);
+  const search = $('#suite-search');
+  search.value = 'Grachen';
+  search.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await settle(200);
+
+  t('the table has nothing to show under that filter', $$('.suite-table:not(.export-preview) tbody tr').length === 0);
+  t('but the page names the person it is hiding',
+    d.body.textContent.indexOf('Grachen, Luz') !== -1);
+  t('and says she is on the report rather than absent from it',
+    d.body.textContent.indexOf('is on this report, but not in this filter') !== -1);
+  t('it does not claim nothing matches', d.body.textContent.indexOf('Nothing matches those filters') === -1);
+  const widen = $('[data-cov-widen]');
+  t('and offers to widen the filter', !!widen);
+
+  click(widen);
+  await settle(60);
+  t('which shows her', $$('.suite-table:not(.export-preview) tbody tr').some(tr => tr.textContent.indexOf('Grachen, Luz') !== -1));
+  t('by putting the status filter on everyone', $('#cov-status').value === 'all');
+
+  /* The same trap one step worse on a stored check: it shows its exceptions, so
+     a search for somebody who was working answers "no exceptions in this check"
+     while the full report, still held, has them on the floor. */
+  console.log('— and the same search against a stored check —');
+  const pick = $('#review-date');
+  pick.value = '2026-08-25';
+  pick.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(60);
+  const revStatus2 = $('#cov-status');
+  revStatus2.value = 'all';
+  revStatus2.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(40);
+  const revSearch = $('#suite-search');
+  revSearch.value = 'Grachen';
+  revSearch.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await settle(200);
+  t('the stored check names her too', d.body.textContent.indexOf('Grachen, Luz') !== -1);
+  t('rather than reporting no exceptions',
+    d.body.textContent.indexOf('No exceptions in this check') === -1);
+  const revWiden = $('[data-cov-widen]');
+  t('with the same way out', !!revWiden);
+  click(revWiden);
+  await settle(60);
+  t('which shows her in the stored report',
+    $$('.suite-table:not(.export-preview) tbody tr').some(tr => tr.textContent.indexOf('Grachen, Luz') !== -1));
+  t('with the review on the whole report', $('#cov-status').value === 'everyone');
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

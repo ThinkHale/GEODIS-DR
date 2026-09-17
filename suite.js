@@ -2221,6 +2221,38 @@
     });
   }
 
+  /* ---------- searched for, and filtered out ----------
+     The status filter starts on "Exceptions only", so anybody working their
+     shift is dropped before the search box ever runs. Searching for them then
+     answers "Nothing matches those filters", which reads as "that person is not
+     on the report" -- the one thing it does not mean. Somebody who is on the
+     floor, on time, is exactly the person that answer is wrong about.
+
+     So the rows are searched again with the filters off, and whoever turns up
+     is named along with the reason they were hidden. */
+  function covSearchedElsewhere(rows) {
+    var q = state.query.trim().toLowerCase();
+    if (!q) return [];
+    return (rows || []).filter(function (r) {
+      return searchText(r.badge ? profile(r.badge) : null,
+        r.name + ' ' + r.badge + ' ' + r.wfmId + ' ' + r.manager + ' ' + r.job)
+        .toLowerCase().indexOf(q) !== -1;
+    });
+  }
+  function covHiddenNote(hidden, widenLabel) {
+    var one = hidden.length === 1 ? hidden[0] : null;
+    var st = one ? (ScheduleCore.STATUS[one.status] || { label: one.status }) : null;
+    var head = one
+      ? esc(one.name) + ' is on this report, but not in this filter'
+      : hidden.length + ' people match “' + esc(state.query) + '” but are not in this filter';
+    var sub = one
+      ? (st.label ? st.label + (one.present ? ', on premise' : '') + ' — ' : '') +
+        'this filter is not showing them.'
+      : 'They are on the report; the filter in force is hiding them.';
+    return '<div class="empty-module"><strong>' + head + '</strong>' + esc(sub) +
+      '<div><button class="suite-btn" data-cov-widen>' + esc(widenLabel) + '</button></div></div>';
+  }
+
   function covShiftCell(r) {
     if (r.dayCode) return '<span class="cov-code">' + esc(r.dayCode) + '</span>';
     if (!r.shiftRaw) return '<span class="score none">Not scheduled</span>';
@@ -2481,11 +2513,28 @@
               '<td>' + esc(r.manager || '—') + '</td>' +
               '<td>' + covDocFor(r.key, r.name, r.badge, st.severity) + '</td></tr>';
           }).join('') + '</tbody></table></div>' + rowCap(Math.min(ex.length, MAX_ROWS), ex.length)
-        : empty(all.length ? 'Nothing matches those filters' : 'No exceptions in this check',
-                all.length ? 'Widen the status, location, or market filter to see more.'
-                           : 'Everyone on shift was on premise at that moment.')) +
+        : covReviewEmpty(check, all)) +
       '<p class="export-hint">' + esc(retentionNote(check)) + '</p>' +
       '</section>';
+  }
+
+  /* The same trap as the live view, one step worse: a stored check shows its
+     EXCEPTIONS, so searching for somebody who was working their shift answers
+     "no exceptions in this check" even while the full report, still held, has
+     them on the floor. Searched against the whole report where there is one. */
+  function covReviewEmpty(check, shown) {
+    /* The whole report while it is still held, and the exceptions once it has
+       aged out -- searching the widest set this check still has. Anyone the
+       search finds there was hidden by a filter, since a row that passed every
+       filter would be on screen instead of this message. */
+    var full = reviewHasRows(check);
+    var hidden = covSearchedElsewhere(full ? check.rows : (check.exceptions || []));
+    if (hidden.length) {
+      return covHiddenNote(hidden, full ? 'Show everyone on the report' : 'Show every exception');
+    }
+    return empty(shown.length ? 'Nothing matches those filters' : 'No exceptions in this check',
+      shown.length ? 'Widen the status, location, or market filter to see more.'
+                   : 'Everyone on shift was on premise at that moment.');
   }
 
   /* What this check still holds, and for how much longer. Said on the page
@@ -2563,6 +2612,12 @@
       }).join('') + '</tbody></table></div>' + rowCap(Math.min(rows.length, MAX_ROWS), rows.length);
   }
 
+  function covLiveEmpty(res) {
+    var hidden = covSearchedElsewhere(res.rows);
+    if (!hidden.length) return empty('Nothing matches those filters', 'Widen the status or location filter to see more.');
+    return covHiddenNote(hidden, 'Show everyone on the report');
+  }
+
   function coverageView() {
     var c = state.coverage;
     var head = hero('On-Premise', 'The weekly schedule crossed with the on-premise snapshot. Both are saved to Firebase, so absences stay documented.') +
@@ -2599,7 +2654,7 @@
       scheduleSourceNote(res) + unlinkedBanner(res) + covWarnings(res) + covExport(res) +
       '<section class="suite-panel">' + covFilters(res) +
       (rows.length ? covTable(rows, res.rows.length)
-        : empty('Nothing matches those filters', 'Widen the status or location filter to see more.')) +
+        : covLiveEmpty(res)) +
       '</section>';
   }
 
@@ -2632,8 +2687,10 @@
         state.plx.note = plxSummary(r);
         return SuiteData.loadAll();
       }).then(function (stores) {
-        state.stores = stores;
-        rebuild();
+        /* Through applyStores(), like every other load. The shift tags this just
+           brought are what a held on-premise pull was waiting for, and the note
+           holding it says to import the workbook -- here -- to file it. */
+        applyStores(stores);
       }).catch(function (err) {
         state.plx.note = 'Upload failed: ' + err.message;
       }).then(function () {
@@ -6777,6 +6834,16 @@
       if (state.payroll.tab === 'hours' && !state.payroll.periods.length) loadPayrollIndex();
       return;
     }
+    /* Every filter that could be hiding the person just searched for, at once.
+       Offering to widen one of three and leaving the other two in force is how
+       somebody ends up convinced the report does not have them. */
+    if (e.target.closest('[data-cov-widen]')) {
+      state.coverage.statusFilter = reviewedCheck() ? 'everyone' : 'all';
+      state.coverage.location = 'all';
+      setMarket('all');
+      render();
+      return;
+    }
     if (e.target.closest('[data-cov-now]')) { state.coverage.asOf = new Date(); render(); return; }
     if (e.target.closest('[data-cov-clear]')) {
       if (!confirm('Clear the current on-premise upload from this browser? Stored checks remain available.')) return;
@@ -7529,6 +7596,12 @@
   function loadEverything(force) {
     if (loaded && !force) return Promise.resolve(state.stores);
     loaded = true;
+    /* The roster comes from the reconciliation script, which used to fetch it
+       once and never again -- so everything else on the page could refresh
+       around a roster that was hours old. An on-premise check compared against
+       a stale roster is stored under stale badges, and a re-badged associate's
+       presence then lands where their own profile cannot see it. */
+    if (force) document.dispatchEvent(new CustomEvent('geodis:refresh'));
     loadStoredCoverage().catch(function () {});
 
     var syncLoads = [];

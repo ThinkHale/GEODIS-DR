@@ -114,6 +114,41 @@ const checkPosts = () => posts.filter(p => p.url && p.url.indexOf('coverage=1') 
   t('the holding note is gone', d.body.textContent.indexOf('Holding') === -1);
   t('replaced by confirmation it stuck', d.body.textContent.indexOf('Saved and shared') !== -1);
 
+  /* What the holding note actually tells somebody to do is import the workbook,
+     and the place to do that is this page -- not the refresh button. That upload
+     swapped the stores in without going through applyStores(), so the pull sat
+     there held until the tab closed and took it with it. */
+  console.log('— the workbook is imported from this page, and the held pull files itself —');
+  servedShifts = [];
+  click($('[data-refresh]'));
+  await settle(120);
+  const later = d.querySelector('[data-cov="presence"]');
+  Object.defineProperty(later, 'files', {
+    value: [new w.File([new Uint8Array([1])], 'On Premise - Simple_2026-08-26T09_00_00.csv')],
+    configurable: true
+  });
+  later.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await settle(80);
+  const filedFor = date => checkPosts().filter(p => p.url.indexOf('date=' + date) !== -1);
+  t('the second pull is held too', d.body.textContent.indexOf('Holding') !== -1 &&
+    filedFor('2026-08-26').length === 0);
+
+  servedShifts = shiftTags;
+  const book = d.querySelector('[data-cov="workbook"]');
+  t('the workbook can be imported from the On-Premise page', !!book);
+  if (book) {
+    Object.defineProperty(book, 'files', {
+      value: [new w.File([new Uint8Array([80, 75, 3, 4])], 'PLX - Geodis Spreadsheet.xlsx')],
+      configurable: true
+    });
+    book.dispatchEvent(new w.Event('change', { bubbles: true }));
+  }
+  await settle(200);
+
+  t('the workbook went to the server', posts.some(p => p.url && p.url.indexOf('plxUpload=1') !== -1));
+  t('and the pull it was holding was stored', filedFor('2026-08-26').length === 1);
+  t('the holding note is gone again', d.body.textContent.indexOf('Holding') === -1);
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

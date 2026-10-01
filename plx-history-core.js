@@ -41,9 +41,10 @@
 (function (root) {
   'use strict';
 
-  /* 2 added customers, positions, highlights, site figures and weekly starts.
-     A version-1 snapshot still compares; only what it lacks is left out. */
-  var VERSION = 2;
+  /* 2 added customers, positions, highlights, site figures and weekly starts;
+     3 added every WT List row, for open positions. An older snapshot still
+     compares; only what it lacks is left out. */
+  var VERSION = 3;
   var RETENTION_DAYS = 7;
   // The headcount series is a few hundred bytes a reading, so it keeps years.
   var SERIES_DAYS = 2 * 366;
@@ -70,6 +71,10 @@
   /* What a highlight means on the candidate tabs. Only these two carry meaning;
      every other colour is kept under its own name. */
   var HIGHLIGHT_MEANS = { green: 'accepted', blue: 'approved' };
+  /* A named WT List row that does not count as identified, and why. Taken from
+     the comments the team writes on those rows: red is "not a good fit", orange
+     a no-show being rescheduled, yellow "when a spot comes available". */
+  var NOT_IDENTIFIED = { red: 'notFit', orange: 'noShow', yellow: 'waiting' };
 
   /* Job titles and Beeline job types, grouped the way the meeting talks about
      them. MATH1-3 are material handler levels; OPR, OPEPJ and the truck types
@@ -103,6 +108,29 @@
     }
     for (var b = 0; b < arguments.length; b++) if (txt(arguments[b])) return txt(arguments[b]);
     return 'Unspecified';
+  }
+
+  // Meeting columns: Material Handler, Operator, and everything else.
+  function groupOf(position) {
+    return position === 'Material Handler' ? 'mh' : position === 'Operator' ? 'op' : 'other';
+  }
+  /* Open positions summed over profile rows: { mh, op, other } of
+     { open, identified, needed }, plus totals. */
+  function openPositions(rows) {
+    var out = { mh: { open: 0, identified: 0 }, op: { open: 0, identified: 0 }, other: { open: 0, identified: 0 },
+      excluded: { notFit: 0, noShow: 0, waiting: 0, withdrawn: 0 } };
+    (rows || []).forEach(function (r) {
+      ['mh', 'op', 'other'].forEach(function (g) {
+        out[g].open += (r.wt && r.wt[g].open) || 0;
+        out[g].identified += (r.wt && r.wt[g].identified) || 0;
+      });
+      Object.keys(out.excluded).forEach(function (k) { out.excluded[k] += (r.wtExcluded && r.wtExcluded[k]) || 0; });
+    });
+    ['mh', 'op', 'other'].forEach(function (g) { out[g].needed = Math.max(0, out[g].open - out[g].identified); });
+    out.open = out.mh.open + out.op.open + out.other.open;
+    out.identified = out.mh.identified + out.op.identified + out.other.identified;
+    out.needed = out.mh.needed + out.op.needed + out.other.needed;
+    return out;
   }
 
   /* ---------- highlight colours ----------
@@ -205,6 +233,9 @@
     if (named) {
       var squash = function (x) { return x.replace(/[^A-Z0-9]/g, ''); };
       for (var i = 0; i < known.length; i++) if (squash(known[i]) === squash(named)) return known[i];
+      // An abbreviation ("32 D" for 32 DEGREES), when it can only mean one of them.
+      var starts = known.filter(function (k) { return squash(named).length >= 2 && squash(k).indexOf(squash(named)) === 0; });
+      if (starts.length === 1) return starts[0];
       return named;
     }
     if (known.length === 1) return known[0];
@@ -271,7 +302,7 @@
 
   /* ---------- the candidate tabs ---------- */
   function readCandidates(sheets, customers) {
-    var people = {}, openSlots = {}, slots = [], starts = {};
+    var people = {}, openSlots = {}, slots = [], starts = {}, wtRows = [];
     sheets.forEach(function (sheet) {
       var stage = stageOf(sheet.name);
       if (!stage) return;
@@ -296,6 +327,11 @@
           var customer = resolveCustomer(customers, building, '', cell(cells, col.account));
           var position = positionOf(cell(cells, col.position), cell(cells, col.fn));
           var color = colorName(fills[h + 1 + i]);
+          // Every WT List row is one opening, named or not.
+          if (stage === 'openings' && building) {
+            wtRows.push({ location: building, customer: customer, position: position,
+              name: name, key: name ? nameKey(name) : '', color: color });
+          }
           if (!name) {
             // A named position with nobody in it yet: an unfilled walkthrough slot.
             // Its colour is kept but given no meaning -- on the WT List, green has
@@ -330,7 +366,7 @@
       }
     });
     return {
-      people: people, openSlots: openSlots, slots: slots,
+      people: people, openSlots: openSlots, slots: slots, wtRows: wtRows,
       starts: Object.keys(starts).sort().map(function (k) {
         var p = k.split('|');
         return { week: p[0], location: p[1], count: starts[k] };
@@ -415,6 +451,7 @@
       candidates: candidates.people,
       openSlots: candidates.openSlots,
       slots: candidates.slots,
+      wtRows: candidates.wtRows,
       starts: candidates.starts,
       orders: readOrders(sheets, opts.ShiftKey, customers),
       attendance: readAttendance(sheets)
@@ -451,7 +488,10 @@
       else if (now.wtDate && was && was.wtDate && now.wtDate !== was.wtDate) {
         out.walkthroughs.rescheduled.push(Object.assign({}, now, { fromWtDate: was.wtDate }));
       }
-      if (colours && now.highlight && (!was || was.highlight !== now.highlight)) {
+      // Only while they are still a candidate: the STARTED tab is blue throughout,
+      // and moving there is already reported as completed.
+      var candidate = now.stage === 'openings' || now.stage === 'pipeline';
+      if (colours && candidate && now.highlight && (!was || was.highlight !== now.highlight)) {
         out.walkthroughs[now.highlight].push(now);
       }
       if (now.stage === 'started' && (!was || was.stage !== 'started')) {
@@ -552,11 +592,14 @@
     snap = snap || {};
     var rows = {};
     var row = function (loc, customer) {
+      // A repeated header row ("Building") or a note in the column is no site.
+      if (!/^\d/.test(String(loc || ''))) loc = '';
       var k = loc + '|' + (customer || '');
       return rows[k] || (rows[k] = { location: loc, customer: customer || '', onRoster: 0,
         orders: 0, openings: 0, openSlots: 0, candidates: 0, accepted: 0, approved: 0,
         openingsByPosition: {}, slotsByPosition: {}, candidatesByPosition: {}, reqs: [], otherColors: {},
-        slotColors: {} });
+        slotColors: {}, wt: { mh: { open: 0, identified: 0 }, op: { open: 0, identified: 0 }, other: { open: 0, identified: 0 } },
+        wtExcluded: { notFit: 0, noShow: 0, waiting: 0, withdrawn: 0 } });
     };
     var add = function (map, k, n) { map[k] = (map[k] || 0) + n; };
     values(snap.roster).forEach(function (p) { row(p.location, p.customer).onRoster++; });
@@ -579,12 +622,27 @@
       if (c.highlight) r[c.highlight]++;
       else if (c.color) add(r.otherColors, c.color, 1);
     });
+    /* Open positions, the way the meeting counts them: every WT List row is an
+       opening, and a named row is identified unless it is red, orange or yellow,
+       or the person has since been withdrawn onto a DNR / cancelled tab. Colours
+       only count when this snapshot was read for them. */
+    (snap.wtRows || []).forEach(function (w) {
+      var r = row(w.location, w.customer), g = r.wt[groupOf(w.position)];
+      g.open++;
+      if (!w.name) return;
+      var c = snap.candidates && snap.candidates[w.key];
+      var reason = c && c.stage === 'cancelled' ? 'withdrawn' : snap.highlights ? NOT_IDENTIFIED[w.color] : '';
+      if (reason) r.wtExcluded[reason]++;
+      else g.identified++;
+    });
     var customers = snap.customers || {};
     Object.keys(customers).forEach(function (loc) { customers[loc].forEach(function (c) { row(loc, c); }); });
 
     var sites = {};
     values(snap.sites).forEach(function (s) {
-      sites[s.location] = Object.assign({ onRoster: 0 }, s);
+      // "1500 - Lindt HC" is Lindt; "1502 - HC" has no name of its own.
+      var label = String(s.sheet || '').replace(/^\d+\s*-?\s*/, '').replace(/\s*HC$/i, '').trim();
+      sites[s.location] = Object.assign({ onRoster: 0, label: label }, s);
     });
     values(rows).forEach(function (r) {
       var s = sites[r.location] || (sites[r.location] = { location: r.location, sheet: '', expected: null,
@@ -598,7 +656,7 @@
       takenAt: snap.takenAt || '',
       highlights: !!snap.highlights,
       rows: values(rows).filter(function (r) { return r.location; }).sort(sort),
-      sites: values(sites).filter(function (s) { return s.location; }).sort(sort),
+      sites: values(sites).filter(function (s) { return /^\d/.test(String(s.location || '')); }).sort(sort),
       starts: (snap.starts || []).slice()
     };
   }
@@ -628,6 +686,18 @@
       var x = sites[h.location] || (sites[h.location] = { onRoster: 0, added: 0, removed: 0 });
       x.added = h.added || 0; x.removed = h.removed || 0;
     });
+    // Open positions too, so they can be reported on over time like headcount.
+    if (snap.wtRows) {
+      var byLoc = {};
+      profile(snap).rows.forEach(function (r) { (byLoc[r.location] = byLoc[r.location] || []).push(r); });
+      Object.keys(byLoc).forEach(function (loc) {
+        var o = openPositions(byLoc[loc]);
+        if (!o.open) return;
+        var x = sites[loc] || (sites[loc] = { onRoster: 0, added: 0, removed: 0 });
+        x.open = o.open; x.identified = o.identified;
+        x.mhOpen = o.mh.open; x.mhIdentified = o.mh.identified; x.opOpen = o.op.open; x.opIdentified = o.op.identified;
+      });
+    }
     return { takenAt: snap.takenAt, sites: sites };
   }
   function pruneSeries(points, now) {
@@ -673,12 +743,14 @@
           var s = row.sites[loc] || (row.sites[loc] = { added: 0, removed: 0 });
           s.onRoster = latest.sites[loc].onRoster || 0;
           if (latest.sites[loc].expected != null) s.expected = latest.sites[loc].expected;
+          if (latest.sites[loc].open != null) { s.open = latest.sites[loc].open; s.identified = latest.sites[loc].identified || 0; }
         });
       }
       Object.keys(row.sites).forEach(function (loc) {
         var s = row.sites[loc];
         row.onRoster += s.onRoster || 0;
         row.added += s.added; row.removed += s.removed;
+        if (s.open != null) { row.open = (row.open || 0) + s.open; row.identified = (row.identified || 0) + s.identified; }
         if (s.expected != null) row.expected = (row.expected || 0) + s.expected;
       });
       row.known = !!latest;
@@ -736,6 +808,7 @@
   var api = {
     VERSION: VERSION, RETENTION_DAYS: RETENTION_DAYS, SERIES_DAYS: SERIES_DAYS,
     nameKey: nameKey, stageOf: stageOf, positionOf: positionOf, colorName: colorName,
+    groupOf: groupOf, openPositions: openPositions,
     rowFills: rowFills, parseDay: parseDay, weekOf: weekOf,
     snapshot: snapshot, diff: diff, filterDiff: filterDiff, changed: changed,
     profile: profile, filterProfile: filterProfile,

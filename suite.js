@@ -5899,37 +5899,6 @@
           return '<tr>' + cols.map(function (c) { return '<td>' + esc(c[1](r) || '—') + '</td>'; }).join('') + '</tr>';
         }).join('') + '</tbody></table></div>' : '') + '</details>';
   }
-  function meetingText(cmpn, ch) {
-    var c = ch.counts, lines = ['PLX workbook changes, ' + meetingWhen(cmpn.from.takenAt) + ' to ' +
-      meetingWhen(cmpn.to.takenAt) + (state.market === 'all' ? '' : ' (' + state.market + ')')];
-    lines.push('Assignments: ' + c.started + ' started, ' + c.ended + ' ended (headcount ' +
-      c.headcountFrom + ' to ' + c.headcountTo + ')');
-    lines.push('Walkthroughs: ' + c.wtScheduled + ' scheduled, ' + (ch.highlights ? c.wtAccepted +
-      ' accepted for WT, ' + c.wtApproved + ' approved for start, ' : '') + c.wtCompleted + ' completed, ' +
-      c.wtCancelled + ' cancelled, ' + c.wtRescheduled + ' rescheduled');
-    lines.push('Orders: ' + c.ordersCreated + ' created (' + c.openingsCreated + ' openings), ' +
-      c.ordersClosed + ' filled/closed (' + c.openingsClosed + ' openings), ' + c.ordersChanged + ' changed');
-    lines.push('Open walkthrough slots: ' + c.openSlotsFrom + ' to ' + c.openSlotsTo);
-    lines.push('Attendance occurrences logged: ' + c.occurrences);
-    var named = function (label, list, fmt) {
-      if (list.length) lines.push('', label + ':', list.map(function (x) { return '  - ' + fmt(x); }).join('\n'));
-    };
-    var who = function (x) { return x.name + (x.location ? ' (' + x.location + ')' : ''); };
-    named('Started', ch.assignments.started, who);
-    named('Ended', ch.assignments.ended, who);
-    var bySite = ch.headcount.filter(function (h) { return h.added || h.removed; });
-    if (bySite.length) {
-      lines.push('', 'Headcount by site:', bySite.map(function (h) {
-        return '  - ' + h.location + ': ' + h.from + ' to ' + h.to + ' (+' + h.added + ' / -' + h.removed + ')';
-      }).join('\n'));
-    }
-    named('Walkthroughs scheduled', ch.walkthroughs.scheduled, function (x) { return who(x) + ' ' + x.wtDate; });
-    named('Walkthroughs completed', ch.walkthroughs.completed, who);
-    named('New orders', ch.orders.created, function (x) { return 'Req ' + x.req + ' ' + x.location + ' ' + x.account + ' x' + x.openings; });
-    named('Filled/closed orders', ch.orders.closed, function (x) { return 'Req ' + x.req + ' ' + x.location + ' ' + x.account + ' x' + x.openings; });
-    return lines.join('\n');
-  }
-
   /* The header's market picker, applied to the weekly trend. The server has
      already dropped sites this account may not see; this narrows further and
      re-adds the totals from what is left. */
@@ -5995,143 +5964,6 @@
     var board = reqBoard(), rows = reqBoardInMarket(board), byKey = {};
     board.reqs.forEach(function (r) { if (r.key) byKey[r.key] = r; });
     return { rows: rows, summary: summarizeVisible(rows), byKey: byKey };
-  }
-
-  function meetingCurrent(profile, bee, d) {
-    var rows = profile.rows, sites = profile.sites;
-    var onRoster = sumBy(sites, 'onRoster');
-    var expectedSites = sites.filter(function (x) { return x.expected != null; });
-    var expected = expectedSites.length ? sumBy(expectedSites, 'expected') : null;
-    var cands = sumBy(rows, 'candidates'), acc = sumBy(rows, 'accepted'), appr = sumBy(rows, 'approved');
-    var bs = bee.summary;
-    var tiles = '<div class="meeting-tiles meeting-tiles-wide">' +
-      meetingTile('On roster', onRoster, expected == null ? 'HC tabs' : expected + ' expected · ' + signed(onRoster - expected) + ' vs expected') +
-      meetingTile('Open orders', sumBy(rows, 'orders'), plural(sumBy(rows, 'openings'), 'opening') + ' on Beeline Reqs tab') +
-      meetingTile('Open WT slots', sumBy(rows, 'openSlots'), 'Unnamed rows on the WT List') +
-      meetingTile('Candidates identified', cands, profile.highlights
-        ? acc + ' accepted for WT (green) · ' + appr + ' approved for start (blue)' : 'WT List + Pipeline') +
-      meetingTile('Beeline open reqs', bs.reqs, (bs.shortBy == null ? 'No openings recorded' : bs.shortBy + ' seats short') +
-        ' · ' + plural(bs.candidates, 'candidate')) +
-      '</div>';
-    return meetingPanel('Where things stand', 'As of the upload of ' + esc(meetingWhen(profile.takenAt)), tiles);
-  }
-
-  function meetingSites(profile, d) {
-    var bySite = {};
-    (d ? d.headcount : []).forEach(function (h) { bySite[h.location] = h; });
-    var customersAt = {};
-    profile.rows.forEach(function (r) {
-      if (r.customer) (customersAt[r.location] = customersAt[r.location] || []).push(r.customer);
-    });
-    var body = profile.sites.map(function (x) {
-      var h = bySite[x.location];
-      var gap = x.expected == null ? null : x.onRoster - x.expected;
-      return '<tr>' + td('<b>' + esc(x.location) + '</b>' + (x.sheet ? '<div class="sub">' + esc(x.sheet) + '</div>' : '')) +
-        td(esc((customersAt[x.location] || []).join(', ') || '—'), 'meeting-wrap') +
-        td(esc(x.expected == null ? '—' : x.expected), 'num') + td(esc(x.onRoster), 'num') + deltaCell(gap) +
-        (d ? td(h && h.added ? '+' + h.added : '0', 'num meeting-up') + td(h && h.removed ? '−' + h.removed : '0', 'num meeting-down') +
-          deltaCell(h ? h.to - h.from : 0) : '') + '</tr>';
-    });
-    var head = ['Site', 'Customers', 'Expected', 'On roster', 'vs expected'].concat(d ? ['Added', 'Removed', 'Net'] : []);
-    var c = d && d.counts;
-    var foot = '<tr>' + td('<b>Total</b>') + td('') + td('') + td('<b>' + sumBy(profile.sites, 'onRoster') + '</b>', 'num') + td('') +
-      (d ? td('+' + c.started, 'num meeting-up') + td('−' + c.ended, 'num meeting-down') + deltaCell(c.headcountTo - c.headcountFrom) : '') + '</tr>';
-    return meetingPanel('Headcount by site', d
-      ? 'Added and removed are the people behind the net change since ' + esc(meetingWhen(state.meeting.data.comparison.from.takenAt))
-      : 'Upload the workbook again to see who was added and removed', meetingSimpleTable(head, body, foot));
-  }
-
-  function meetingTrend(trend, starts) {
-    var weeks = trend.filter(function (w) { return w.known; });
-    var startsBy = {};
-    (starts || []).forEach(function (x) { startsBy[x.week] = (startsBy[x.week] || 0) + x.count; });
-    if (!weeks.length) {
-      return meetingPanel('Week over week', '', '<div class="workflow-empty">The weekly trend starts with the first ' +
-        'upload kept, and grows by a row every week from there.</div>');
-    }
-    var sites = {};
-    weeks.forEach(function (w) { Object.keys(w.sites).forEach(function (loc) { sites[loc] = true; }); });
-    sites = Object.keys(sites).sort();
-    var body = weeks.slice().reverse().map(function (w) {
-      return '<tr>' + td('<b>' + esc(formatDate(w.week, false)) + '</b>' + (w.readings ? '' : '<div class="sub">No upload; carried forward</div>')) +
-        td(esc(w.onRoster), 'num') + deltaCell(w.change) + td(w.added ? '+' + w.added : '0', 'num meeting-up') +
-        td(w.removed ? '−' + w.removed : '0', 'num meeting-down') + td(esc(startsBy[w.week] || 0), 'num') +
-        sites.map(function (loc) {
-          var x = w.sites[loc];
-          return td(x && x.onRoster != null ? esc(x.onRoster) + (x.change ? ' <small class="' +
-            (x.change > 0 ? 'meeting-up' : 'meeting-down') + '">' + esc(signed(x.change)) + '</small>' : '') : '—', 'num');
-        }).join('') + '</tr>';
-    });
-    return meetingPanel('Week over week', 'Headcount at the end of each week (Mon–Sun). Starts are from the STARTED tabs.',
-      meetingSimpleTable(['Week of', 'Headcount', 'Change', 'Added', 'Removed', 'Starts']
-        .concat(sites.map(function (loc) { return esc(loc); })), body));
-  }
-
-  function meetingStarts(starts) {
-    var weeks = {};
-    (starts || []).forEach(function (x) { (weeks[x.week] = weeks[x.week] || []).push(x); });
-    var list = Object.keys(weeks).sort().slice(-8).reverse();
-    if (!list.length) return '';
-    var max = Math.max.apply(null, list.map(function (w) { return sumBy(weeks[w], 'count'); })) || 1;
-    var body = list.map(function (w) {
-      var n = sumBy(weeks[w], 'count');
-      return '<tr>' + td('<b>' + esc(formatDate(w, false)) + '</b>') +
-        td('<span class="meeting-bar"><span style="width:' + Math.round(n / max * 100) + '%"></span></span>', 'meeting-bar-cell') +
-        td(esc(n), 'num') + td(esc(weeks[w].sort(function (a, b) { return String(a.location).localeCompare(String(b.location)); })
-          .map(function (x) { return x.location + ': ' + x.count; }).join(' · ')), 'meeting-wrap') + '</tr>';
-    });
-    return meetingPanel('Starts per week', 'Rows on the STARTED tabs by start date, last 8 weeks with starts',
-      meetingSimpleTable(['Week of', '', 'Starts', 'By site'], body));
-  }
-
-  function meetingCustomers(profile, bee) {
-    var body = profile.rows.filter(function (r) {
-      return r.onRoster || r.orders || r.openSlots || r.candidates;
-    }).map(function (r) {
-      var o = positionSplit(r.openingsByPosition);
-      var b = { requested: 0, hired: 0, candidates: 0, found: 0 };
-      (r.reqs || []).forEach(function (req) {
-        var x = bee.byKey[ReqsCore.reqKey(req)];
-        if (!x) return;
-        b.found++; b.requested += Number(x.requested) || 0; b.hired += Number(x.hired) || 0;
-        b.candidates += x.candidateCount || 0;
-      });
-      var colours = colorList(r.otherColors);
-      return '<tr>' + td('<b>' + esc(r.location) + '</b>') + td(esc(r.customer || 'Not recorded')) +
-        td(esc(r.onRoster), 'num') + td(esc(r.orders), 'num') + td('<b>' + esc(r.openings) + '</b>', 'num') +
-        o.map(function (n) { return td(n ? esc(n) : '·', 'num'); }).join('') +
-        td(esc(r.openSlots), 'num') + td(esc(r.candidates), 'num') +
-        td(profile.highlights ? esc(r.accepted) : '—', 'num') + td(profile.highlights ? esc(r.approved) : '—', 'num') +
-        td(r.reqs.length ? (b.found ? esc(b.hired + '/' + b.requested) + ' · ' + esc(plural(b.candidates, 'cand.')) : 'Not in Beeline') : '—', 'meeting-wrap') +
-        '</tr>' + (colours ? '<tr class="meeting-note-row"><td></td><td colspan="12">Other highlights on candidates: ' + esc(colours) + '</td></tr>' : '');
-    });
-    if (!body.length) return '';
-    var head = ['Site', 'Customer', 'On roster', 'Orders', 'Openings', 'Operator', 'Material Handler', 'Other',
-      'Open WT slots', 'Candidates', 'Accepted (green)', 'Approved (blue)', 'Beeline hired/req.'];
-    return meetingPanel('Orders by customer', 'Openings by position are from the Beeline Reqs tab; Beeline figures are joined on the Req #',
-      meetingSimpleTable(head, body));
-  }
-
-  function meetingPositions(profile, bee) {
-    var openings = {}, slots = {}, cands = {}, beeShort = {};
-    profile.rows.forEach(function (r) {
-      addInto(openings, r.openingsByPosition); addInto(slots, r.slotsByPosition); addInto(cands, r.candidatesByPosition);
-    });
-    bee.rows.forEach(function (r) {
-      var k = PlxHistory.positionOf(r.jobPosition, r.title);
-      beeShort[k] = (beeShort[k] || 0) + (Number(r.shortBy) || 0);
-    });
-    var names = Object.keys(Object.assign({}, openings, slots, cands, beeShort)).sort(function (a, b) {
-      var ia = MEETING_POSITIONS.indexOf(a), ib = MEETING_POSITIONS.indexOf(b);
-      return (ia === -1 ? 9 : ia) - (ib === -1 ? 9 : ib) || a.localeCompare(b);
-    });
-    if (!names.length) return '';
-    var body = names.map(function (k) {
-      return '<tr>' + td('<b>' + esc(k) + '</b>') + td(esc(openings[k] || 0), 'num') + td(esc(slots[k] || 0), 'num') +
-        td(esc(cands[k] || 0), 'num') + td(esc(beeShort[k] || 0), 'num') + '</tr>';
-    });
-    return meetingPanel('Open positions', 'Material Handler includes Sr / MATH 1–3; Operator includes OPR, EPJ, reach and sit-down',
-      meetingSimpleTable(['Position', 'Openings (workbook)', 'Open WT slots', 'Candidates identified', 'Beeline seats short'], body));
   }
 
   function meetingChanges(d, cmpn) {
@@ -6208,12 +6040,206 @@
       '</section>';
   }
 
+  /* ---------- the summary Jared's prep email gives, built from the workbook ----------
+     Open positions by building, with the drill-down by customer further down the
+     page. Every WT List row is an opening; see PlxHistory.profile() for when a
+     named row counts as identified. */
+  function meetingSiteLabel(site, rows) {
+    var loc = (state.stores.locations || []).filter(function (l) { return String(l.code) === String(site.location); })[0];
+    if (loc && loc.name) return loc.name;
+    if (site.label) return site.label;
+    return rows.filter(function (r) { return r.wt && (r.wt.mh.open + r.wt.op.open + r.wt.other.open); })
+      .map(function (r) { return r.customer; }).filter(Boolean).join(' / ');
+  }
+  function meetingBuildings(profile) {
+    var by = {};
+    profile.rows.forEach(function (r) { (by[r.location] = by[r.location] || []).push(r); });
+    return profile.sites.map(function (site) {
+      var rows = by[site.location] || [];
+      return { location: site.location, site: site, rows: rows, label: meetingSiteLabel(site, rows),
+        o: PlxHistory.openPositions(rows) };
+    });
+  }
+  var GROUP_NAMES = { mh: ['Material Handler', 'Material Handlers'], op: ['Operator', 'Operators'], other: ['other', 'other'] };
+  function groupPlural(g, n) { return n + ' ' + GROUP_NAMES[g][n === 1 ? 0 : 1]; }
+  // The sentences Jared writes under his table, so they can be read out as-is.
+  function meetingNeedsText(buildings, t) {
+    var lines = ['There are ' + t.open + ' total open positions, with ' + t.identified + ' candidates identified and ' +
+      t.needed + ' still needing candidates.'];
+    var needs = buildings.filter(function (b) { return b.o.needed; })
+      .sort(function (a, b) { return b.o.needed - a.o.needed || String(a.location).localeCompare(String(b.location)); })
+      .map(function (b) {
+        var groups = ['mh', 'op', 'other'].filter(function (g) { return b.o[g].needed; });
+        var top = groups.slice().sort(function (x, y) { return b.o[y].needed - b.o[x].needed; })[0];
+        var text = groups.length === 1 ? groupPlural(top, b.o[top].needed) + ' still needed'
+          : b.o.needed + ' still needed, including ' + groupPlural(top, b.o[top].needed);
+        return b.location + ': ' + text;
+      });
+    var across = 'Across all buildings, the remaining recruiting need is ' + groupPlural('mh', t.mh.needed) + ' and ' +
+      groupPlural('op', t.op.needed) + (t.other.needed ? ' (plus ' + t.other.needed + ' other)' : '') + '.';
+    return { opening: lines[0], needs: needs, across: across };
+  }
+  function meetingLatestWeek(trend) {
+    var known = trend.filter(function (w) { return w.known; });
+    return known[known.length - 1] || null;
+  }
+
+  function meetingStrip(t, profile, week) {
+    var onRoster = sumBy(profile.sites, 'onRoster');
+    var withExp = profile.sites.filter(function (x) { return x.expected != null; });
+    var expected = withExp.length ? sumBy(withExp, 'expected') : null;
+    return '<div class="meeting-strip">' +
+      meetingTile('Open positions', t.open, 'WT List rows', '') +
+      meetingTile('Identified', t.identified, Math.round(t.open ? t.identified / t.open * 100 : 0) + '% of open positions', 'green') +
+      meetingTile('Still needed', t.needed, t.mh.needed + ' Material Handler · ' + t.op.needed + ' Operator' +
+        (t.other.needed ? ' · ' + t.other.needed + ' other' : ''), t.needed ? 'red' : '') +
+      meetingTile('On roster', onRoster, expected == null ? 'HC tabs' : signed(onRoster - expected) + ' vs ' + expected + ' expected') +
+      meetingTile('This week', week && week.change != null ? signed(week.change) : '—',
+        week ? '+' + week.added + ' added · −' + week.removed + ' removed' : 'No weekly history yet') +
+      '</div>';
+  }
+
+  function meetingOpenTable(buildings, t) {
+    var cell3 = function (g) {
+      return td(esc(g.open), 'num') + td(esc(g.identified), 'num') + td('<b>' + esc(g.needed) + '</b>', 'num meeting-need');
+    };
+    var other = t.other.open > 0;
+    var rows = buildings.filter(function (b) { return b.o.open; }).map(function (b) {
+      return '<tr>' + td('<b>' + esc(b.location) + '</b>' + (b.label ? ' <span class="meeting-label-sub">' + esc(b.label) + '</span>' : '')) +
+        cell3(b.o.mh) + cell3(b.o.op) + (other ? td(esc(b.o.other.open), 'num') : '') +
+        td('<b>' + esc(b.o.open) + '</b>', 'num') + td('<b>' + esc(b.o.needed) + '</b>', 'num meeting-need') + '</tr>';
+    });
+    if (!rows.length) return meetingPanel('Open positions', '', '<div class="workflow-empty">The WT List has no open positions in this market.</div>');
+    var foot = '<tr>' + td('<b>Total</b>') + cell3(t.mh) + cell3(t.op) + (other ? td(esc(t.other.open), 'num') : '') +
+      td('<b>' + esc(t.open) + '</b>', 'num') + td('<b>' + esc(t.needed) + '</b>', 'num meeting-need') + '</tr>';
+    var head = ['Building', 'MH openings', 'MH identified', 'MH still needed', 'Op openings', 'Op identified', 'Op still needed']
+      .concat(other ? ['Other open'] : []).concat(['Total open', 'Total needed']);
+    var n = meetingNeedsText(buildings, t);
+    var x = t.excluded;
+    var notCounted = [x.notFit && x.notFit + ' not a fit (red)', x.noShow && x.noShow + ' no-show (orange)',
+      x.waiting && x.waiting + ' waiting for a spot (yellow)', x.withdrawn && x.withdrawn + ' withdrawn (NOT ELIGIBLE tab)']
+      .filter(Boolean);
+    return meetingPanel('Open positions by building', 'Every WT List row is an opening; a named row is identified',
+      meetingSimpleTable(head, rows, foot) +
+      '<div class="meeting-needs"><p>' + esc(n.opening) + '</p>' +
+      (n.needs.length ? '<p>The largest remaining needs are:</p><ul>' + n.needs.map(function (l) {
+        var i = l.indexOf(':');
+        return '<li><b>' + esc(l.slice(0, i + 1)) + '</b>' + esc(l.slice(i + 1)) + '</li>';
+      }).join('') + '</ul>' : '') + '<p>' + esc(n.across) + '</p>' +
+      (notCounted.length ? '<p class="meeting-fine">Named but not counted as identified: ' + esc(notCounted.join(', ')) + '.</p>' : '') +
+      '</div>');
+  }
+
+  function meetingHeadcount(profile, ch, trend) {
+    var bySite = {};
+    (ch ? ch.headcount : []).forEach(function (h) { bySite[h.location] = h; });
+    var recent = trend.filter(function (w) { return w.known; }).slice(-4);
+    var body = profile.sites.filter(function (x) { return x.onRoster || x.expected != null; }).map(function (x) {
+      var h = bySite[x.location];
+      var gap = x.expected == null ? null : x.onRoster - x.expected;
+      var weeks = recent.map(function (w) {
+        var s = w.sites[x.location];
+        return s && s.change != null ? signed(s.change) : '·';
+      }).join('  ');
+      return '<tr>' + td('<b>' + esc(x.location) + '</b>' + (x.label ? ' <span class="meeting-label-sub">' + esc(x.label) + '</span>' : '')) +
+        td(esc(x.expected == null ? '—' : x.expected), 'num') + td(esc(x.onRoster), 'num') + deltaCell(gap) +
+        (ch ? td(h && h.added ? '+' + h.added : '0', 'num meeting-up') + td(h && h.removed ? '−' + h.removed : '0', 'num meeting-down') +
+          deltaCell(h ? h.to - h.from : 0) : '') +
+        td(esc(weeks || '—'), 'num meeting-weeks') + '</tr>';
+    });
+    var head = ['Site', 'Expected', 'On roster', 'vs expected'].concat(ch ? ['Added', 'Removed', 'Net'] : [])
+      .concat(['Last ' + (recent.length || 4) + ' weeks']);
+    var c = ch && ch.counts;
+    var withExp = profile.sites.filter(function (x) { return x.expected != null; });
+    var foot = '<tr>' + td('<b>Total</b>') + td(withExp.length ? esc(sumBy(withExp, 'expected')) : '—', 'num') +
+      td('<b>' + sumBy(profile.sites, 'onRoster') + '</b>', 'num') + td('') +
+      (ch ? td('+' + c.started, 'num meeting-up') + td('−' + c.ended, 'num meeting-down') + deltaCell(c.headcountTo - c.headcountFrom) : '') +
+      td(esc(recent.map(function (w) { return signed(w.change); }).join('  ')), 'num meeting-weeks') + '</tr>';
+    return meetingPanel('Headcount', ch
+      ? 'Added / removed since ' + esc(meetingWhen(state.meeting.data.comparison.from.takenAt)) + ' — the people behind the net'
+      : 'Added and removed appear from the second upload',
+      meetingSimpleTable(head, body, foot) + meetingTrendDetail(trend, profile.starts));
+  }
+  function meetingTrendDetail(trend, starts) {
+    var weeks = trend.filter(function (w) { return w.known; });
+    if (!weeks.length) return '';
+    var startsBy = {};
+    (starts || []).forEach(function (x) { startsBy[x.week] = (startsBy[x.week] || 0) + x.count; });
+    var body = weeks.slice().reverse().map(function (w) {
+      return '<tr>' + td('<b>' + esc(formatDate(w.week, false)) + '</b>' + (w.readings ? '' : '<div class="sub">No upload; carried forward</div>')) +
+        td(esc(w.onRoster), 'num') + deltaCell(w.change) + td(w.added ? '+' + w.added : '0', 'num meeting-up') +
+        td(w.removed ? '−' + w.removed : '0', 'num meeting-down') + td(esc(startsBy[w.week] || 0), 'num') +
+        td(w.open == null ? '—' : esc(w.open), 'num') + td(w.open == null ? '—' : esc(w.open - w.identified), 'num') + '</tr>';
+    });
+    return '<details class="meeting-fold meeting-inner"><summary>Week over week, last ' + weeks.length + ' week' +
+      (weeks.length === 1 ? '' : 's') + '</summary>' +
+      meetingSimpleTable(['Week of', 'Headcount', 'Change', 'Added', 'Removed', 'Starts', 'Open positions', 'Still needed'], body) +
+      '<p class="meeting-fine">Headcount at the end of each week (Mon–Sun). Starts are rows on the STARTED tabs by start date.</p></details>';
+  }
+
+  function meetingDrilldown(buildings, bee, profile) {
+    var list = buildings.filter(function (b) {
+      return b.o.open || b.rows.some(function (r) { return r.onRoster || r.orders || r.candidates; });
+    });
+    if (!list.length) return '';
+    return '<h2 class="meeting-heading">By building and customer</h2>' + list.map(function (b) {
+      var rows = b.rows.filter(function (r) {
+        return r.onRoster || r.orders || r.candidates || (r.wt.mh.open + r.wt.op.open + r.wt.other.open);
+      }).map(function (r) {
+        var o = PlxHistory.openPositions([r]);
+        var bl = { requested: 0, hired: 0, found: 0 };
+        (r.reqs || []).forEach(function (req) {
+          var x = bee.byKey[ReqsCore.reqKey(req)];
+          if (!x) return;
+          bl.found++; bl.requested += Number(x.requested) || 0; bl.hired += Number(x.hired) || 0;
+        });
+        var x = r.wtExcluded, notCounted = x.notFit + x.noShow + x.waiting + x.withdrawn;
+        return '<tr>' + td('<b>' + esc(r.customer || 'Not recorded') + '</b>') + td(esc(r.onRoster), 'num') +
+          td(esc(o.mh.open ? o.mh.identified + ' / ' + o.mh.open : '·'), 'num') +
+          td(esc(o.op.open ? o.op.identified + ' / ' + o.op.open : '·'), 'num') +
+          (b.o.other.open ? td(esc(o.other.open ? o.other.identified + ' / ' + o.other.open : '·'), 'num') : '') +
+          td('<b>' + esc(o.needed) + '</b>', 'num meeting-need') +
+          td(profile.highlights ? esc(r.accepted) : '—', 'num') + td(profile.highlights ? esc(r.approved) : '—', 'num') +
+          td(notCounted ? esc(notCounted) : '·', 'num') +
+          td(r.orders ? esc(r.openings) + ' on ' + esc(plural(r.orders, 'req')) : '·', 'num') +
+          td(r.reqs.length ? (bl.found ? esc(bl.hired + ' / ' + bl.requested) : 'Not in Beeline') : '·', 'num') + '</tr>';
+      });
+      return '<details class="meeting-fold meeting-building"><summary><b>' + esc(b.location) + '</b>' +
+        (b.label ? ' · ' + esc(b.label) : '') + '<span class="meeting-sub">' + esc(b.o.open) + ' open · ' +
+        esc(b.o.identified) + ' identified · <b>' + esc(b.o.needed) + ' needed</b> · ' + esc(b.site.onRoster) +
+        ' on roster</span></summary>' +
+        meetingSimpleTable(['Customer', 'Roster', 'MH ident. / open', 'Op ident. / open']
+          .concat(b.o.other.open ? ['Other ident. / open'] : [])
+          .concat(['Needed', 'Green', 'Blue', 'Not counted', 'Reqs tab', 'Beeline hired / req.']), rows) +
+        '</details>';
+    }).join('') + '<p class="meeting-fine">Not counted: named rows that are red (not a fit), orange (no-show), yellow ' +
+      '(waiting for a spot), or withdrawn on the NOT ELIGIBLE tab. Beeline figures are joined on the Req #.</p>';
+  }
+
   function meetingView() {
     var m = state.meeting, d = m.data;
     if (!d && !m.loading && !m.error) loadMeeting();
     var uploads = (d && d.uploads) || [];
+    if (m.loading && !d) return '<div class="workflow-empty">Loading the workbook history…</div>';
+    if (m.error) return '<div class="workflow-empty warn-text" role="alert">' + esc(m.error) + '</div>';
+    if (!d || !d.profile) {
+      return empty('No workbook kept yet', (d && d.note) ||
+        'Meeting Prep fills in once the PLX workbook has been uploaded. Uploads are kept for 7 days.');
+    }
+    var profile = meetingProfileInMarket(d.profile), bee = meetingBeeline();
+    var trend = meetingTrendInMarket(d.trend);
+    var buildings = meetingBuildings(profile), t = PlxHistory.openPositions(profile.rows);
+    var cmpn = d.comparison && !(m.range === 'pick' && !m.from) ? d.comparison : null;
+    var ch = cmpn ? meetingInMarket(cmpn.changes) : null;
+
+    var actions = '<div class="meeting-top"><p>As of the workbook uploaded <b>' + esc(meetingWhen(profile.takenAt)) + '</b>' +
+      (state.market === 'all' ? '' : ' · ' + esc(state.market)) + '. Beeline figures come from the daily exports.</p>' +
+      '<span class="meeting-actions"><button type="button" class="suite-btn" data-meeting-refresh>Refresh</button>' +
+      '<button type="button" class="suite-btn" data-meeting-excel>Download Excel</button>' +
+      '<button type="button" class="suite-btn primary" data-meeting-email>Copy as email</button></span></div>' +
+      (m.copied ? '<p class="meeting-window" role="status">' + esc(m.copied) + '</p>' : '');
+
     var toolbar = '<div class="filter-row meeting-ranges" role="group" aria-label="Compare window">' +
-      '<span class="meeting-label">Changes</span>' +
       MEETING_RANGES.map(function (r) {
         return '<button type="button" class="suite-btn ' + (m.range === r[0] ? 'primary' : '') +
           '" aria-pressed="' + (m.range === r[0]) + '" data-meeting-range="' + r[0] + '">' + esc(r[1]) + '</button>';
@@ -6222,36 +6248,19 @@
         '<option value="">Choose an upload…</option>' + uploads.slice(0, -1).reverse().map(function (u) {
           return '<option value="' + esc(u.id) + '"' + (m.from === u.id ? ' selected' : '') + '>' +
             esc(meetingWhen(u.takenAt)) + (u.uploadedBy ? ' · ' + esc(u.uploadedBy) : '') + '</option>';
-        }).join('') + '</select>' : '') +
-      '<span class="meeting-actions"><button type="button" class="suite-btn" data-meeting-refresh>Refresh</button>' +
-      (d && d.comparison ? '<button type="button" class="suite-btn" data-meeting-copy>Copy summary</button>' : '') +
-      '</span></div>';
+        }).join('') + '</select>' : '') + '</div>';
+    var changes = '<details class="meeting-fold meeting-section"' + (m.changesOpen ? ' open' : '') + ' data-meeting-changes>' +
+      '<summary><b>What changed</b><span class="meeting-sub">' + (ch
+        ? esc(meetingHeadline(ch.counts)) + ' · since ' + esc(meetingWhen(cmpn.from.takenAt))
+        : esc(d.note || 'Needs two uploads')) + '</span></summary>' + toolbar +
+      (ch ? meetingChanges(ch, cmpn)
+        : m.range === 'pick' && !m.from ? '<div class="workflow-empty">Choose the upload to compare the newest one against.</div>'
+        : '<div class="workflow-empty">' + esc(d.note || 'Changes appear once the workbook has been uploaded twice.') + '</div>') +
+      '</details>';
 
-    var body;
-    if (m.loading && !d) body = '<div class="workflow-empty">Loading the workbook history…</div>';
-    else if (m.error) body = '<div class="workflow-empty warn-text" role="alert">' + esc(m.error) + '</div>';
-    else if (!d || !d.profile) {
-      body = empty('No workbook kept yet', (d && d.note) ||
-        'Meeting Prep fills in once the PLX workbook has been uploaded. Uploads are kept for 7 days.');
-    } else {
-      var profile = meetingProfileInMarket(d.profile), bee = meetingBeeline();
-      var cmpn = d.comparison && !(m.range === 'pick' && !m.from) ? d.comparison : null;
-      var ch = cmpn ? meetingInMarket(cmpn.changes) : null;
-      body = meetingCurrent(profile, bee, ch) +
-        meetingSites(profile, ch) +
-        meetingTrend(meetingTrendInMarket(d.trend), profile.starts) +
-        '<div class="meeting-two">' + meetingPositions(profile, bee) + meetingStarts(profile.starts) + '</div>' +
-        meetingCustomers(profile, bee) +
-        '<h2 class="meeting-heading">What changed</h2>' + toolbar +
-        (m.copied ? '<p class="meeting-window" role="status">' + esc(m.copied) + '</p>' : '') +
-        (ch ? meetingChanges(ch, cmpn)
-          : m.range === 'pick' && !m.from ? '<div class="workflow-empty">Choose the upload to compare the newest one against.</div>'
-          : empty('Nothing to compare yet', d.note || 'Changes appear once the workbook has been uploaded twice.'));
-    }
-
-    var history = uploads.length ? '<section class="suite-panel meeting-history"><div class="suite-panel-head">' +
-      '<h2>Uploads kept</h2><span class="meeting-sub">The last ' + esc(d.retentionDays || 7) +
-      ' days, plus the newest however old. Identical files are stored once.</span></div>' +
+    var history = uploads.length ? '<details class="meeting-fold meeting-section"><summary><b>Uploads kept</b>' +
+      '<span class="meeting-sub">' + plural(uploads.length, 'upload') + ' · the last ' + esc(d.retentionDays || 7) +
+      ' days, plus the newest however old</span></summary>' +
       '<div class="suite-table-wrap"><table class="suite-table"><thead><tr><th>Uploaded</th><th>File</th><th>By</th>' +
       '<th>Changes from the one before</th>' + (mayDownloadPlx() ? '<th></th>' : '') + '</tr></thead><tbody>' +
       uploads.slice().reverse().map(function (u) {
@@ -6261,11 +6270,121 @@
           '</td><td>' + esc(u.changes === undefined ? '—' : meetingHeadline(u.changes)) + '</td>' +
           (mayDownloadPlx() ? '<td><button type="button" class="suite-link" data-meeting-download="' + esc(u.id) +
             '">Download</button></td>' : '') + '</tr>';
-      }).join('') + '</tbody></table></div></section>' : '';
+      }).join('') + '</tbody></table></div></details>' : '';
 
-    return '<div class="module-toolbar"><p>Read this before the staffing call. Everything here comes from the PLX workbook ' +
-      'uploads, plus the Beeline exports where a Req # matches. Changes are inferred from two uploads, so an edit made ' +
-      'and undone between them does not show.</p></div>' + body + history;
+    return actions + meetingStrip(t, profile, meetingLatestWeek(trend)) + meetingOpenTable(buildings, t) +
+      meetingHeadcount(profile, ch, trend) + changes + meetingDrilldown(buildings, bee, profile) + history;
+  }
+
+  /* The same summary for pasting into Outlook: Jared's table and sentences, then
+     headcount. HTML for a mail client, with a plain-text twin for anything else. */
+  function meetingEmail() {
+    var d = state.meeting.data, profile = meetingProfileInMarket(d.profile);
+    var buildings = meetingBuildings(profile).filter(function (b) { return b.o.open; });
+    var t = PlxHistory.openPositions(profile.rows), n = meetingNeedsText(buildings, t);
+    var trend = meetingTrendInMarket(d.trend), week = meetingLatestWeek(trend);
+    var cmpn = d.comparison, ch = cmpn ? meetingInMarket(cmpn.changes) : null;
+    var onRoster = sumBy(profile.sites, 'onRoster');
+    var withExp = profile.sites.filter(function (x) { return x.expected != null; });
+    var head = ['Building', 'Material Handler Openings', 'MH Identified', 'MH Still Needed', 'Operator Openings',
+      'Operator Identified', 'Operator Still Needed', 'Total Open Positions'];
+    var line = function (label, o) {
+      return [label, o.mh.open, o.mh.identified, o.mh.needed, o.op.open, o.op.identified, o.op.needed, o.open];
+    };
+    var rows = buildings.map(function (b) { return line(b.location + (b.label ? '/' + b.label : ''), b.o); });
+    rows.push(line('TOTAL', t));
+    var hc = 'Headcount: ' + onRoster + ' on roster' + (withExp.length ? ' vs ' + sumBy(withExp, 'expected') + ' expected' : '') +
+      (week && week.change != null ? '; ' + signed(week.change) + ' this week (+' + week.added + ' / −' + week.removed + ')' : '') + '.';
+    var changed = ch ? 'Since ' + meetingWhen(cmpn.from.takenAt) + ': ' + meetingHeadline(ch.counts) + '.' : '';
+    var intro = 'Here is the breakdown of open positions as of ' + meetingWhen(profile.takenAt) +
+      (state.market === 'all' ? '' : ' (' + state.market + ')') + ':';
+    var cellCss = 'padding:4px 10px;border-bottom:1px solid #ddd;';
+    var html = '<p>' + esc(intro) + '</p><table style="border-collapse:collapse;font-family:Calibri,Arial,sans-serif;font-size:11pt">' +
+      '<tr>' + head.map(function (h, i) {
+        return '<th style="' + cellCss + 'text-align:' + (i ? 'right' : 'left') + '">' + esc(h) + '</th>';
+      }).join('') + '</tr>' + rows.map(function (r, k) {
+        var bold = k === rows.length - 1;
+        return '<tr>' + r.map(function (v, i) {
+          return '<td style="' + cellCss + 'text-align:' + (i ? 'right' : 'left') + ';' +
+            (bold || i === 0 || i === 3 || i === 6 || i === 7 ? 'font-weight:bold' : '') + '">' + esc(v) + '</td>';
+        }).join('') + '</tr>';
+      }).join('') + '</table><p>' + esc(n.opening) + '</p>' +
+      (n.needs.length ? '<p>The largest remaining needs are:</p><ul>' + n.needs.map(function (l) {
+        var i = l.indexOf(':');
+        return '<li><b>' + esc(l.slice(0, i + 1)) + '</b>' + esc(l.slice(i + 1)) + '</li>';
+      }).join('') + '</ul>' : '') + '<p>' + esc(n.across) + '</p><p>' + esc(hc) + '</p>' +
+      (changed ? '<p>' + esc(changed) + '</p>' : '');
+    var text = [intro, '', head.join('\t')].concat(rows.map(function (r) { return r.join('\t'); }))
+      .concat(['', n.opening]).concat(n.needs.length ? ['The largest remaining needs are:'].concat(n.needs.map(function (l) {
+        return '  • ' + l;
+      })) : []).concat([n.across, '', hc]).concat(changed ? [changed] : []).join('\n');
+    return { html: html, text: text };
+  }
+  function copyMeetingEmail() {
+    var done = function (msg) { state.meeting.copied = msg; render(); };
+    var mail;
+    try { mail = meetingEmail(); } catch (err) { done('Could not build the summary: ' + err.message); return; }
+    var c = navigator.clipboard;
+    if (c && c.write && typeof ClipboardItem !== 'undefined') {
+      c.write([new ClipboardItem({
+        'text/html': new Blob([mail.html], { type: 'text/html' }),
+        'text/plain': new Blob([mail.text], { type: 'text/plain' })
+      })]).then(function () { done('Copied. Paste it into an email; the table keeps its formatting.'); },
+        function () { plainCopy(mail.text, done); });
+    } else plainCopy(mail.text, done);
+  }
+  function plainCopy(text, done) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { done('Copied as plain text.'); },
+        function () { done('The clipboard is not available in this browser.'); });
+    } else done('The clipboard is not available in this browser.');
+  }
+  /* The same figures as a workbook, one sheet per section, for reporting. */
+  function exportMeetingExcel() {
+    if (typeof XLSX === 'undefined') { alert('The Excel library has not loaded. Reload the page and try again.'); return; }
+    var d = state.meeting.data, profile = meetingProfileInMarket(d.profile), bee = meetingBeeline();
+    var buildings = meetingBuildings(profile), t = PlxHistory.openPositions(profile.rows);
+    var trend = meetingTrendInMarket(d.trend);
+    var wb = XLSX.utils.book_new();
+    var line = function (label, o) {
+      return [label, o.mh.open, o.mh.identified, o.mh.needed, o.op.open, o.op.identified, o.op.needed, o.other.open, o.open, o.needed];
+    };
+    var open = [['Building', 'Name', 'MH openings', 'MH identified', 'MH still needed', 'Op openings', 'Op identified',
+      'Op still needed', 'Other open', 'Total open', 'Total still needed']]
+      .concat(buildings.filter(function (b) { return b.o.open; }).map(function (b) {
+        var l = line(b.location, b.o); l.splice(1, 0, b.label); return l;
+      }));
+    var tl = line('TOTAL', t); tl.splice(1, 0, ''); open.push(tl);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(open), 'Open positions');
+    var cust = [['Building', 'Customer', 'On roster', 'MH open', 'MH identified', 'Op open', 'Op identified', 'Other open',
+      'Still needed', 'Accepted (green)', 'Approved (blue)', 'Not a fit', 'No-show', 'Waiting', 'Withdrawn',
+      'Beeline Reqs tab openings', 'Beeline requested', 'Beeline hired']];
+    buildings.forEach(function (b) {
+      b.rows.forEach(function (r) {
+        var o = PlxHistory.openPositions([r]);
+        if (!(r.onRoster || o.open || r.orders || r.candidates)) return;
+        var bl = { requested: 0, hired: 0 };
+        (r.reqs || []).forEach(function (req) {
+          var x = bee.byKey[ReqsCore.reqKey(req)];
+          if (x) { bl.requested += Number(x.requested) || 0; bl.hired += Number(x.hired) || 0; }
+        });
+        cust.push([b.location, r.customer, r.onRoster, o.mh.open, o.mh.identified, o.op.open, o.op.identified, o.other.open,
+          o.needed, r.accepted, r.approved, r.wtExcluded.notFit, r.wtExcluded.noShow, r.wtExcluded.waiting,
+          r.wtExcluded.withdrawn, r.openings, bl.requested, bl.hired]);
+      });
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cust), 'By customer');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['Site', 'Name', 'Expected', 'On roster', 'Onsite', 'Short']]
+      .concat(profile.sites.map(function (x) {
+        return [x.location, x.label || '', x.expected, x.onRoster, x.onsite, x.short];
+      }))), 'Headcount');
+    var startsBy = {};
+    (profile.starts || []).forEach(function (x) { startsBy[x.week] = (startsBy[x.week] || 0) + x.count; });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['Week of', 'Headcount', 'Change', 'Added', 'Removed',
+      'Starts', 'Open positions', 'Identified']].concat(trend.filter(function (w) { return w.known; }).map(function (w) {
+        return [w.week, w.onRoster, w.change, w.added, w.removed, startsBy[w.week] || 0, w.open, w.identified];
+      }))), 'Week over week');
+    XLSX.writeFile(wb, 'Meeting Prep ' + today() + (state.market === 'all' ? '' : ' ' + state.market) + '.xlsx');
   }
   function downloadPlxUpload(id) {
     SuiteData.downloadPlxUpload(id).then(function (r) {
@@ -6862,8 +6981,11 @@
   /* ---------- events ---------- */
   root.addEventListener('click', function (e) {
     if (e.target.closest('[data-roster-export]')) { exportLegoRoster(); return; }
+    var mfold = e.target.closest('[data-meeting-changes] > summary');
+    if (mfold) { state.meeting.changesOpen = !mfold.parentNode.open; return; }
     var mrange = e.target.closest('[data-meeting-range]');
     if (mrange) {
+      state.meeting.changesOpen = true;
       state.meeting.range = mrange.dataset.meetingRange;
       state.meeting.copied = '';
       if (state.meeting.range !== 'pick') { loadMeeting(); render(); } else render();
@@ -6872,17 +6994,8 @@
     if (e.target.closest('[data-meeting-refresh]')) { state.meeting.copied = ''; loadMeeting(); render(); return; }
     var mdl = e.target.closest('[data-meeting-download]');
     if (mdl) { downloadPlxUpload(mdl.dataset.meetingDownload); return; }
-    if (e.target.closest('[data-meeting-copy]')) {
-      var md = state.meeting.data && state.meeting.data.comparison;
-      if (!md) return;
-      var text = meetingText(md, meetingInMarket(md.changes));
-      var done = function (msg) { state.meeting.copied = msg; render(); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(function () { done('Summary copied to the clipboard.'); },
-          function () { done('The clipboard is not available in this browser.'); });
-      } else done('The clipboard is not available in this browser.');
-      return;
-    }
+    if (e.target.closest('[data-meeting-email]')) { copyMeetingEmail(); return; }
+    if (e.target.closest('[data-meeting-excel]')) { exportMeetingExcel(); return; }
     var returnTasks = e.target.closest('[data-return-tasks]');
     if (returnTasks) {
       var taskContext = state.returnTaskContext || {};

@@ -336,6 +336,20 @@ Snapshots from version 2 on also record:
   but not counted as walkthroughs (in the 2026-10-01 workbook, green slots were
   new orders nobody was lined up for yet).
 
+Version 3 adds every row of the Chicago WT List (`wtRows`), which is what the
+meeting's **open positions** are counted from:
+
+- every WT List row is one opening, named or not;
+- a named row is **identified**, unless it is red (not a good fit), orange
+  (no-show / rescheduled) or yellow (waiting for a spot), or the person is on a
+  DNR / NOT ELIGIBLE tab (withdrawn; that tab is the most current word);
+- **still needed** is openings minus identified, by Material Handler / Operator / other.
+
+Open positions and identified are also logged per site in the headcount series,
+so they can be reported over time. Highlight changes (newly green / blue) are only
+reported for people still on the WT List or Pipeline: the STARTED tab is blue
+throughout, and moving there is already reported as completed.
+
 The Meeting Prep response also carries `profile` (the newest upload, one row per
 customer at a site) and `trend` (12 weeks of headcount, newest last), neither of
 which needs two uploads. Beeline's own figures are joined in the browser, by Req #,

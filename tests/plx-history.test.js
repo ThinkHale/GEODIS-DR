@@ -254,6 +254,58 @@ t('a reading is the snapshot plus who moved', (() => {
   return x.sites['1502'].onRoster === 3 && x.sites['1502'].expected === 4 && x.sites['1502'].added === 1;
 })());
 
+console.log('— open positions: every WT List row is one —');
+function wtBook(rows, extra) {
+  const list = keyed();
+  const wt = list.find(x => x.name === 'Chicago WT List');
+  wt.aoa = wt.aoa.slice(0, 2).concat(rows.map(r => r.cells));
+  wt.fills = [''].concat(['']).concat(rows.map(r => r.fill || ''));
+  if (extra) extra(list);
+  return H.snapshot(list, { ShiftKey: SK });
+}
+const wtRow = (b, acct, name, pos, fill) => ({ cells: [b, 'PLX', acct, name, pos, '1st', '', '', ''], fill });
+let ws = wtBook([
+  wtRow('1502', 'LEGO SAH', 'Uno, Ana', 'Material Handler', '92D050'),     // green: identified
+  wtRow('1502', 'LEGO SAH', 'Dos, Ben', 'Sr Material Handler', '70F3FA'),  // blue: identified
+  wtRow('1502', 'LEGO SAH', 'Tres, Cy', 'Material Handler', ''),           // named, no colour: identified
+  wtRow('1502', 'LEGO SAH', 'Fit, Not', 'Material Handler', 'FF0000'),     // red: not a fit
+  wtRow('1502', 'LEGO SAH', 'Show, No', 'Material Handler', 'FFC000'),     // orange: no-show
+  wtRow('1502', 'LEGO SAH', 'Spot, Wait', 'Material Handler', 'FFFF00'),   // yellow: waiting
+  wtRow('1502', 'LEGO SAH', '', 'Material Handler', '92D050'),             // empty, even if green
+  wtRow('1502', 'CCM', '', 'Operator', ''),
+  wtRow('1502', 'CCM', 'Gone, Gus', 'Operator', '92D050'),                 // withdrawn below
+  wtRow('Building', 'Account', '', 'Position', '')                         // a repeated header row
+], list => list.find(x => /NOT ELIGIBLE/.test(x.name)).aoa.push(['1502', 'PLX', 'CCM', 'Gone, Gus', 'Operator', '', '', '', '']));
+let op = H.openPositions(H.profile(ws).rows);
+t('every row is an opening', op.mh.open === 7 && op.op.open === 2 && op.open === 9);
+t('named and not red/orange/yellow is identified', op.mh.identified === 3);
+t('a withdrawn candidate is not', op.op.identified === 0 && op.excluded.withdrawn === 1);
+t('the reasons are counted', op.excluded.notFit === 1 && op.excluded.noShow === 1 && op.excluded.waiting === 1);
+t('still needed is the rest', op.mh.needed === 4 && op.op.needed === 2 && op.needed === 6);
+t('a repeated header row is no site', !H.profile(ws).sites.some(x => !/^\d/.test(x.location)) &&
+  !H.profile(ws).rows.some(r => r.location && !/^\d/.test(r.location)));
+const unread = wtBook([wtRow('1502', 'LEGO SAH', 'Fit, Not', 'Material Handler', 'FF0000')]);
+unread.highlights = false;
+t('without colours read, every named row counts', H.openPositions(H.profile(unread).rows).identified === 1);
+t('an abbreviation finds its customer', wtBook([wtRow('1502', 'LEGO S', '', 'Operator', '')]).wtRows[0].customer === 'LEGO SAH');
+t('but not when it could be two', wtBook([wtRow('1502', 'C', '', 'Operator', '')]).wtRows[0].customer === 'C');
+t('the site label comes from its HC tab', H.profile(ws).sites.find(x => x.location === '1502').label === '');
+t('open positions are logged with headcount', (() => {
+  const x = H.seriesPoint(ws, null).sites['1502'];
+  return x.open === 9 && x.identified === 3 && x.mhOpen === 7 && x.opIdentified === 0;
+})());
+t('and carried into the weekly trend', H.weekly([H.seriesPoint(ws, null)], { now: ws.takenAt })[0].open === 9);
+
+console.log('— colour changes only while a candidate —');
+const blueList = coloured({ zStarted: true }, {});
+const startedTab = blueList.find(x => /STARTED/.test(x.name));
+startedTab.fills = startedTab.aoa.map(() => '9BC2E6');   // the STARTED tab is blue throughout
+const blueStart = H.snapshot(blueList, { ShiftKey: SK });
+t('the started candidate really is blue', blueStart.candidates[H.nameKey('Zambrano, Leidy')].highlight === 'approved');
+const stillPipe = H.snapshot(coloured({}, {}), { ShiftKey: SK });
+d = H.diff(stillPipe, blueStart);
+t('a move to STARTED is completed, not approved', d.counts.wtCompleted === 1 && d.counts.wtApproved === 0);
+
 console.log('— against the real workbook, when present —');
 const book = path.join(__dirname, '..', 'PLX - Geodis Spreadsheet.xlsx');
 if (!fs.existsSync(book)) {

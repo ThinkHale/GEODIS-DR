@@ -12,7 +12,7 @@
   'use strict';
 
   var VIEWS = [
-    'overview', 'tasks', 'associates', 'profile', 'coverage', 'attendance',
+    'overview', 'tasks', 'meeting', 'associates', 'profile', 'coverage', 'attendance',
     'timeoff', 'payroll', 'requisitions', 'reconciliation', 'data', 'settings'
   ];
 

@@ -82,6 +82,7 @@
   var NAV = [
     { key: 'overview', label: 'Overview', group: '' },
     { key: 'tasks', label: 'Tasks', group: 'Workforce operations' },
+    { key: 'meeting', label: 'Meeting Prep', group: 'Workforce operations' },
     { key: 'associates', label: 'Associates', group: 'Workforce operations' },
     { key: 'coverage', label: 'On-Premise', group: 'Workforce operations' },
     { key: 'attendance', label: 'Attendance', group: 'Workforce operations' },
@@ -147,6 +148,8 @@
       discrepancyStatus: 'all', discrepancyLocation: 'all', missingDate: false,
       afterCloseOnly: false, review: 'all' },
     plx: { sync: null, busy: false, note: '' },   // the last PLX workbook uploaded
+    // Meeting Prep: which window is compared, and the comparison the server sent.
+    meeting: { range: 'last', from: '', data: null, loading: false, error: '', copied: '' },
     ilPto: { sync: null },                        // what the PTO tracker flow last did
     auth: { signedIn: false, email: '', account: null, loading: false, error: '' },
     /* `loaded` is all four settings collections; `usersLoaded` is the account
@@ -617,6 +620,7 @@
       coverage: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
       attendance: '<rect x="3" y="5" width="18" height="16" rx="1"/><path d="M8 3v4m8-4v4M3 10h18m-13 5l2 2 5-5"/>',
       timeoff: '<path d="M3 12a9 9 0 0118 0H3zm9 0v9m-4 0h8"/>',
+      meeting: '<path d="M4 5h16v11H8l-4 4zM8 9h8M8 12h5"/>',
       payroll: '<rect x="3" y="6" width="18" height="12" rx="1"/><circle cx="12" cy="12" r="2.5"/>',
       data: '<path d="M12 3v12m-4-4l4 4 4-4M4 16v5h16v-5"/>',
       settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10l2 2M19 5l-2 2M7 17l-2 2"/>',
@@ -717,6 +721,7 @@
     var labels = {
       overview: ['Overview', 'Workforce command center'],
       tasks: ['Tasks', 'Work that is outstanding, wherever it was raised'],
+      meeting: ['Meeting Prep', 'What changed in the PLX workbook between uploads'],
       associates: ['Associates', 'Roster, scorecards, and profile detail'],
       profile: ['Associate Profile', 'Assignment, attendance, time off, and performance'],
       coverage: ['On-Premise', 'Scheduled shifts vs. who is actually on premise'],
@@ -2685,6 +2690,7 @@
       }).then(function (r) {
         state.plx.sync = r.sync || null;
         state.plx.note = plxSummary(r);
+        state.meeting.data = null;   // a new upload moves every comparison
         return SuiteData.loadAll();
       }).then(function (stores) {
         /* Through applyStores(), like every other load. The shift tags this just
@@ -2712,6 +2718,8 @@
     if (a.error) bits.push('attendance failed: ' + a.error);
     else if (a.skipped) bits.push('attendance skipped (' + a.skipped + ')');
     else if (a.total != null) bits.push(a.total + ' attendance rows, ' + (a.matched || 0) + ' matched');
+    if (s.unchanged) bits.push('identical to the last upload');
+    else if (s.changes) bits.push(meetingHeadline(s.changes) + ' since the last upload (see Meeting Prep)');
     return 'Refreshed · ' + bits.join(' · ');
   }
 
@@ -5809,12 +5817,247 @@
       '<button type="button" data-undo-change>Undo</button><button type="button" data-dismiss-toast aria-label="Dismiss">&times;</button></div>';
   }
 
+  /* ---------- Meeting Prep ----------
+     What moved in the PLX workbook between two uploads: assignments started and
+     ended, walkthroughs scheduled and completed, orders created and filled. The
+     server keeps seven days of uploads and does the comparison (see
+     plx-history-core.js for what each number means); this picks the window and
+     narrows it to the market chosen in the header. */
+  var MEETING_RANGES = [
+    ['last', 'Since last upload'], ['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['pick', 'Since an upload…']
+  ];
+  function meetingQuery() {
+    var m = state.meeting, hours = { '24h': 24, '7d': 24 * 7 }[m.range];
+    if (hours) return { since: new Date(Date.now() - hours * 3600 * 1000).toISOString() };
+    if (m.range === 'pick' && m.from) return { from: m.from };
+    return {};
+  }
+  var meetingSeq = 0;
+  function loadMeeting() {
+    // Only the newest request may answer: a slow one for the window somebody
+    // just left must not replace the window they picked.
+    var seq = ++meetingSeq;
+    state.meeting.loading = true;
+    state.meeting.error = '';
+    return SuiteData.loadPlxChanges(meetingQuery()).then(function (d) {
+      if (seq === meetingSeq) state.meeting.data = d;
+    }).catch(function (err) {
+      if (seq !== meetingSeq) return;
+      state.meeting.error = err.denied ? 'This account cannot read the workbook history.'
+        : 'The workbook history could not be loaded. ' + (err.message || '');
+    }).then(function () {
+      if (seq !== meetingSeq) return;
+      state.meeting.loading = false;
+      render();
+    });
+  }
+  /* The server has already removed what this account may not see. This is the
+     header's market picker on top of that, and like every other page it never
+     hides a building whose market nobody has recorded. */
+  function meetingInMarket(changes) {
+    if (state.market === 'all' || typeof PlxHistory === 'undefined') return changes;
+    var byMarket = ReqsCore.siteMarketIndex(state.stores.locations);
+    return PlxHistory.filterDiff(changes, function (item) {
+      var m = byMarket.get(String(item.location || ''));
+      return !m || m === state.market;
+    });
+  }
+  function plural(n, one, many) { return n + ' ' + (n === 1 ? one : (many || one + 's')); }
+  function meetingHeadline(c) {
+    if (!c) return 'nothing to compare yet';
+    var bits = [];
+    if (c.started) bits.push(c.started + ' started');
+    if (c.ended) bits.push(c.ended + ' ended');
+    if (c.wtScheduled) bits.push(plural(c.wtScheduled, 'walkthrough') + ' scheduled');
+    if (c.wtCompleted) bits.push(c.wtCompleted + ' completed');
+    if (c.ordersCreated) bits.push(plural(c.ordersCreated, 'new order'));
+    if (c.ordersClosed) bits.push(plural(c.ordersClosed, 'order') + ' filled/closed');
+    if (c.occurrences) bits.push(plural(c.occurrences, 'occurrence'));
+    return bits.length ? bits.join(', ') : 'no changes';
+  }
+  function meetingWhen(iso) {
+    var d = new Date(iso);
+    return isNaN(d.getTime()) ? String(iso || '') : d.toLocaleString('en-US',
+      { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+  function mayDownloadPlx() {
+    var a = account();
+    return mayImport() && !(a && Array.isArray(a.markets) && a.markets.length);
+  }
+  function meetingTile(label, value, note, kind) {
+    return '<div class="meeting-tile ' + (kind || '') + '"><div class="metric-label">' + esc(label) + '</div>' +
+      '<div class="metric-value">' + esc(value) + '</div><div class="metric-note">' + esc(note) + '</div></div>';
+  }
+  function meetingTable(title, rows, cols) {
+    return '<details class="meeting-detail' + (rows.length ? '' : ' is-empty') + '"><summary><b>' + esc(title) +
+      '</b><span class="meeting-count">' + rows.length + '</span></summary>' +
+      (rows.length ? '<div class="suite-table-wrap"><table class="suite-table"><thead><tr>' +
+        cols.map(function (c) { return '<th>' + esc(c[0]) + '</th>'; }).join('') + '</tr></thead><tbody>' +
+        rows.map(function (r) {
+          return '<tr>' + cols.map(function (c) { return '<td>' + esc(c[1](r) || '—') + '</td>'; }).join('') + '</tr>';
+        }).join('') + '</tbody></table></div>' : '') + '</details>';
+  }
+  function meetingText(cmpn, ch) {
+    var c = ch.counts, lines = ['PLX workbook changes, ' + meetingWhen(cmpn.from.takenAt) + ' to ' +
+      meetingWhen(cmpn.to.takenAt) + (state.market === 'all' ? '' : ' (' + state.market + ')')];
+    lines.push('Assignments: ' + c.started + ' started, ' + c.ended + ' ended (headcount ' +
+      c.headcountFrom + ' to ' + c.headcountTo + ')');
+    lines.push('Walkthroughs: ' + c.wtScheduled + ' scheduled, ' + c.wtCompleted + ' completed, ' +
+      c.wtCancelled + ' cancelled, ' + c.wtRescheduled + ' rescheduled');
+    lines.push('Orders: ' + c.ordersCreated + ' created (' + c.openingsCreated + ' openings), ' +
+      c.ordersClosed + ' filled/closed (' + c.openingsClosed + ' openings), ' + c.ordersChanged + ' changed');
+    lines.push('Open walkthrough slots: ' + c.openSlotsFrom + ' to ' + c.openSlotsTo);
+    lines.push('Attendance occurrences logged: ' + c.occurrences);
+    var named = function (label, list, fmt) {
+      if (list.length) lines.push('', label + ':', list.map(function (x) { return '  - ' + fmt(x); }).join('\n'));
+    };
+    var who = function (x) { return x.name + (x.location ? ' (' + x.location + ')' : ''); };
+    named('Started', ch.assignments.started, who);
+    named('Ended', ch.assignments.ended, who);
+    named('Walkthroughs scheduled', ch.walkthroughs.scheduled, function (x) { return who(x) + ' ' + x.wtDate; });
+    named('Walkthroughs completed', ch.walkthroughs.completed, who);
+    named('New orders', ch.orders.created, function (x) { return 'Req ' + x.req + ' ' + x.location + ' ' + x.account + ' x' + x.openings; });
+    named('Filled/closed orders', ch.orders.closed, function (x) { return 'Req ' + x.req + ' ' + x.location + ' ' + x.account + ' x' + x.openings; });
+    return lines.join('\n');
+  }
+
+  function meetingView() {
+    var m = state.meeting, d = m.data;
+    if (!d && !m.loading && !m.error) loadMeeting();
+    var uploads = (d && d.uploads) || [];
+    var toolbar = '<div class="filter-row meeting-ranges" role="group" aria-label="Compare window">' +
+      MEETING_RANGES.map(function (r) {
+        return '<button type="button" class="suite-btn ' + (m.range === r[0] ? 'primary' : '') +
+          '" aria-pressed="' + (m.range === r[0]) + '" data-meeting-range="' + r[0] + '">' + esc(r[1]) + '</button>';
+      }).join('') +
+      (m.range === 'pick' ? '<select class="suite-select" id="meeting-from" aria-label="Compare from upload">' +
+        '<option value="">Choose an upload…</option>' + uploads.slice(0, -1).reverse().map(function (u) {
+          return '<option value="' + esc(u.id) + '"' + (m.from === u.id ? ' selected' : '') + '>' +
+            esc(meetingWhen(u.takenAt)) + (u.uploadedBy ? ' · ' + esc(u.uploadedBy) : '') + '</option>';
+        }).join('') + '</select>' : '') +
+      '<span class="meeting-actions"><button type="button" class="suite-btn" data-meeting-refresh>Refresh</button>' +
+      (d && d.comparison ? '<button type="button" class="suite-btn" data-meeting-copy>Copy summary</button>' : '') +
+      '</span></div>';
+
+    var body;
+    if (m.loading && !d) body = '<div class="workflow-empty">Loading the workbook history…</div>';
+    else if (m.error) body = '<div class="workflow-empty warn-text" role="alert">' + esc(m.error) + '</div>';
+    else if (!d || !d.comparison) {
+      body = empty('Nothing to compare yet', (d && d.note) ||
+        'Changes appear once the PLX workbook has been uploaded twice. Uploads are kept for 7 days.');
+    } else if (m.range === 'pick' && !m.from) {
+      body = '<div class="workflow-empty">Choose the upload to compare the newest one against.</div>';
+    } else {
+      var cmpn = d.comparison, ch = meetingInMarket(cmpn.changes), c = ch.counts;
+      var net = c.headcountTo - c.headcountFrom;
+      body = '<p class="meeting-window">Comparing the upload of <b>' + esc(meetingWhen(cmpn.from.takenAt)) +
+        '</b> with <b>' + esc(meetingWhen(cmpn.to.takenAt)) + '</b>' +
+        (state.market === 'all' ? '' : ' · ' + esc(state.market)) + '.' +
+        (cmpn.partial ? ' <span class="warn-text">History does not reach back that far, so this starts at the oldest upload kept.</span>' : '') +
+        '</p>' +
+        '<div class="meeting-grid">' +
+        '<section class="suite-panel meeting-group"><div class="suite-panel-head"><h2>Assignments</h2></div><div class="meeting-tiles">' +
+          meetingTile('Started', c.started, 'New on an HC tab', 'green') +
+          meetingTile('Ended', c.ended, 'Left every HC tab', c.ended ? 'red' : '') +
+          meetingTile('Headcount', c.headcountTo, (net > 0 ? '+' : '') + net + ' from ' + c.headcountFrom) + '</div></section>' +
+        '<section class="suite-panel meeting-group"><div class="suite-panel-head"><h2>Walkthroughs</h2></div><div class="meeting-tiles">' +
+          meetingTile('Scheduled', c.wtScheduled, c.wtRescheduled ? c.wtRescheduled + ' rescheduled' : 'WT date entered') +
+          meetingTile('Completed', c.wtCompleted, 'Moved to STARTED', 'green') +
+          meetingTile('Cancelled / DNR', c.wtCancelled, 'Moved to DNR / cancelled', c.wtCancelled ? 'red' : '') + '</div></section>' +
+        '<section class="suite-panel meeting-group"><div class="suite-panel-head"><h2>Orders</h2></div><div class="meeting-tiles">' +
+          meetingTile('Created', c.ordersCreated, plural(c.openingsCreated, 'opening')) +
+          meetingTile('Filled / closed', c.ordersClosed, plural(c.openingsClosed, 'opening') + ' · left the Reqs tab', 'green') +
+          meetingTile('Open WT slots', c.openSlotsTo, 'Was ' + c.openSlotsFrom) + '</div></section>' +
+        '</div>' +
+        '<section class="suite-panel meeting-details"><div class="suite-panel-head"><h2>Who and what</h2>' +
+        '<span class="meeting-sub">' + plural(c.occurrences, 'attendance occurrence') + ' logged · ' +
+        plural(c.ordersChanged, 'order') + ' changed quantity</span></div>' +
+        meetingTable('Assignments started', ch.assignments.started, [
+          ['Name', function (r) { return r.name; }], ['EID', function (r) { return r.eid; }],
+          ['Site', function (r) { return r.site; }], ['Shift', function (r) { return r.shift; }],
+          ['Start date', function (r) { return r.startDate; }]]) +
+        meetingTable('Assignments ended', ch.assignments.ended, [
+          ['Name', function (r) { return r.name; }], ['EID', function (r) { return r.eid; }],
+          ['Site', function (r) { return r.site; }], ['Shift', function (r) { return r.shift; }],
+          ['Last comment', function (r) { return r.comments; }]]) +
+        meetingTable('Walkthroughs scheduled', ch.walkthroughs.scheduled, [
+          ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
+          ['Account', function (r) { return r.account; }], ['Shift', function (r) { return r.shift; }],
+          ['WT date', function (r) { return r.wtDate; }], ['Tab', function (r) { return r.tab; }]]) +
+        meetingTable('Walkthroughs rescheduled', ch.walkthroughs.rescheduled, [
+          ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
+          ['Was', function (r) { return r.fromWtDate; }], ['Now', function (r) { return r.wtDate; }]]) +
+        meetingTable('Walkthroughs completed', ch.walkthroughs.completed, [
+          ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
+          ['Account', function (r) { return r.account; }], ['WT date', function (r) { return r.wtDate; }],
+          ['Start date', function (r) { return r.startDate; }]]) +
+        meetingTable('Walkthroughs cancelled / DNR', ch.walkthroughs.cancelled, [
+          ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
+          ['Account', function (r) { return r.account; }], ['Was on', function (r) { return r.fromStage; }]]) +
+        meetingTable('Orders created', ch.orders.created, [
+          ['Req #', function (r) { return r.req; }], ['Building', function (r) { return r.location; }],
+          ['Account', function (r) { return r.account; }], ['Shift', function (r) { return r.shift; }],
+          ['Job', function (r) { return r.jobType; }], ['Openings', function (r) { return String(r.openings); }],
+          ['Hire date', function (r) { return r.hireDate; }]]) +
+        meetingTable('Orders filled / closed', ch.orders.closed, [
+          ['Req #', function (r) { return r.req; }], ['Building', function (r) { return r.location; }],
+          ['Account', function (r) { return r.account; }], ['Shift', function (r) { return r.shift; }],
+          ['Openings', function (r) { return String(r.openings); }]]) +
+        meetingTable('Orders with a new quantity', ch.orders.changed, [
+          ['Req #', function (r) { return r.req; }], ['Building', function (r) { return r.location; }],
+          ['Was', function (r) { return String(r.fromOpenings); }], ['Now', function (r) { return String(r.openings); }]]) +
+        meetingTable('Attendance occurrences logged', ch.attendance.logged, [
+          ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
+          ['Date', function (r) { return r.date; }], ['Points', function (r) { return r.points; }],
+          ['Comment', function (r) { return r.comments; }]]) +
+        meetingTable('Headcount by building', ch.headcount, [
+          ['Building', function (r) { return r.location; }], ['Before', function (r) { return String(r.from); }],
+          ['Now', function (r) { return String(r.to); }],
+          ['Net', function (r) { var n = r.to - r.from; return (n > 0 ? '+' : '') + n; }]]) +
+        '</section>';
+    }
+
+    var history = uploads.length ? '<section class="suite-panel meeting-history"><div class="suite-panel-head">' +
+      '<h2>Uploads kept</h2><span class="meeting-sub">The last ' + esc(d.retentionDays || 7) +
+      ' days, plus the newest however old. Identical files are stored once.</span></div>' +
+      '<div class="suite-table-wrap"><table class="suite-table"><thead><tr><th>Uploaded</th><th>File</th><th>By</th>' +
+      '<th>Changes from the one before</th>' + (mayDownloadPlx() ? '<th></th>' : '') + '</tr></thead><tbody>' +
+      uploads.slice().reverse().map(function (u) {
+        return '<tr><td>' + esc(meetingWhen(u.takenAt)) +
+          (u.lastSeenAt ? '<div class="sub">Re-sent unchanged ' + esc(meetingWhen(u.lastSeenAt)) + '</div>' : '') +
+          '</td><td>' + esc(u.fileName || '—') + '</td><td>' + esc(u.uploadedBy || (u.via === 'push' ? 'Scheduled push' : '—')) +
+          '</td><td>' + esc(u.changes === undefined ? '—' : meetingHeadline(u.changes)) + '</td>' +
+          (mayDownloadPlx() ? '<td><button type="button" class="suite-link" data-meeting-download="' + esc(u.id) +
+            '">Download</button></td>' : '') + '</tr>';
+      }).join('') + '</tbody></table></div></section>' : '';
+
+    return '<div class="module-toolbar"><p>Read this before the staffing call. Each number is inferred from two uploads of ' +
+      'the PLX workbook, so a change somebody made and undid between them does not show.</p></div>' +
+      toolbar + (m.copied ? '<p class="meeting-window" role="status">' + esc(m.copied) + '</p>' : '') + body + history;
+  }
+  function downloadPlxUpload(id) {
+    SuiteData.downloadPlxUpload(id).then(function (r) {
+      var bin = atob(r.fileBase64), bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([bytes], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+      // The upload time goes in the name: every kept copy has the same file name.
+      a.download = String(r.fileName || 'PLX.xlsx').replace(/\.xlsx$/i, '') + ' ' +
+        String(r.takenAt || '').slice(0, 16).replace(/[T:]/g, '-') + '.xlsx';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+    }).catch(function (err) {
+      alert('That upload could not be downloaded.\n\n' + err.message);
+    });
+  }
+
   /* ---------- render ---------- */
   var VIEWS = {
     overview: overview, associates: associates, profile: profileView,
     coverage: coverageView, attendance: attendance, timeoff: timeoff,
     payroll: payrollView, requisitions: requisitions, reconciliation: reconciliation,
-    settings: settingsView, tasks: tasksView, data: dataView
+    settings: settingsView, tasks: tasksView, data: dataView, meeting: meetingView
   };
   function enhanceRenderedUi() {
     root.querySelectorAll('div[data-profile],span[data-profile]').forEach(function (el) {
@@ -6387,6 +6630,27 @@
   /* ---------- events ---------- */
   root.addEventListener('click', function (e) {
     if (e.target.closest('[data-roster-export]')) { exportLegoRoster(); return; }
+    var mrange = e.target.closest('[data-meeting-range]');
+    if (mrange) {
+      state.meeting.range = mrange.dataset.meetingRange;
+      state.meeting.copied = '';
+      if (state.meeting.range !== 'pick') { loadMeeting(); render(); } else render();
+      return;
+    }
+    if (e.target.closest('[data-meeting-refresh]')) { state.meeting.copied = ''; loadMeeting(); render(); return; }
+    var mdl = e.target.closest('[data-meeting-download]');
+    if (mdl) { downloadPlxUpload(mdl.dataset.meetingDownload); return; }
+    if (e.target.closest('[data-meeting-copy]')) {
+      var md = state.meeting.data && state.meeting.data.comparison;
+      if (!md) return;
+      var text = meetingText(md, meetingInMarket(md.changes));
+      var done = function (msg) { state.meeting.copied = msg; render(); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { done('Summary copied to the clipboard.'); },
+          function () { done('The clipboard is not available in this browser.'); });
+      } else done('The clipboard is not available in this browser.');
+      return;
+    }
     var returnTasks = e.target.closest('[data-return-tasks]');
     if (returnTasks) {
       var taskContext = state.returnTaskContext || {};
@@ -6993,6 +7257,12 @@
   }
 
   root.addEventListener('change', function (e) {
+    if (e.target.id === 'meeting-from') {
+      state.meeting.from = e.target.value;
+      state.meeting.copied = '';
+      if (state.meeting.from) { loadMeeting(); render(); } else render();
+      return;
+    }
     if (e.target.id === 'data-roster-status') {
       state.dataExport.status = ['Active', 'Ended', 'all'].indexOf(e.target.value) !== -1 ? e.target.value : 'Active';
       state.dataExport.feedback = '';

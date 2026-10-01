@@ -43,6 +43,8 @@ const SUITES = [
   { file: 'transition-import.test.js', name: 'transition workbook import', dom: false },
   { file: 'attendance-import.test.js', name: 'attendance workbook import', dom: false },
   { file: 'plx-sync.test.js', name: 'live PLX workbook sync + open orders', dom: false },
+  { file: 'plx-history.test.js', name: 'PLX workbook history + Meeting Prep changes', dom: false },
+  { file: 'meeting-ui.test.js', name: 'the Meeting Prep page (DOM)', dom: true },
   { file: 'req-sync.test.js', name: 'Beeline req exports arriving by email', dom: false },
   { file: 'auth.test.js', name: 'accounts, roles and permissions', dom: false },
   { file: 'auth-gate.test.js', name: 'the sign-in gate and what each role reaches (DOM)', dom: true },

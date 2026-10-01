@@ -42,7 +42,7 @@ const click=el=>el.dispatchEvent(new w.MouseEvent('click',{bubbles:true}));
 setTimeout(async ()=>{
 console.log('— boot before the roster arrives —');
 t('shell renders', !!$('.suite-nav'));
-t('all eleven nav items present', $$('.suite-nav-btn').length===11);
+t('all twelve nav items present', $$('.suite-nav-btn').length===12);
 t('Tasks sits right after Overview',
   $$('.suite-nav-btn').map(b=>b.dataset.nav)[1]==='tasks');
 t('empty roster prompts for the snapshot', d.body.textContent.includes('Waiting on the morning assignment snapshot'));

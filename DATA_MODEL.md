@@ -288,6 +288,36 @@ Three things come out of it:
 warnings, which is what the bar on the reconciliation page and the note on the
 Attendance tab both read.
 
+### Seven days of uploads, and what changed between them
+
+Every upload, from the browser or the scheduled push, is also kept under
+`plx/history/` for 7 days (`plx-history-core.js`):
+
+| Path | Holds |
+| --- | --- |
+| `plx/history/index.json` | `{ entries: [...] }`, one per kept upload: id, time, file name, who, the change counts against the one before |
+| `plx/history/<id>.xlsx` | the workbook exactly as uploaded |
+| `plx/history/<id>.json` | a snapshot: HC roster by EID, candidates by name across the WT List / Pipeline / STARTED / DNR tabs, open WT slots, Beeline Reqs by Req #, attendance occurrences |
+
+Anything older than 7 days is pruned on the next upload, **except the newest**,
+which is kept however old it is because the next upload is compared with it. A
+file byte-for-byte identical to the newest is not stored again; the entry gets a
+`lastSeenAt` instead.
+
+The Meeting Prep page reads `GET ?plxChanges=1` (optionally `since=`, or
+`from=`/`to=` upload ids), which compares two snapshots. A market-scoped account
+sees only buildings in its markets, and gets the upload list without counts.
+`&download=<id>` returns a kept workbook, only to an unrestricted account that
+can import, because the file covers every market.
+
+The workbook records state, not events, so each number is inferred from two
+uploads: an assignment **started** is an EID new to the HC tabs, **ended** one
+that left them. A walkthrough is **scheduled** when a WT date appears,
+**rescheduled** when it changes, **completed** when the candidate moves onto a
+STARTED tab, and **cancelled** when they move onto a DNR / cancelled tab. An order
+is **created** when its Req # appears and **filled / closed** when it leaves the
+tab; the sheet does not say which of the two.
+
 ### An upload never wipes a person's work
 
 The sheet does not track `filled` or where a requisition stands, so those are

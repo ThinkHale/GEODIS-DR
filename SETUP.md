@@ -447,14 +447,14 @@ one inside `functions/` for the Cloud Function (Cloud Functions can't reach
 outside their own folder at deploy time): `reconcile-core.js`, `reqs-core.js`,
 `schedule-core.js`, `shift-key.js`, `timeoff-core.js`, `tasks-core.js`,
 `contacts-core.js`, `pipeline-core.js`, `payroll-core.js`, `auth-core.js`,
-`market-access-core.js`.
+`market-access-core.js`, `plx-history-core.js`.
 
 If you change one, change both copies. To check them all at once:
 
 ```sh
 for f in reconcile-core reqs-core schedule-core shift-key timeoff-core \
          tasks-core contacts-core pipeline-core payroll-core auth-core \
-         market-access-core; do
+         market-access-core plx-history-core; do
   diff -q "$f.js" "functions/$f.js" || echo "DRIFTED: $f.js"
 done
 ```

@@ -728,6 +728,22 @@
   // open orders, attendance history and point balances -- refreshes in one pass.
   function uploadPlx(payload) { return post('plxUpload=1', payload); }
 
+  /* Seven days of uploads, and what changed between two of them. `q` is
+     { since } or { from, to }; empty means the newest against the one before. */
+  function loadPlxChanges(q) {
+    q = q || {};
+    var qs = ['since', 'from', 'to'].filter(function (k) { return q[k]; }).map(function (k) {
+      return '&' + k + '=' + encodeURIComponent(q[k]);
+    }).join('');
+    // One source for every window: a slower request for the window somebody
+    // just left then cannot overwrite the one they switched to.
+    return getJsonSource('plxChanges', API + '?plxChanges=1' + qs);
+  }
+  // One kept upload's workbook, as { fileName, fileBase64 }.
+  function downloadPlxUpload(id) {
+    return getJson(API + '?plxChanges=1&download=' + encodeURIComponent(id));
+  }
+
   /* ---------- the daily Beeline requisition exports ----------
      Power Automate posts each export here as its email arrives (see SETUP.md).
      The browser only ever READS what those pushes produced; the manual import on
@@ -819,6 +835,8 @@
     loadReqSync: loadReqSync,
     loadIlPtoSync: loadIlPtoSync,
     uploadPlx: uploadPlx,
+    loadPlxChanges: loadPlxChanges,
+    downloadPlxUpload: downloadPlxUpload,
     loadPayrollPeriods: loadPayrollPeriods,
     loadPayrollPeriod: loadPayrollPeriod,
     savePayrollClose: savePayrollClose,

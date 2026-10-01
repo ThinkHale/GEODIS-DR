@@ -40,6 +40,8 @@ const TransitionPto = require('./transition-pto.js');
 const AttendanceImport = require('./attendance-import.js');
 const ReqsCore = require('./reqs-core.js');
 const ShiftKey = require('./shift-key.js');
+const PlxHistory = require('./plx-history-core.js');
+const crypto = require('crypto');
 const Contacts = require('./contacts-core.js');
 const Auth = require('./auth-core.js');
 const MarketAccess = require('./market-access-core.js');
@@ -222,6 +224,12 @@ const REQ_META_PATH = 'reqs/sync.json';
    writable only with the sync key and never sent to the browser -- anyone
    holding that URL could trigger the flow. */
 const PLX_CONFIG_PATH = 'plx/config.json';
+/* Every upload of the workbook, kept for PlxHistory.RETENTION_DAYS: the file
+   itself, and the snapshot later uploads are compared with. The index is the
+   list of what is kept; the files are named by its ids. Behind the same
+   deny-all Storage rules as everything else -- the file is the whole roster. */
+const PLX_HISTORY_DIR = 'plx/history';
+const PLX_HISTORY_INDEX = PLX_HISTORY_DIR + '/index.json';
 const PAYROLL_DIR = 'payroll/periods';    // {weekEnding}.json
 const MAX_HOURS_ROWS = 20000;
 const MAX_SNAPSHOTS = 40;
@@ -1961,6 +1969,16 @@ async function applyPlxWorkbook(buffer, opts) {
     });
   }
 
+  /* Kept, and compared with the upload before it. Last, and never fatal: the
+     stores above are already written, and a history hiccup must not report a
+     sync that worked as one that failed. */
+  let history = null;
+  try {
+    history = await recordPlxHistory(buffer, sheets, opts);
+  } catch (err) {
+    warnings.push('This upload could not be added to the 7-day history: ' + String(err && err.message || err));
+  }
+
   const meta = {
     syncedAt: new Date().toISOString(),
     fileName: String(opts.fileName || '').slice(0, 300),
@@ -1969,6 +1987,10 @@ async function applyPlxWorkbook(buffer, opts) {
     shiftTags: shiftRecords.length,
     sites: hc.sheets.length,
     openOrders: reqCount,
+    historyId: history ? history.id : '',
+    // null when there was nothing to compare with -- a first upload, not "no change".
+    changes: history ? history.changes : null,
+    unchanged: !!(history && history.unchanged),
     warnings: warnings.slice(0, 20)
   };
   await bucket.file(PLX_META_PATH).save(JSON.stringify(meta), {
@@ -2016,6 +2038,162 @@ async function handlePlx(req, res) {
   });
   if (!applied.ok) { res.status(applied.status || 400).json({ ok: false, error: applied.error }); return; }
   res.status(200).json({ ok: true, sync: applied.meta });
+}
+
+/* ---------- seven days of the workbook ----------
+   The workbook is overwritten in place, so without this it can only say what is
+   true now. Each upload keeps its file and a snapshot (see plx-history-core.js),
+   and is compared with the one before it as it lands.
+
+   A file byte-for-byte identical to the newest one is not stored again: the
+   scheduled push runs twice a day whether or not anybody edited the sheet, and
+   seven days of the same file would crowd out the uploads that differ. */
+async function recordPlxHistory(buffer, sheets, opts) {
+  opts = opts || {};
+  const takenAt = new Date().toISOString();
+  const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+  const stored = await readJsonFile(PLX_HISTORY_INDEX);
+  const index = Array.isArray(stored.entries) ? stored.entries : [];
+  const newest = index.slice().sort((x, y) => String(x.takenAt).localeCompare(String(y.takenAt))).pop();
+
+  if (newest && newest.hash === hash) {
+    newest.lastSeenAt = takenAt;
+    await saveJson(PLX_HISTORY_INDEX, { entries: index });
+    return { id: newest.id, unchanged: true, changes: PlxHistory.diff(null, null).counts };
+  }
+
+  const snap = PlxHistory.snapshot(sheets, { takenAt: takenAt, ShiftKey: ShiftKey });
+  let changes = null;
+  if (newest) {
+    const prior = await readJsonFile(PLX_HISTORY_DIR + '/' + newest.id + '.json');
+    if (prior && prior.version === PlxHistory.VERSION) changes = PlxHistory.diff(prior, snap).counts;
+  }
+
+  const id = PlxHistory.idFor(takenAt, hash);
+  await bucket.file(PLX_HISTORY_DIR + '/' + id + '.xlsx').save(buffer, {
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  });
+  await saveJson(PLX_HISTORY_DIR + '/' + id + '.json', snap);
+
+  const entry = {
+    id: id, takenAt: takenAt, hash: hash,
+    fileName: String(opts.fileName || '').slice(0, 300),
+    modifiedAt: String(opts.modifiedAt || '').slice(0, 40),
+    uploadedBy: String(opts.uploadedBy || '').slice(0, 80),
+    via: opts.uploadedBy ? 'upload' : 'push',
+    bytes: buffer.length,
+    changes: changes
+  };
+  const pruned = PlxHistory.prune(index.concat([entry]), takenAt);
+  await saveJson(PLX_HISTORY_INDEX, { entries: pruned.keep });
+  // The index is the record of what is kept, so it is written first: a failed
+  // delete leaves an orphan file, never an entry pointing at nothing.
+  await Promise.all(pruned.drop.map(e => Promise.all(['.xlsx', '.json'].map(ext =>
+    bucket.file(PLX_HISTORY_DIR + '/' + e.id + ext).delete().catch(err => {
+      if (!err || err.code !== 404) console.warn('Could not prune PLX history ' + e.id + ext, err);
+    })))));
+  return { id: id, unchanged: false, changes: changes };
+}
+
+function saveJson(path, data) {
+  return bucket.file(path).save(JSON.stringify(data), {
+    contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
+  });
+}
+
+/* What changed between two kept uploads -- the Meeting Prep page.
+
+     GET ?plxChanges=1                    the history, and newest vs. the one before
+     GET ?plxChanges=1&since=<ISO time>   newest vs. the upload that covers since
+     GET ?plxChanges=1&from=<id>&to=<id>  any two kept uploads
+     GET ?plxChanges=1&download=<id>      that upload's workbook file
+
+   Every item names its building, and a market-scoped account sees only the
+   buildings its markets cover. The file itself is the whole roster across every
+   market, so only an unrestricted account that may import can download it. */
+async function handlePlxChanges(req, res) {
+  setKvCors(res);
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (req.method !== 'GET') { res.status(405).json({ ok: false, error: 'GET only' }); return; }
+  const actor = await requireUser(req, res, 'view');
+  if (!actor) return;
+  res.set('Cache-Control', 'no-cache, max-age=0');
+  const restricted = MarketAccess.hasRestriction(actor);
+
+  const stored = await readJsonFile(PLX_HISTORY_INDEX);
+  const entries = (Array.isArray(stored.entries) ? stored.entries : [])
+    .slice().sort((x, y) => String(x.takenAt).localeCompare(String(y.takenAt)));
+  const find = id => entries.find(e => e.id === String(id || ''));
+
+  if (req.query.download !== undefined) {
+    const entry = find(req.query.download);
+    if (restricted || !Auth.can(actor, 'import')) {
+      res.status(403).json({ ok: false, forbidden: true,
+        error: 'The workbook covers every market, so only an account with no market restriction that can import may download it.' });
+      return;
+    }
+    if (!entry) { res.status(404).json({ ok: false, error: 'That upload is no longer kept.' }); return; }
+    try {
+      const [buf] = await bucket.file(PLX_HISTORY_DIR + '/' + entry.id + '.xlsx').download();
+      res.status(200).json({ ok: true, fileName: entry.fileName || 'PLX - Geodis Spreadsheet.xlsx',
+        takenAt: entry.takenAt, fileBase64: buf.toString('base64') });
+    } catch (err) {
+      res.status(404).json({ ok: false, error: 'That upload\'s file is no longer kept.' });
+    }
+    return;
+  }
+
+  // The list of uploads. Per-upload counts span every market, so a scoped
+  // account gets the list without them.
+  const uploads = entries.map(e => ({
+    id: e.id, takenAt: e.takenAt, lastSeenAt: e.lastSeenAt || '', fileName: e.fileName,
+    modifiedAt: e.modifiedAt, uploadedBy: e.uploadedBy, via: e.via,
+    changes: restricted ? undefined : e.changes
+  }));
+  const base = { ok: true, retentionDays: PlxHistory.RETENTION_DAYS, uploads: uploads };
+  if (entries.length < 2) {
+    res.status(200).json(Object.assign(base, { comparison: null,
+      note: entries.length ? 'Only one upload is kept so far, so there is nothing to compare it with yet.'
+        : 'No workbook has been uploaded since history began.' }));
+    return;
+  }
+
+  let to = req.query.to ? find(req.query.to) : entries[entries.length - 1];
+  let from = null, partial = false;
+  if (req.query.from) from = find(req.query.from);
+  else if (req.query.since) {
+    const picked = PlxHistory.baselineFor(entries, String(req.query.since));
+    from = picked && picked.entry; partial = !!(picked && picked.partial);
+  } else from = entries[entries.length - 2];
+  if (!from || !to) { res.status(404).json({ ok: false, error: 'That upload is no longer kept.' }); return; }
+  if (from.takenAt > to.takenAt) { const x = from; from = to; to = x; }
+
+  const [before, after] = await Promise.all([
+    readJsonFile(PLX_HISTORY_DIR + '/' + from.id + '.json'),
+    readJsonFile(PLX_HISTORY_DIR + '/' + to.id + '.json')
+  ]);
+  if (!before.version || !after.version) {
+    res.status(404).json({ ok: false, error: 'One of those uploads is no longer kept.' });
+    return;
+  }
+  let changes = PlxHistory.diff(from.id === to.id ? after : before, after);
+  if (restricted) {
+    const context = await marketContextForCollection('requisitions');
+    // A building is checked the way a requisition's work location is.
+    const ok = new Map();
+    changes = PlxHistory.filterDiff(changes, item => {
+      const loc = String(item.location || '');
+      if (!ok.has(loc)) {
+        ok.set(loc, MarketAccess.recordDecision(actor, 'requisitions', { location: loc }, context).allowed);
+      }
+      return ok.get(loc);
+    });
+  }
+  res.status(200).json(Object.assign(base, { comparison: {
+    from: { id: from.id, takenAt: from.takenAt, fileName: from.fileName },
+    to: { id: to.id, takenAt: to.takenAt, fileName: to.fileName },
+    partial: partial, changes: changes
+  } }));
 }
 
 /* ---------- the shared IL PTO tracker ----------
@@ -2516,6 +2694,7 @@ exports.syncReport = onRequest({ region: 'us-central1', secrets: [SYNC_KEY] }, a
     if (req.query.plxUpload !== undefined) { await handlePlxUpload(req, res); return; }
     if (req.query.plx !== undefined) { await handlePlx(req, res); return; }
     if (req.query.plxRefresh !== undefined) { await handlePlxRefresh(req, res); return; }
+    if (req.query.plxChanges !== undefined) { await handlePlxChanges(req, res); return; }
     if (req.query.ilPto !== undefined) { await handleIlPto(req, res); return; }
     if (req.query.schedule !== undefined) { await handleSchedule(req, res); return; }
     if (req.query.coverage !== undefined) { await handleCoverage(req, res); return; }

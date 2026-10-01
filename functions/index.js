@@ -1990,6 +1990,22 @@ async function applyPlxWorkbook(buffer, opts) {
         : (openings > 0 && clean.filled >= openings ? 'Filled' : 'Open');
       byId.set(clean.id, Object.assign({}, prior || {}, clean));
     });
+    /* Ignored job types (GIG) are not open orders. One already stored from an
+       earlier upload is taken back out rather than marked Closed -- a Closed
+       workbook order still counts toward the Overview's unfilled positions. If
+       Beeline also has the req, its Beeline half stays; only the workbook's claim
+       on it goes. */
+    if (parsed.ignored.length) {
+      warnings.push(parsed.ignored.length + ' GIG order(s) on the Reqs tab were ignored: ' +
+        parsed.ignored.map(r => 'Req ' + r.reqNumber + ' (' + r.openings + ' openings)').join(', ') + '.');
+    }
+    parsed.ignored.forEach(r => {
+      const id = 'REQ-' + r.reqNumber;
+      const rec = byId.get(id);
+      if (!rec || rec.source !== 'PLX workbook' || !ShiftKey.sameWorkbookMarket(rec, paths.market)) return;
+      if (!rec.beelineReq) { byId.delete(id); return; }
+      byId.set(id, Object.assign({}, rec, { source: '', updatedAt: new Date().toISOString() }));
+    });
     // A req that has left the sheet was closed out there. Mark it rather than
     // deleting it, so its history and anything filled against it survive.
     const live = new Set(incoming.map(r => r.id));

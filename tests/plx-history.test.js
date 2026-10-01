@@ -296,6 +296,13 @@ t('open positions are logged with headcount', (() => {
 })());
 t('and carried into the weekly trend', H.weekly([H.seriesPoint(ws, null)], { now: ws.takenAt })[0].open === 9);
 
+console.log('— GIG orders in older uploads —');
+const withGig = Object.assign({}, k, { orders: Object.assign({}, k.orders,
+  { 112975: { req: '112975', location: '1517', customer: '32 DEGREES', jobType: 'GIG', openings: 300, position: 'GIG' } }) });
+t('a GIG order leaving the sheet is not reported as filled', H.diff(withGig, k).counts.ordersClosed === 0);
+t('nor one arriving as created', H.diff(k, withGig).counts.ordersCreated === 0);
+t('and it is not in the openings', H.profile(withGig).rows.every(r => r.reqs.indexOf('112975') === -1));
+
 console.log('— colour changes only while a candidate —');
 const blueList = coloured({ zStarted: true }, {});
 const startedTab = blueList.find(x => /STARTED/.test(x.name));

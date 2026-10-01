@@ -278,8 +278,14 @@
     notes: /^notes$/i
   };
 
+  /* Job types the suite does not track. GIG is a standing pool order -- 300
+     openings for a gig programme -- not a set of seats to fill, and counting it
+     swamped every open-order total it touched. */
+  var IGNORED_JOB_TYPES = /^\s*gig\s*$/i;
+  function isIgnoredJobType(v) { return IGNORED_JOB_TYPES.test(String(v == null ? '' : v)); }
+
   function parseRequisitions(aoa) {
-    var out = { rows: [], warnings: [] };
+    var out = { rows: [], warnings: [], ignored: [] };
     var rows = aoa || [];
     var headerRow = -1, cols = null;
     for (var i = 0; i < Math.min(rows.length, 10); i++) {
@@ -297,6 +303,13 @@
       var cells = (row || []).map(txt);
       var req = cells[cols.reqNumber];
       if (!req) return;
+      // The header repeated further down the tab is not an order.
+      if (REQ_COLS.reqNumber.test(req)) return;
+      if (cols.jobType !== -1 && isIgnoredJobType(cells[cols.jobType])) {
+        var n = Number(cells[cols.quantity]);
+        out.ignored.push({ reqNumber: req, jobType: cells[cols.jobType], openings: isFinite(n) && n > 0 ? n : 0 });
+        return;
+      }
       if (seen[req]) {
         out.warnings.push('Req #' + req + ' appears more than once; the first row is used.');
         return;
@@ -861,6 +874,7 @@
 
   var api = {
     DEFAULT_WORKBOOK_MARKET: DEFAULT_WORKBOOK_MARKET,
+    isIgnoredJobType: isIgnoredJobType,
     isDefaultMarket: isDefaultMarket,
     workbookMarketTag: workbookMarketTag,
     workbookMarketOf: workbookMarketOf,

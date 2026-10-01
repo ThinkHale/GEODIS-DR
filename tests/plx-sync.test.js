@@ -35,6 +35,19 @@ t('source recorded', recs[0].source === 'PLX workbook');
 t('filled is NOT produced -- the sheet does not track it', recs[0].filled === undefined);
 t('nor is status', recs[0].status === undefined);
 
+console.log('— GIG orders and repeated headers are not orders —');
+const gigAoa = reqAoa.slice(0, 4).concat([
+  ['PLX', '1517', '32 Degrees', '18611', '9/21/26', '1st', 'GIG', '112975', '300', 'Luz', 'GIG', ''],
+  ['Agency', 'Building ', 'Account Name ', 'Account ', 'Hire Date', 'Shift ', 'Job Type ', 'Req #', 'Quantity ', 'Report To', 'Job Function ', 'Notes'],
+  ['PLX', '1502', 'CCM', '18845', '8/31/26', '2nd', ' gig ', '112976', '5', 'M', '', '']
+]);
+p = SK.parseRequisitions(gigAoa);
+t('GIG is skipped, any case or spacing', !p.rows.some(r => r.reqNumber === '112975' || r.reqNumber === '112976'));
+t('and reported as ignored', p.ignored.length === 2 && p.ignored[0].reqNumber === '112975' && p.ignored[0].openings === 300);
+t('a repeated header row is not an order', !p.rows.some(r => /req/i.test(r.reqNumber)));
+t('the real orders are all still there', p.rows.map(r => r.reqNumber).join() === '110150,110426');
+t('nothing about GIG is a warning about the sheet', !p.warnings.some(w => /112975/.test(w)));
+
 console.log('— against the real workbook, when present —');
 const book = path.join(__dirname, '..', 'PLX - Geodis Spreadsheet.xlsx');
 if (!fs.existsSync(book)) {
@@ -249,6 +262,25 @@ const shifts = () => { try { return JSON.parse(files[COLLECTIONS.shifts.path]); 
   t('with a flow configured it triggers', r.body.triggered === true);
   t('calling the flow URL', fetched.u === 'https://flow.example/run');
   t('by POST', fetched.o.method === 'POST');
+
+  console.log('— a GIG order already stored is taken back out —');
+  let list2 = reqs();
+  list2.push({ id: 'REQ-112975', title: 'GIG', building: '1517', openings: 300, source: 'PLX workbook', status: 'Open' });
+  list2.push({ id: 'REQ-112976', title: 'GIG', building: '1502', openings: 5, source: 'PLX workbook', status: 'Open',
+    beelineReq: '112976', beelineOpenings: 5 });
+  files[COLLECTIONS.requisitions.path] = JSON.stringify(list2);
+  const gigBook = (() => {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(gigAoa), '2026 - Beeline Reqs');
+    return XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
+  })();
+  r = await push({ fileBase64: gigBook });
+  t('accepted', r.code === 200);
+  t('the workbook-only GIG order is gone, not Closed', !reqs().some(x => x.id === 'REQ-112975'));
+  t('a GIG req Beeline also has keeps its Beeline half', reqs().some(x => x.id === 'REQ-112976' && x.beelineReq === '112976'));
+  t('but no longer counts as the workbook\'s', reqs().find(x => x.id === 'REQ-112976').source === '');
+  t('the sync says what it ignored', r.body.sync.warnings.some(w => /GIG/.test(w) && /112975/.test(w)));
+  t('the real orders are untouched', reqs().find(x => x.id === 'REQ-110150').status !== 'Closed');
 
   console.log('— the workbook emailed in, through Power Automate —');
   const book = makeBook();

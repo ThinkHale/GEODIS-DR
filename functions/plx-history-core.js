@@ -465,6 +465,17 @@
       String(a.name || a.req || '').localeCompare(String(b.name || b.req || ''));
   }
 
+  /* GIG orders are skipped when the Reqs tab is read (shift-key.js). Uploads kept
+     from before that still carry one, so it is left out here too -- otherwise the
+     first comparison after the change reports 300 openings filled. */
+  function trackedOrders(orders) {
+    var out = {};
+    Object.keys(orders || {}).forEach(function (k) {
+      if (!/^\s*gig\s*$/i.test(String(orders[k].jobType || ''))) out[k] = orders[k];
+    });
+    return out;
+  }
+
   function diff(before, after) {
     var b = before || {}, a = after || {};
     var out = {
@@ -502,7 +513,7 @@
       }
     });
 
-    var oa = a.orders || {}, ob = b.orders || {};
+    var oa = trackedOrders(a.orders), ob = trackedOrders(b.orders);
     Object.keys(oa).forEach(function (k) {
       if (!ob[k]) out.orders.created.push(oa[k]);
       else if (Number(ob[k].openings) !== Number(oa[k].openings)) {
@@ -603,7 +614,7 @@
     };
     var add = function (map, k, n) { map[k] = (map[k] || 0) + n; };
     values(snap.roster).forEach(function (p) { row(p.location, p.customer).onRoster++; });
-    values(snap.orders).forEach(function (o) {
+    values(trackedOrders(snap.orders)).forEach(function (o) {
       var r = row(o.location, o.customer);
       r.orders++; r.openings += Number(o.openings) || 0;
       add(r.openingsByPosition, o.position || 'Unspecified', Number(o.openings) || 0);

@@ -230,6 +230,8 @@ const PLX_CONFIG_PATH = 'plx/config.json';
    deny-all Storage rules as everything else -- the file is the whole roster. */
 const PLX_HISTORY_DIR = 'plx/history';
 const PLX_HISTORY_INDEX = PLX_HISTORY_DIR + '/index.json';
+// Headcount by site at every upload, kept for years: the week-over-week trend.
+const PLX_SERIES_PATH = 'plx/headcount-series.json';
 const PAYROLL_DIR = 'payroll/periods';    // {weekEnding}.json
 const MAX_HOURS_ROWS = 20000;
 const MAX_SNAPSHOTS = 40;
@@ -2062,18 +2064,21 @@ async function recordPlxHistory(buffer, sheets, opts) {
     return { id: newest.id, unchanged: true, changes: PlxHistory.diff(null, null).counts };
   }
 
-  const snap = PlxHistory.snapshot(sheets, { takenAt: takenAt, ShiftKey: ShiftKey });
-  let changes = null;
+  const snap = PlxHistory.snapshot(withFills(buffer, sheets), { takenAt: takenAt, ShiftKey: ShiftKey });
+  let d = null;
   if (newest) {
     const prior = await readJsonFile(PLX_HISTORY_DIR + '/' + newest.id + '.json');
-    if (prior && prior.version === PlxHistory.VERSION) changes = PlxHistory.diff(prior, snap).counts;
+    // Any version compares; what an older snapshot did not record is left out.
+    if (prior && prior.version >= 1) d = PlxHistory.diff(prior, snap);
   }
+  const changes = d ? d.counts : null;
 
   const id = PlxHistory.idFor(takenAt, hash);
   await bucket.file(PLX_HISTORY_DIR + '/' + id + '.xlsx').save(buffer, {
     contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   });
   await saveJson(PLX_HISTORY_DIR + '/' + id + '.json', snap);
+  await appendHeadcountSeries(snap, d, index);
 
   const entry = {
     id: id, takenAt: takenAt, hash: hash,
@@ -2095,18 +2100,61 @@ async function recordPlxHistory(buffer, sheets, opts) {
   return { id: id, unchanged: false, changes: changes };
 }
 
+/* The candidate tabs' highlight colours. The sync reads the workbook without
+   styles, which is faster and all it needs; this reads it again with them, for
+   those tabs only. A workbook whose styles cannot be read still snapshots --
+   just without highlights, which the comparison then knows not to report. */
+function withFills(buffer, sheets) {
+  try {
+    const names = sheets.map(s => s.name).filter(n => PlxHistory.stageOf(n));
+    if (!names.length) return sheets;
+    const styled = XLSX.read(buffer, { type: 'buffer', cellStyles: true, sheets: names });
+    return sheets.map(s => names.indexOf(s.name) === -1 || !styled.Sheets[s.name] ? s
+      : Object.assign({}, s, { fills: PlxHistory.rowFills(styled.Sheets[s.name], XLSX) }));
+  } catch (err) {
+    console.warn('Could not read the PLX workbook highlight colours', err);
+    return sheets;
+  }
+}
+
+/* Headcount over time. The kept files go after a week; this does not, so
+   week-over-week growth can be read back months later. The first time it is
+   written it is seeded from the uploads already kept, so the trend starts with
+   whatever history exists rather than from today. */
+async function appendHeadcountSeries(snap, d, index) {
+  const stored = await readJsonFile(PLX_SERIES_PATH);
+  let points = Array.isArray(stored.points) ? stored.points : null;
+  if (!points) {
+    points = [];
+    let prev = null;
+    const kept = index.slice().sort((x, y) => String(x.takenAt).localeCompare(String(y.takenAt)));
+    for (const e of kept) {
+      const s = await readJsonFile(PLX_HISTORY_DIR + '/' + e.id + '.json');
+      if (!s || !s.version) continue;
+      points.push(PlxHistory.seriesPoint(s, prev ? PlxHistory.diff(prev, s) : null));
+      prev = s;
+    }
+  }
+  points.push(PlxHistory.seriesPoint(snap, d));
+  await saveJson(PLX_SERIES_PATH, { points: PlxHistory.pruneSeries(points, snap.takenAt) });
+}
+
 function saveJson(path, data) {
   return bucket.file(path).save(JSON.stringify(data), {
     contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
   });
 }
 
-/* What changed between two kept uploads -- the Meeting Prep page.
+/* The Meeting Prep page: where things stand, how they have moved week by week,
+   and what changed between two kept uploads.
 
      GET ?plxChanges=1                    the history, and newest vs. the one before
      GET ?plxChanges=1&since=<ISO time>   newest vs. the upload that covers since
      GET ?plxChanges=1&from=<id>&to=<id>  any two kept uploads
      GET ?plxChanges=1&download=<id>      that upload's workbook file
+
+   Every response also carries `profile` (the newest upload, by site and
+   customer) and `trend` (headcount by week), neither of which needs two uploads.
 
    Every item names its building, and a market-scoped account sees only the
    buildings its markets cover. The file itself is the whole roster across every
@@ -2143,6 +2191,20 @@ async function handlePlxChanges(req, res) {
     return;
   }
 
+  // A building is checked the way a requisition's work location is.
+  let keep = () => true;
+  if (restricted) {
+    const context = await marketContextForCollection('requisitions');
+    const ok = new Map();
+    keep = item => {
+      const loc = String(item.location || '');
+      if (!ok.has(loc)) {
+        ok.set(loc, MarketAccess.recordDecision(actor, 'requisitions', { location: loc }, context).allowed);
+      }
+      return ok.get(loc);
+    };
+  }
+
   // The list of uploads. Per-upload counts span every market, so a scoped
   // account gets the list without them.
   const uploads = entries.map(e => ({
@@ -2150,48 +2212,42 @@ async function handlePlxChanges(req, res) {
     modifiedAt: e.modifiedAt, uploadedBy: e.uploadedBy, via: e.via,
     changes: restricted ? undefined : e.changes
   }));
-  const base = { ok: true, retentionDays: PlxHistory.RETENTION_DAYS, uploads: uploads };
-  if (entries.length < 2) {
-    res.status(200).json(Object.assign(base, { comparison: null,
-      note: entries.length ? 'Only one upload is kept so far, so there is nothing to compare it with yet.'
-        : 'No workbook has been uploaded since history began.' }));
+  const series = await readJsonFile(PLX_SERIES_PATH);
+  const base = { ok: true, retentionDays: PlxHistory.RETENTION_DAYS, uploads: uploads,
+    trend: PlxHistory.weekly(PlxHistory.filterSeries(series.points || [], keep), { weeks: 12 }) };
+  if (!entries.length) {
+    res.status(200).json(Object.assign(base, { comparison: null, profile: null,
+      note: 'No workbook has been uploaded since history began.' }));
     return;
   }
 
   let to = req.query.to ? find(req.query.to) : entries[entries.length - 1];
+  if (!to) { res.status(404).json({ ok: false, error: 'That upload is no longer kept.' }); return; }
+  const after = await readJsonFile(PLX_HISTORY_DIR + '/' + to.id + '.json');
+  if (!after.version) { res.status(404).json({ ok: false, error: 'That upload is no longer kept.' }); return; }
+  base.profile = PlxHistory.filterProfile(PlxHistory.profile(after), keep);
+
+  if (entries.length < 2) {
+    res.status(200).json(Object.assign(base, { comparison: null,
+      note: 'Only one upload is kept so far, so there is nothing to compare it with yet.' }));
+    return;
+  }
+
   let from = null, partial = false;
   if (req.query.from) from = find(req.query.from);
   else if (req.query.since) {
     const picked = PlxHistory.baselineFor(entries, String(req.query.since));
     from = picked && picked.entry; partial = !!(picked && picked.partial);
-  } else from = entries[entries.length - 2];
-  if (!from || !to) { res.status(404).json({ ok: false, error: 'That upload is no longer kept.' }); return; }
-  if (from.takenAt > to.takenAt) { const x = from; from = to; to = x; }
-
-  const [before, after] = await Promise.all([
-    readJsonFile(PLX_HISTORY_DIR + '/' + from.id + '.json'),
-    readJsonFile(PLX_HISTORY_DIR + '/' + to.id + '.json')
-  ]);
-  if (!before.version || !after.version) {
-    res.status(404).json({ ok: false, error: 'One of those uploads is no longer kept.' });
-    return;
-  }
-  let changes = PlxHistory.diff(from.id === to.id ? after : before, after);
-  if (restricted) {
-    const context = await marketContextForCollection('requisitions');
-    // A building is checked the way a requisition's work location is.
-    const ok = new Map();
-    changes = PlxHistory.filterDiff(changes, item => {
-      const loc = String(item.location || '');
-      if (!ok.has(loc)) {
-        ok.set(loc, MarketAccess.recordDecision(actor, 'requisitions', { location: loc }, context).allowed);
-      }
-      return ok.get(loc);
-    });
-  }
+  } else from = entries[entries.indexOf(to) - 1] || entries[0];
+  if (!from) { res.status(404).json({ ok: false, error: 'That upload is no longer kept.' }); return; }
+  let before = from.id === to.id ? after : await readJsonFile(PLX_HISTORY_DIR + '/' + from.id + '.json');
+  if (!before.version) { res.status(404).json({ ok: false, error: 'One of those uploads is no longer kept.' }); return; }
+  let older = from, newer = to, a = after;
+  if (from.takenAt > to.takenAt) { older = to; newer = from; a = before; before = after; }
+  const changes = PlxHistory.filterDiff(PlxHistory.diff(before, a), keep);
   res.status(200).json(Object.assign(base, { comparison: {
-    from: { id: from.id, takenAt: from.takenAt, fileName: from.fileName },
-    to: { id: to.id, takenAt: to.takenAt, fileName: to.fileName },
+    from: { id: older.id, takenAt: older.takenAt, fileName: older.fileName },
+    to: { id: newer.id, takenAt: newer.takenAt, fileName: newer.fileName },
     partial: partial, changes: changes
   } }));
 }

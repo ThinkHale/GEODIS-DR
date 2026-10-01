@@ -82,13 +82,13 @@
   var NAV = [
     { key: 'overview', label: 'Overview', group: '' },
     { key: 'tasks', label: 'Tasks', group: 'Workforce operations' },
-    { key: 'meeting', label: 'Meeting Prep', group: 'Workforce operations' },
     { key: 'associates', label: 'Associates', group: 'Workforce operations' },
     { key: 'coverage', label: 'On-Premise', group: 'Workforce operations' },
     { key: 'attendance', label: 'Attendance', group: 'Workforce operations' },
     { key: 'timeoff', label: 'Time Off', group: 'Workforce operations' },
     { key: 'payroll', label: 'Payroll', group: 'Workforce admin' },
     { key: 'requisitions', label: 'Beeline Requests', group: 'Workforce admin' },
+    { key: 'meeting', label: 'Meeting Prep', group: 'Workforce admin' },
     { key: 'reconciliation', label: 'Assignment Reconciliation', group: 'Workforce admin' },
     { key: 'data', label: 'Data', group: 'Workforce admin' },
     { key: 'settings', label: 'Settings', group: 'Workforce admin' }
@@ -5869,6 +5869,8 @@
     if (c.started) bits.push(c.started + ' started');
     if (c.ended) bits.push(c.ended + ' ended');
     if (c.wtScheduled) bits.push(plural(c.wtScheduled, 'walkthrough') + ' scheduled');
+    if (c.wtAccepted) bits.push(c.wtAccepted + ' accepted for WT');
+    if (c.wtApproved) bits.push(c.wtApproved + ' approved for start');
     if (c.wtCompleted) bits.push(c.wtCompleted + ' completed');
     if (c.ordersCreated) bits.push(plural(c.ordersCreated, 'new order'));
     if (c.ordersClosed) bits.push(plural(c.ordersClosed, 'order') + ' filled/closed');
@@ -5902,7 +5904,8 @@
       meetingWhen(cmpn.to.takenAt) + (state.market === 'all' ? '' : ' (' + state.market + ')')];
     lines.push('Assignments: ' + c.started + ' started, ' + c.ended + ' ended (headcount ' +
       c.headcountFrom + ' to ' + c.headcountTo + ')');
-    lines.push('Walkthroughs: ' + c.wtScheduled + ' scheduled, ' + c.wtCompleted + ' completed, ' +
+    lines.push('Walkthroughs: ' + c.wtScheduled + ' scheduled, ' + (ch.highlights ? c.wtAccepted +
+      ' accepted for WT, ' + c.wtApproved + ' approved for start, ' : '') + c.wtCompleted + ' completed, ' +
       c.wtCancelled + ' cancelled, ' + c.wtRescheduled + ' rescheduled');
     lines.push('Orders: ' + c.ordersCreated + ' created (' + c.openingsCreated + ' openings), ' +
       c.ordersClosed + ' filled/closed (' + c.openingsClosed + ' openings), ' + c.ordersChanged + ' changed');
@@ -5914,6 +5917,12 @@
     var who = function (x) { return x.name + (x.location ? ' (' + x.location + ')' : ''); };
     named('Started', ch.assignments.started, who);
     named('Ended', ch.assignments.ended, who);
+    var bySite = ch.headcount.filter(function (h) { return h.added || h.removed; });
+    if (bySite.length) {
+      lines.push('', 'Headcount by site:', bySite.map(function (h) {
+        return '  - ' + h.location + ': ' + h.from + ' to ' + h.to + ' (+' + h.added + ' / -' + h.removed + ')';
+      }).join('\n'));
+    }
     named('Walkthroughs scheduled', ch.walkthroughs.scheduled, function (x) { return who(x) + ' ' + x.wtDate; });
     named('Walkthroughs completed', ch.walkthroughs.completed, who);
     named('New orders', ch.orders.created, function (x) { return 'Req ' + x.req + ' ' + x.location + ' ' + x.account + ' x' + x.openings; });
@@ -5921,11 +5930,290 @@
     return lines.join('\n');
   }
 
+  /* The header's market picker, applied to the weekly trend. The server has
+     already dropped sites this account may not see; this narrows further and
+     re-adds the totals from what is left. */
+  function meetingTrendInMarket(trend) {
+    if (state.market === 'all') return trend || [];
+    var byMarket = ReqsCore.siteMarketIndex(state.stores.locations);
+    var keep = function (loc) { var m = byMarket.get(String(loc)); return !m || m === state.market; };
+    return (trend || []).map(function (w) {
+      var out = { week: w.week, known: w.known, readings: w.readings, sites: {}, onRoster: 0, expected: null,
+        added: 0, removed: 0, change: null };
+      Object.keys(w.sites || {}).forEach(function (loc) {
+        if (!keep(loc)) return;
+        var x = w.sites[loc];
+        out.sites[loc] = x;
+        out.onRoster += x.onRoster || 0; out.added += x.added || 0; out.removed += x.removed || 0;
+        if (x.expected != null) out.expected = (out.expected || 0) + x.expected;
+        if (x.change != null) out.change = (out.change || 0) + x.change;
+      });
+      return out;
+    });
+  }
+  function meetingProfileInMarket(profile) {
+    if (!profile || state.market === 'all' || typeof PlxHistory === 'undefined') return profile;
+    var byMarket = ReqsCore.siteMarketIndex(state.stores.locations);
+    return PlxHistory.filterProfile(profile, function (item) {
+      var m = byMarket.get(String(item.location || ''));
+      return !m || m === state.market;
+    });
+  }
+  function signed(n) { return n == null ? '—' : (n > 0 ? '+' : '') + n; }
+  function sumBy(list, field) { return list.reduce(function (n, x) { return n + (Number(x[field]) || 0); }, 0); }
+  function addInto(into, map) {
+    Object.keys(map || {}).forEach(function (k) { into[k] = (into[k] || 0) + map[k]; });
+    return into;
+  }
+  var MEETING_POSITIONS = ['Operator', 'Material Handler'];
+  function positionSplit(map) {
+    var other = 0;
+    Object.keys(map || {}).forEach(function (k) { if (MEETING_POSITIONS.indexOf(k) === -1) other += map[k]; });
+    return MEETING_POSITIONS.map(function (k) { return (map || {})[k] || 0; }).concat([other]);
+  }
+  function colorList(map) {
+    return Object.keys(map || {}).sort().map(function (k) { return map[k] + ' ' + k; }).join(', ');
+  }
+  function meetingPanel(title, sub, inner, cls) {
+    return '<section class="suite-panel meeting-section ' + (cls || '') + '"><div class="suite-panel-head"><h2>' + esc(title) +
+      '</h2>' + (sub ? '<span class="meeting-sub">' + sub + '</span>' : '') + '</div>' + inner + '</section>';
+  }
+  function meetingSimpleTable(head, rows, foot) {
+    return '<div class="suite-table-wrap"><table class="suite-table meeting-table"><thead><tr>' +
+      head.map(function (h, i) { return '<th' + (i ? ' class="num"' : '') + '>' + h + '</th>'; }).join('') +
+      '</tr></thead><tbody>' + rows.join('') + '</tbody>' + (foot ? '<tfoot>' + foot + '</tfoot>' : '') + '</table></div>';
+  }
+  function td(v, cls) { return '<td' + (cls ? ' class="' + cls + '"' : '') + '>' + v + '</td>'; }
+  function deltaCell(n) {
+    return td(esc(signed(n)), 'num ' + (n > 0 ? 'meeting-up' : n < 0 ? 'meeting-down' : ''));
+  }
+
+  /* Beeline's own figures for the workbook's orders, joined on the Req #. The
+     daily exports are already loaded for the Beeline Requests page; this only
+     reads them. */
+  function meetingBeeline() {
+    var board = reqBoard(), rows = reqBoardInMarket(board), byKey = {};
+    board.reqs.forEach(function (r) { if (r.key) byKey[r.key] = r; });
+    return { rows: rows, summary: summarizeVisible(rows), byKey: byKey };
+  }
+
+  function meetingCurrent(profile, bee, d) {
+    var rows = profile.rows, sites = profile.sites;
+    var onRoster = sumBy(sites, 'onRoster');
+    var expectedSites = sites.filter(function (x) { return x.expected != null; });
+    var expected = expectedSites.length ? sumBy(expectedSites, 'expected') : null;
+    var cands = sumBy(rows, 'candidates'), acc = sumBy(rows, 'accepted'), appr = sumBy(rows, 'approved');
+    var bs = bee.summary;
+    var tiles = '<div class="meeting-tiles meeting-tiles-wide">' +
+      meetingTile('On roster', onRoster, expected == null ? 'HC tabs' : expected + ' expected · ' + signed(onRoster - expected) + ' vs expected') +
+      meetingTile('Open orders', sumBy(rows, 'orders'), plural(sumBy(rows, 'openings'), 'opening') + ' on Beeline Reqs tab') +
+      meetingTile('Open WT slots', sumBy(rows, 'openSlots'), 'Unnamed rows on the WT List') +
+      meetingTile('Candidates identified', cands, profile.highlights
+        ? acc + ' accepted for WT (green) · ' + appr + ' approved for start (blue)' : 'WT List + Pipeline') +
+      meetingTile('Beeline open reqs', bs.reqs, (bs.shortBy == null ? 'No openings recorded' : bs.shortBy + ' seats short') +
+        ' · ' + plural(bs.candidates, 'candidate')) +
+      '</div>';
+    return meetingPanel('Where things stand', 'As of the upload of ' + esc(meetingWhen(profile.takenAt)), tiles);
+  }
+
+  function meetingSites(profile, d) {
+    var bySite = {};
+    (d ? d.headcount : []).forEach(function (h) { bySite[h.location] = h; });
+    var customersAt = {};
+    profile.rows.forEach(function (r) {
+      if (r.customer) (customersAt[r.location] = customersAt[r.location] || []).push(r.customer);
+    });
+    var body = profile.sites.map(function (x) {
+      var h = bySite[x.location];
+      var gap = x.expected == null ? null : x.onRoster - x.expected;
+      return '<tr>' + td('<b>' + esc(x.location) + '</b>' + (x.sheet ? '<div class="sub">' + esc(x.sheet) + '</div>' : '')) +
+        td(esc((customersAt[x.location] || []).join(', ') || '—'), 'meeting-wrap') +
+        td(esc(x.expected == null ? '—' : x.expected), 'num') + td(esc(x.onRoster), 'num') + deltaCell(gap) +
+        (d ? td(h && h.added ? '+' + h.added : '0', 'num meeting-up') + td(h && h.removed ? '−' + h.removed : '0', 'num meeting-down') +
+          deltaCell(h ? h.to - h.from : 0) : '') + '</tr>';
+    });
+    var head = ['Site', 'Customers', 'Expected', 'On roster', 'vs expected'].concat(d ? ['Added', 'Removed', 'Net'] : []);
+    var c = d && d.counts;
+    var foot = '<tr>' + td('<b>Total</b>') + td('') + td('') + td('<b>' + sumBy(profile.sites, 'onRoster') + '</b>', 'num') + td('') +
+      (d ? td('+' + c.started, 'num meeting-up') + td('−' + c.ended, 'num meeting-down') + deltaCell(c.headcountTo - c.headcountFrom) : '') + '</tr>';
+    return meetingPanel('Headcount by site', d
+      ? 'Added and removed are the people behind the net change since ' + esc(meetingWhen(state.meeting.data.comparison.from.takenAt))
+      : 'Upload the workbook again to see who was added and removed', meetingSimpleTable(head, body, foot));
+  }
+
+  function meetingTrend(trend, starts) {
+    var weeks = trend.filter(function (w) { return w.known; });
+    var startsBy = {};
+    (starts || []).forEach(function (x) { startsBy[x.week] = (startsBy[x.week] || 0) + x.count; });
+    if (!weeks.length) {
+      return meetingPanel('Week over week', '', '<div class="workflow-empty">The weekly trend starts with the first ' +
+        'upload kept, and grows by a row every week from there.</div>');
+    }
+    var sites = {};
+    weeks.forEach(function (w) { Object.keys(w.sites).forEach(function (loc) { sites[loc] = true; }); });
+    sites = Object.keys(sites).sort();
+    var body = weeks.slice().reverse().map(function (w) {
+      return '<tr>' + td('<b>' + esc(formatDate(w.week, false)) + '</b>' + (w.readings ? '' : '<div class="sub">No upload; carried forward</div>')) +
+        td(esc(w.onRoster), 'num') + deltaCell(w.change) + td(w.added ? '+' + w.added : '0', 'num meeting-up') +
+        td(w.removed ? '−' + w.removed : '0', 'num meeting-down') + td(esc(startsBy[w.week] || 0), 'num') +
+        sites.map(function (loc) {
+          var x = w.sites[loc];
+          return td(x && x.onRoster != null ? esc(x.onRoster) + (x.change ? ' <small class="' +
+            (x.change > 0 ? 'meeting-up' : 'meeting-down') + '">' + esc(signed(x.change)) + '</small>' : '') : '—', 'num');
+        }).join('') + '</tr>';
+    });
+    return meetingPanel('Week over week', 'Headcount at the end of each week (Mon–Sun). Starts are from the STARTED tabs.',
+      meetingSimpleTable(['Week of', 'Headcount', 'Change', 'Added', 'Removed', 'Starts']
+        .concat(sites.map(function (loc) { return esc(loc); })), body));
+  }
+
+  function meetingStarts(starts) {
+    var weeks = {};
+    (starts || []).forEach(function (x) { (weeks[x.week] = weeks[x.week] || []).push(x); });
+    var list = Object.keys(weeks).sort().slice(-8).reverse();
+    if (!list.length) return '';
+    var max = Math.max.apply(null, list.map(function (w) { return sumBy(weeks[w], 'count'); })) || 1;
+    var body = list.map(function (w) {
+      var n = sumBy(weeks[w], 'count');
+      return '<tr>' + td('<b>' + esc(formatDate(w, false)) + '</b>') +
+        td('<span class="meeting-bar"><span style="width:' + Math.round(n / max * 100) + '%"></span></span>', 'meeting-bar-cell') +
+        td(esc(n), 'num') + td(esc(weeks[w].sort(function (a, b) { return String(a.location).localeCompare(String(b.location)); })
+          .map(function (x) { return x.location + ': ' + x.count; }).join(' · ')), 'meeting-wrap') + '</tr>';
+    });
+    return meetingPanel('Starts per week', 'Rows on the STARTED tabs by start date, last 8 weeks with starts',
+      meetingSimpleTable(['Week of', '', 'Starts', 'By site'], body));
+  }
+
+  function meetingCustomers(profile, bee) {
+    var body = profile.rows.filter(function (r) {
+      return r.onRoster || r.orders || r.openSlots || r.candidates;
+    }).map(function (r) {
+      var o = positionSplit(r.openingsByPosition);
+      var b = { requested: 0, hired: 0, candidates: 0, found: 0 };
+      (r.reqs || []).forEach(function (req) {
+        var x = bee.byKey[ReqsCore.reqKey(req)];
+        if (!x) return;
+        b.found++; b.requested += Number(x.requested) || 0; b.hired += Number(x.hired) || 0;
+        b.candidates += x.candidateCount || 0;
+      });
+      var colours = colorList(r.otherColors);
+      return '<tr>' + td('<b>' + esc(r.location) + '</b>') + td(esc(r.customer || 'Not recorded')) +
+        td(esc(r.onRoster), 'num') + td(esc(r.orders), 'num') + td('<b>' + esc(r.openings) + '</b>', 'num') +
+        o.map(function (n) { return td(n ? esc(n) : '·', 'num'); }).join('') +
+        td(esc(r.openSlots), 'num') + td(esc(r.candidates), 'num') +
+        td(profile.highlights ? esc(r.accepted) : '—', 'num') + td(profile.highlights ? esc(r.approved) : '—', 'num') +
+        td(r.reqs.length ? (b.found ? esc(b.hired + '/' + b.requested) + ' · ' + esc(plural(b.candidates, 'cand.')) : 'Not in Beeline') : '—', 'meeting-wrap') +
+        '</tr>' + (colours ? '<tr class="meeting-note-row"><td></td><td colspan="12">Other highlights on candidates: ' + esc(colours) + '</td></tr>' : '');
+    });
+    if (!body.length) return '';
+    var head = ['Site', 'Customer', 'On roster', 'Orders', 'Openings', 'Operator', 'Material Handler', 'Other',
+      'Open WT slots', 'Candidates', 'Accepted (green)', 'Approved (blue)', 'Beeline hired/req.'];
+    return meetingPanel('Orders by customer', 'Openings by position are from the Beeline Reqs tab; Beeline figures are joined on the Req #',
+      meetingSimpleTable(head, body));
+  }
+
+  function meetingPositions(profile, bee) {
+    var openings = {}, slots = {}, cands = {}, beeShort = {};
+    profile.rows.forEach(function (r) {
+      addInto(openings, r.openingsByPosition); addInto(slots, r.slotsByPosition); addInto(cands, r.candidatesByPosition);
+    });
+    bee.rows.forEach(function (r) {
+      var k = PlxHistory.positionOf(r.jobPosition, r.title);
+      beeShort[k] = (beeShort[k] || 0) + (Number(r.shortBy) || 0);
+    });
+    var names = Object.keys(Object.assign({}, openings, slots, cands, beeShort)).sort(function (a, b) {
+      var ia = MEETING_POSITIONS.indexOf(a), ib = MEETING_POSITIONS.indexOf(b);
+      return (ia === -1 ? 9 : ia) - (ib === -1 ? 9 : ib) || a.localeCompare(b);
+    });
+    if (!names.length) return '';
+    var body = names.map(function (k) {
+      return '<tr>' + td('<b>' + esc(k) + '</b>') + td(esc(openings[k] || 0), 'num') + td(esc(slots[k] || 0), 'num') +
+        td(esc(cands[k] || 0), 'num') + td(esc(beeShort[k] || 0), 'num') + '</tr>';
+    });
+    return meetingPanel('Open positions', 'Material Handler includes Sr / MATH 1–3; Operator includes OPR, EPJ, reach and sit-down',
+      meetingSimpleTable(['Position', 'Openings (workbook)', 'Open WT slots', 'Candidates identified', 'Beeline seats short'], body));
+  }
+
+  function meetingChanges(d, cmpn) {
+    var c = d.counts, net = c.headcountTo - c.headcountFrom;
+    return '<p class="meeting-window">Changes between the upload of <b>' + esc(meetingWhen(cmpn.from.takenAt)) +
+      '</b> and <b>' + esc(meetingWhen(cmpn.to.takenAt)) + '</b>' +
+      (state.market === 'all' ? '' : ' · ' + esc(state.market)) + '.' +
+      (cmpn.partial ? ' <span class="warn-text">History does not reach back that far, so this starts at the oldest upload kept.</span>' : '') +
+      '</p>' +
+      '<div class="meeting-grid">' +
+      '<section class="suite-panel meeting-group"><div class="suite-panel-head"><h2>Assignments</h2></div><div class="meeting-tiles">' +
+        meetingTile('Started', c.started, 'New on an HC tab', 'green') +
+        meetingTile('Ended', c.ended, 'Left every HC tab', c.ended ? 'red' : '') +
+        meetingTile('Net headcount', signed(net), c.headcountFrom + ' → ' + c.headcountTo) + '</div></section>' +
+      '<section class="suite-panel meeting-group"><div class="suite-panel-head"><h2>Walkthroughs</h2></div><div class="meeting-tiles">' +
+        meetingTile('Scheduled', c.wtScheduled, c.wtRescheduled ? c.wtRescheduled + ' rescheduled' : 'WT date entered') +
+        (d.highlights ? meetingTile('Accepted / approved', c.wtAccepted + ' / ' + c.wtApproved, 'Newly green / newly blue')
+          : meetingTile('Accepted / approved', '—', 'Needs two uploads read for colour')) +
+        meetingTile('Completed', c.wtCompleted, c.wtCancelled + ' cancelled / DNR', 'green') + '</div></section>' +
+      '<section class="suite-panel meeting-group"><div class="suite-panel-head"><h2>Orders</h2></div><div class="meeting-tiles">' +
+        meetingTile('Created', c.ordersCreated, plural(c.openingsCreated, 'opening')) +
+        meetingTile('Filled / closed', c.ordersClosed, plural(c.openingsClosed, 'opening') + ' · left the Reqs tab', 'green') +
+        meetingTile('Open WT slots', c.openSlotsTo, 'Was ' + c.openSlotsFrom) + '</div></section>' +
+      '</div>' +
+      '<section class="suite-panel meeting-details"><div class="suite-panel-head"><h2>Who and what</h2>' +
+      '<span class="meeting-sub">' + plural(c.occurrences, 'attendance occurrence') + ' logged · ' +
+      plural(c.ordersChanged, 'order') + ' changed quantity</span></div>' +
+      meetingTable('Assignments started', d.assignments.started, [
+        ['Name', function (r) { return r.name; }], ['EID', function (r) { return r.eid; }],
+        ['Site', function (r) { return r.site; }], ['Customer', function (r) { return r.customer; }],
+        ['Shift', function (r) { return r.shift; }], ['Start date', function (r) { return r.startDate; }]]) +
+      meetingTable('Assignments ended', d.assignments.ended, [
+        ['Name', function (r) { return r.name; }], ['EID', function (r) { return r.eid; }],
+        ['Site', function (r) { return r.site; }], ['Customer', function (r) { return r.customer; }],
+        ['Shift', function (r) { return r.shift; }], ['Last comment', function (r) { return r.comments; }]]) +
+      meetingTable('Walkthroughs scheduled', d.walkthroughs.scheduled, [
+        ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
+        ['Customer', function (r) { return r.customer || r.account; }], ['Position', function (r) { return r.position; }],
+        ['WT date', function (r) { return r.wtDate; }], ['Tab', function (r) { return r.tab; }]]) +
+      meetingTable('Walkthroughs rescheduled', d.walkthroughs.rescheduled, [
+        ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
+        ['Was', function (r) { return r.fromWtDate; }], ['Now', function (r) { return r.wtDate; }]]) +
+      meetingTable('Accepted for walkthrough (newly green)', d.walkthroughs.accepted || [], [
+        ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
+        ['Customer', function (r) { return r.customer || r.account; }], ['WT date', function (r) { return r.wtDate; }],
+        ['Tab', function (r) { return r.tab; }]]) +
+      meetingTable('Approved for start (newly blue)', d.walkthroughs.approved || [], [
+        ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
+        ['Customer', function (r) { return r.customer || r.account; }], ['Start date', function (r) { return r.startDate; }],
+        ['Tab', function (r) { return r.tab; }]]) +
+      meetingTable('Walkthroughs completed (moved to STARTED)', d.walkthroughs.completed, [
+        ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
+        ['Customer', function (r) { return r.customer || r.account; }], ['WT date', function (r) { return r.wtDate; }],
+        ['Start date', function (r) { return r.startDate; }]]) +
+      meetingTable('Walkthroughs cancelled / DNR', d.walkthroughs.cancelled, [
+        ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
+        ['Customer', function (r) { return r.customer || r.account; }], ['Was on', function (r) { return r.fromStage; }]]) +
+      meetingTable('Orders created', d.orders.created, [
+        ['Req #', function (r) { return r.req; }], ['Building', function (r) { return r.location; }],
+        ['Customer', function (r) { return r.customer || r.account; }], ['Position', function (r) { return r.position; }],
+        ['Shift', function (r) { return r.shift; }], ['Openings', function (r) { return String(r.openings); }],
+        ['Hire date', function (r) { return r.hireDate; }]]) +
+      meetingTable('Orders filled / closed', d.orders.closed, [
+        ['Req #', function (r) { return r.req; }], ['Building', function (r) { return r.location; }],
+        ['Customer', function (r) { return r.customer || r.account; }], ['Position', function (r) { return r.position; }],
+        ['Openings', function (r) { return String(r.openings); }]]) +
+      meetingTable('Orders with a new quantity', d.orders.changed, [
+        ['Req #', function (r) { return r.req; }], ['Building', function (r) { return r.location; }],
+        ['Was', function (r) { return String(r.fromOpenings); }], ['Now', function (r) { return String(r.openings); }]]) +
+      meetingTable('Attendance occurrences logged', d.attendance.logged, [
+        ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
+        ['Date', function (r) { return r.date; }], ['Points', function (r) { return r.points; }],
+        ['Comment', function (r) { return r.comments; }]]) +
+      '</section>';
+  }
+
   function meetingView() {
     var m = state.meeting, d = m.data;
     if (!d && !m.loading && !m.error) loadMeeting();
     var uploads = (d && d.uploads) || [];
     var toolbar = '<div class="filter-row meeting-ranges" role="group" aria-label="Compare window">' +
+      '<span class="meeting-label">Changes</span>' +
       MEETING_RANGES.map(function (r) {
         return '<button type="button" class="suite-btn ' + (m.range === r[0] ? 'primary' : '') +
           '" aria-pressed="' + (m.range === r[0]) + '" data-meeting-range="' + r[0] + '">' + esc(r[1]) + '</button>';
@@ -5942,79 +6230,23 @@
     var body;
     if (m.loading && !d) body = '<div class="workflow-empty">Loading the workbook history…</div>';
     else if (m.error) body = '<div class="workflow-empty warn-text" role="alert">' + esc(m.error) + '</div>';
-    else if (!d || !d.comparison) {
-      body = empty('Nothing to compare yet', (d && d.note) ||
-        'Changes appear once the PLX workbook has been uploaded twice. Uploads are kept for 7 days.');
-    } else if (m.range === 'pick' && !m.from) {
-      body = '<div class="workflow-empty">Choose the upload to compare the newest one against.</div>';
+    else if (!d || !d.profile) {
+      body = empty('No workbook kept yet', (d && d.note) ||
+        'Meeting Prep fills in once the PLX workbook has been uploaded. Uploads are kept for 7 days.');
     } else {
-      var cmpn = d.comparison, ch = meetingInMarket(cmpn.changes), c = ch.counts;
-      var net = c.headcountTo - c.headcountFrom;
-      body = '<p class="meeting-window">Comparing the upload of <b>' + esc(meetingWhen(cmpn.from.takenAt)) +
-        '</b> with <b>' + esc(meetingWhen(cmpn.to.takenAt)) + '</b>' +
-        (state.market === 'all' ? '' : ' · ' + esc(state.market)) + '.' +
-        (cmpn.partial ? ' <span class="warn-text">History does not reach back that far, so this starts at the oldest upload kept.</span>' : '') +
-        '</p>' +
-        '<div class="meeting-grid">' +
-        '<section class="suite-panel meeting-group"><div class="suite-panel-head"><h2>Assignments</h2></div><div class="meeting-tiles">' +
-          meetingTile('Started', c.started, 'New on an HC tab', 'green') +
-          meetingTile('Ended', c.ended, 'Left every HC tab', c.ended ? 'red' : '') +
-          meetingTile('Headcount', c.headcountTo, (net > 0 ? '+' : '') + net + ' from ' + c.headcountFrom) + '</div></section>' +
-        '<section class="suite-panel meeting-group"><div class="suite-panel-head"><h2>Walkthroughs</h2></div><div class="meeting-tiles">' +
-          meetingTile('Scheduled', c.wtScheduled, c.wtRescheduled ? c.wtRescheduled + ' rescheduled' : 'WT date entered') +
-          meetingTile('Completed', c.wtCompleted, 'Moved to STARTED', 'green') +
-          meetingTile('Cancelled / DNR', c.wtCancelled, 'Moved to DNR / cancelled', c.wtCancelled ? 'red' : '') + '</div></section>' +
-        '<section class="suite-panel meeting-group"><div class="suite-panel-head"><h2>Orders</h2></div><div class="meeting-tiles">' +
-          meetingTile('Created', c.ordersCreated, plural(c.openingsCreated, 'opening')) +
-          meetingTile('Filled / closed', c.ordersClosed, plural(c.openingsClosed, 'opening') + ' · left the Reqs tab', 'green') +
-          meetingTile('Open WT slots', c.openSlotsTo, 'Was ' + c.openSlotsFrom) + '</div></section>' +
-        '</div>' +
-        '<section class="suite-panel meeting-details"><div class="suite-panel-head"><h2>Who and what</h2>' +
-        '<span class="meeting-sub">' + plural(c.occurrences, 'attendance occurrence') + ' logged · ' +
-        plural(c.ordersChanged, 'order') + ' changed quantity</span></div>' +
-        meetingTable('Assignments started', ch.assignments.started, [
-          ['Name', function (r) { return r.name; }], ['EID', function (r) { return r.eid; }],
-          ['Site', function (r) { return r.site; }], ['Shift', function (r) { return r.shift; }],
-          ['Start date', function (r) { return r.startDate; }]]) +
-        meetingTable('Assignments ended', ch.assignments.ended, [
-          ['Name', function (r) { return r.name; }], ['EID', function (r) { return r.eid; }],
-          ['Site', function (r) { return r.site; }], ['Shift', function (r) { return r.shift; }],
-          ['Last comment', function (r) { return r.comments; }]]) +
-        meetingTable('Walkthroughs scheduled', ch.walkthroughs.scheduled, [
-          ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
-          ['Account', function (r) { return r.account; }], ['Shift', function (r) { return r.shift; }],
-          ['WT date', function (r) { return r.wtDate; }], ['Tab', function (r) { return r.tab; }]]) +
-        meetingTable('Walkthroughs rescheduled', ch.walkthroughs.rescheduled, [
-          ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
-          ['Was', function (r) { return r.fromWtDate; }], ['Now', function (r) { return r.wtDate; }]]) +
-        meetingTable('Walkthroughs completed', ch.walkthroughs.completed, [
-          ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
-          ['Account', function (r) { return r.account; }], ['WT date', function (r) { return r.wtDate; }],
-          ['Start date', function (r) { return r.startDate; }]]) +
-        meetingTable('Walkthroughs cancelled / DNR', ch.walkthroughs.cancelled, [
-          ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
-          ['Account', function (r) { return r.account; }], ['Was on', function (r) { return r.fromStage; }]]) +
-        meetingTable('Orders created', ch.orders.created, [
-          ['Req #', function (r) { return r.req; }], ['Building', function (r) { return r.location; }],
-          ['Account', function (r) { return r.account; }], ['Shift', function (r) { return r.shift; }],
-          ['Job', function (r) { return r.jobType; }], ['Openings', function (r) { return String(r.openings); }],
-          ['Hire date', function (r) { return r.hireDate; }]]) +
-        meetingTable('Orders filled / closed', ch.orders.closed, [
-          ['Req #', function (r) { return r.req; }], ['Building', function (r) { return r.location; }],
-          ['Account', function (r) { return r.account; }], ['Shift', function (r) { return r.shift; }],
-          ['Openings', function (r) { return String(r.openings); }]]) +
-        meetingTable('Orders with a new quantity', ch.orders.changed, [
-          ['Req #', function (r) { return r.req; }], ['Building', function (r) { return r.location; }],
-          ['Was', function (r) { return String(r.fromOpenings); }], ['Now', function (r) { return String(r.openings); }]]) +
-        meetingTable('Attendance occurrences logged', ch.attendance.logged, [
-          ['Name', function (r) { return r.name; }], ['Building', function (r) { return r.location; }],
-          ['Date', function (r) { return r.date; }], ['Points', function (r) { return r.points; }],
-          ['Comment', function (r) { return r.comments; }]]) +
-        meetingTable('Headcount by building', ch.headcount, [
-          ['Building', function (r) { return r.location; }], ['Before', function (r) { return String(r.from); }],
-          ['Now', function (r) { return String(r.to); }],
-          ['Net', function (r) { var n = r.to - r.from; return (n > 0 ? '+' : '') + n; }]]) +
-        '</section>';
+      var profile = meetingProfileInMarket(d.profile), bee = meetingBeeline();
+      var cmpn = d.comparison && !(m.range === 'pick' && !m.from) ? d.comparison : null;
+      var ch = cmpn ? meetingInMarket(cmpn.changes) : null;
+      body = meetingCurrent(profile, bee, ch) +
+        meetingSites(profile, ch) +
+        meetingTrend(meetingTrendInMarket(d.trend), profile.starts) +
+        '<div class="meeting-two">' + meetingPositions(profile, bee) + meetingStarts(profile.starts) + '</div>' +
+        meetingCustomers(profile, bee) +
+        '<h2 class="meeting-heading">What changed</h2>' + toolbar +
+        (m.copied ? '<p class="meeting-window" role="status">' + esc(m.copied) + '</p>' : '') +
+        (ch ? meetingChanges(ch, cmpn)
+          : m.range === 'pick' && !m.from ? '<div class="workflow-empty">Choose the upload to compare the newest one against.</div>'
+          : empty('Nothing to compare yet', d.note || 'Changes appear once the workbook has been uploaded twice.'));
     }
 
     var history = uploads.length ? '<section class="suite-panel meeting-history"><div class="suite-panel-head">' +
@@ -6031,9 +6263,9 @@
             '">Download</button></td>' : '') + '</tr>';
       }).join('') + '</tbody></table></div></section>' : '';
 
-    return '<div class="module-toolbar"><p>Read this before the staffing call. Each number is inferred from two uploads of ' +
-      'the PLX workbook, so a change somebody made and undid between them does not show.</p></div>' +
-      toolbar + (m.copied ? '<p class="meeting-window" role="status">' + esc(m.copied) + '</p>' : '') + body + history;
+    return '<div class="module-toolbar"><p>Read this before the staffing call. Everything here comes from the PLX workbook ' +
+      'uploads, plus the Beeline exports where a Req # matches. Changes are inferred from two uploads, so an edit made ' +
+      'and undone between them does not show.</p></div>' + body + history;
   }
   function downloadPlxUpload(id) {
     SuiteData.downloadPlxUpload(id).then(function (r) {

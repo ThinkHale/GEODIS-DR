@@ -298,6 +298,7 @@ Every upload, from the browser or the scheduled push, is also kept under
 | `plx/history/index.json` | `{ entries: [...] }`, one per kept upload: id, time, file name, who, the change counts against the one before |
 | `plx/history/<id>.xlsx` | the workbook exactly as uploaded |
 | `plx/history/<id>.json` | a snapshot: HC roster by EID, candidates by name across the WT List / Pipeline / STARTED / DNR tabs, open WT slots, Beeline Reqs by Req #, attendance occurrences |
+| `plx/headcount-series.json` | `{ points: [...] }`, one per stored upload: roster size, Expected and people added / removed at each site. Kept two years, not seven days, for the week-over-week trend. Seeded from the kept uploads the first time it is written. |
 
 Anything older than 7 days is pruned on the next upload, **except the newest**,
 which is kept however old it is because the next upload is compared with it. A
@@ -317,6 +318,28 @@ that left them. A walkthrough is **scheduled** when a WT date appears,
 STARTED tab, and **cancelled** when they move onto a DNR / cancelled tab. An order
 is **created** when its Req # appears and **filled / closed** when it leaves the
 tab; the sheet does not say which of the two.
+
+Snapshots from version 2 on also record:
+
+- **Customers**, from the Geodis Key. An associate's customer comes from the
+  account number in their Dept code (`1517-18611` is 32 DEGREES); an order's from
+  its Account number; a candidate's from the Key's spelling of the Account name.
+  An account the Key does not list shows as `ACCT <number>`.
+- **Positions**, grouped as Operator (OPR, OPEPJ, EPJ, reach, sit-down) and
+  Material Handler (MATH 1–3, Sr Material Handler, picker). Anything else keeps
+  its own title.
+- **Expected / Onsite / Short** from the header of each HC shift block, summed per site.
+- **Starts per week**: every row on a STARTED tab, by the week (Monday) of its start date.
+- **Highlight colours** on the candidate tabs, read with cell styles. Green is
+  *accepted for walkthrough* and blue is *approved for start*; every other colour
+  is kept by name and given no meaning. Colours on empty WT List slots are kept
+  but not counted as walkthroughs (in the 2026-10-01 workbook, green slots were
+  new orders nobody was lined up for yet).
+
+The Meeting Prep response also carries `profile` (the newest upload, one row per
+customer at a site) and `trend` (12 weeks of headcount, newest last), neither of
+which needs two uploads. Beeline's own figures are joined in the browser, by Req #,
+from the exports the Beeline Requests page already loads.
 
 ### An upload never wipes a person's work
 

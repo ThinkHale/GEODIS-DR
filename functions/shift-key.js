@@ -794,7 +794,78 @@
     return out;
   }
 
+  /* ---------- one workbook per market ----------
+     The PLX workbook is Chicago's. Another market keeps a workbook of the same
+     shape, and its uploads must never replace, close or compare against
+     Chicago's. So every record a workbook writes belongs to a market:
+     Chicago's records carry NO tag -- they are exactly what they always were, so
+     nothing stored needs migrating and nothing moves under the Chicago team --
+     and every other market's carry `workbookMarket`. */
+  var DEFAULT_WORKBOOK_MARKET = 'Chicago';
+  function marketKey(m) { return String(m == null ? '' : m).trim().replace(/\s+/g, ' ').toLowerCase(); }
+  function isDefaultMarket(m) {
+    var k = marketKey(m);
+    return !k || k === 'all' || k === marketKey(DEFAULT_WORKBOOK_MARKET);
+  }
+  // The market an upload is for, as stored: '' for Chicago, the name otherwise.
+  function workbookMarketTag(m) { return isDefaultMarket(m) ? '' : String(m).trim().replace(/\s+/g, ' '); }
+  function workbookMarketOf(record) {
+    return (record && record.workbookMarket) || DEFAULT_WORKBOOK_MARKET;
+  }
+  function sameWorkbookMarket(record, market) {
+    return marketKey(workbookMarketOf(record)) === marketKey(isDefaultMarket(market) ? DEFAULT_WORKBOOK_MARKET : market);
+  }
+  /* Does this workbook belong to the market it is being uploaded for? Read from
+     the site numbers on its tabs against Settings > Locations (`siteMarket` maps
+     a site code to its market).
+
+     For another market the sites must be listed there and under that market --
+     a Chicago file uploaded with the picker on St. Louis must be refused, or it
+     would become St. Louis's. For Chicago the check only refuses a file whose
+     every listed site belongs elsewhere: Chicago's sites may never have been
+     entered in Locations, and its uploads must keep working as they always have. */
+  function checkWorkbookMarket(buildings, market, siteMarket) {
+    var target = isDefaultMarket(market) ? DEFAULT_WORKBOOK_MARKET : String(market).trim();
+    var sites = [], seen = {};
+    (buildings || []).forEach(function (b) {
+      b = txt(b);
+      if (b && /^\d/.test(b) && !seen[b]) { seen[b] = true; sites.push(b); }
+    });
+    var mine = [], other = [], unknown = [];
+    sites.forEach(function (b) {
+      var m = siteMarket && siteMarket.get ? siteMarket.get(b) : '';
+      if (!m) unknown.push(b);
+      else if (marketKey(m) === marketKey(target)) mine.push(b);
+      else other.push(b + ' (' + m + ')');
+    });
+    var switchHint = ' Choose the right market in the picker at the top and upload again.';
+    if (isDefaultMarket(market)) {
+      if (other.length && !mine.length && !unknown.length) {
+        return { ok: false, error: 'This workbook is not ' + target + '\'s: its sites belong to other markets -- ' +
+          other.join(', ') + '.' + switchHint };
+      }
+      return { ok: true, sites: sites };
+    }
+    if (other.length) {
+      return { ok: false, error: 'This workbook has sites in other markets -- ' + other.join(', ') +
+        ' -- so it cannot be ' + target + '\'s workbook.' + switchHint };
+    }
+    if (!mine.length) {
+      return { ok: false, error: 'None of this workbook\'s sites' + (sites.length ? ' (' + sites.join(', ') + ')' : '') +
+        ' are listed under ' + target + ' in Settings > Locations, so it cannot be confirmed as ' + target +
+        '\'s. Add them there, or choose the right market in the picker, and upload again.' };
+    }
+    return { ok: true, sites: sites,
+      warnings: unknown.length ? ['Sites not in Settings > Locations yet: ' + unknown.join(', ') + '.'] : [] };
+  }
+
   var api = {
+    DEFAULT_WORKBOOK_MARKET: DEFAULT_WORKBOOK_MARKET,
+    isDefaultMarket: isDefaultMarket,
+    workbookMarketTag: workbookMarketTag,
+    workbookMarketOf: workbookMarketOf,
+    sameWorkbookMarket: sameWorkbookMarket,
+    checkWorkbookMarket: checkWorkbookMarket,
     KEY_SHEET: KEY_SHEET,
     HC_SHEET: HC_SHEET,
     REQ_SHEET: REQ_SHEET,

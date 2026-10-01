@@ -424,26 +424,43 @@
     return s === 'true' || s === 'yes' || s === 'y' || s === '1';
   }
 
+  /* Two exports share this parser, and they differ in what an absence means.
+
+     The full "On Premise - Simple" export lists everybody active in the
+     timeclock with On Premises TRUE or FALSE, so somebody missing from it has
+     no timeclock record at all. The filtered export -- "Filtered By: On
+     Premises(Yes)" in its preamble -- lists ONLY the people on premise, so
+     somebody missing from it is simply not clocked in. That is `presentOnly`,
+     and buildCoverage() reads absence differently because of it. */
   function parseOnPremise(aoa) {
-    var out = { people: [], warnings: [], columns: null };
+    var out = { people: [], warnings: [], columns: null, presentOnly: false, filter: '', sites: [] };
     var rows = aoa || [];
     // Find the header row: the first row that has a recognisable person column.
     var headerRow = -1, cols = null;
     for (var i = 0; i < Math.min(rows.length, 25); i++) {
       var headers = (rows[i] || []).map(function (h) { return h == null ? '' : String(h).trim(); });
+      /* The export opens with "Label:,value" lines -- "Export Name:,On Premises -
+         Simple" among them, which otherwise reads as a name column beside an On
+         Premises column and turns the preamble into people. */
+      if (/:$/.test(headers[0] || '')) continue;
       var c = {
         person: pickCol(headers, ON_PREM_COLS.person),
         present: pickCol(headers, ON_PREM_COLS.present),
         location: pickCol(headers, ON_PREM_COLS.location),
         manager: pickCol(headers, ON_PREM_COLS.manager)
       };
-      if (c.person !== -1 && c.present !== -1) { headerRow = i; cols = c; break; }
+      if (c.person !== -1 && c.present !== -1 && c.person !== c.present) { headerRow = i; cols = c; break; }
     }
     if (headerRow === -1) {
       out.warnings.push('No "Employee Full Name & ID" and "On Premises" columns were found. Is this the On Premise - Simple export?');
       return out;
     }
     out.columns = cols;
+    // The preamble above the header: "Filtered By:,On Premises(Yes )".
+    rows.slice(0, headerRow).forEach(function (row) {
+      var cells = (row || []).map(function (c) { return c == null ? '' : String(c).trim(); });
+      if (/^filtered\s*by/i.test(cells[0] || '')) out.filter = cells.slice(1).join(' ').trim();
+    });
 
     var seen = new Map();
     rows.slice(headerRow + 1).forEach(function (row) {
@@ -469,6 +486,13 @@
       seen.set(key, person);
       out.people.push(person);
     });
+    /* Only the export's own word for it. Guessing from a file whose rows are all
+       TRUE would misread a small full export where everyone happens to be in --
+       and in this mode somebody missing reads as "not clocked in", which can turn
+       into an attendance point, where the full export's "not in timeclock" never
+       may. */
+    out.presentOnly = /on\s*premises?\s*\(\s*yes\s*\)/i.test(out.filter);
+    out.sites = siteList(out.people);
     return out;
   }
 
@@ -560,6 +584,23 @@
     var nowMin = asOf.getHours() * 60 + asOf.getMinutes();
 
     var index = presenceIndex(presence);
+    var presentOnly = !!presence.presentOnly;
+
+    /* An export of only the people on premise names the sites it covers only by
+       who is in it. A scheduled person at a site it does not mention cannot be
+       judged from it -- the export simply did not look there -- so they are set
+       aside and counted, not reported as missing. Somebody with no site on the
+       schedule is still judged: there is nothing to say they are elsewhere. */
+    var inScope = function () { return true; };
+    var outOfScope = [];
+    if (presentOnly) {
+      var covered = {};
+      (presence.sites || siteList(presence.people)).forEach(function (x) { covered[x] = true; });
+      inScope = function (person) {
+        var leaf = locationLeaf(person.location);
+        return !leaf || !!covered[leaf] || !!index.find(person);
+      };
+    }
 
     var rows = [];
     // Held by identity rather than by key: a person matched on their employee id
@@ -568,15 +609,16 @@
     var usedPresence = new Set();
 
     schedule.people.forEach(function (person) {
+      if (!inScope(person)) { outOfScope.push(person); return; }
       var seenPresence = index.find(person);
       if (seenPresence) usedPresence.add(seenPresence);
-      rows.push(evaluate(person, seenPresence, todayKey, prevKey, nowMin, grace));
+      rows.push(evaluate(person, seenPresence, todayKey, prevKey, nowMin, grace, presentOnly));
     });
 
     // On premise (or expected on premise) but with no row in the weekly schedule.
     presence.people.forEach(function (p) {
       if (usedPresence.has(p)) return;
-      rows.push(evaluate(null, p, todayKey, prevKey, nowMin, grace));
+      rows.push(evaluate(null, p, todayKey, prevKey, nowMin, grace, presentOnly));
     });
 
     rows.sort(function (a, b) {
@@ -585,15 +627,31 @@
     });
 
     var overlap = overlapOf(schedule, presence, index);
+    overlap.presentOnly = presentOnly;
+    overlap.outOfScope = outOfScope.length;
+    overlap.outOfScopeSites = siteList(outOfScope);
     var bothLoaded = overlap.scheduled > 0 && overlap.onPremise > 0;
-    var mismatch = bothLoaded && overlap.matched === 0;
     var warnings = (schedule.warnings || []).concat(presence.warnings || []);
-    if (mismatch) {
+    var mismatch;
+    if (presentOnly) {
+      /* Few matches is normal here -- before a shift starts, nobody scheduled is
+         on premise yet. What cannot be normal is a schedule with nobody at any
+         site the export covers. */
+      mismatch = bothLoaded && outOfScope.length === overlap.scheduled;
+      if (mismatch) {
+        warnings.unshift('This on-premise export covers ' + sitesPhrase(overlap.presenceSites) + ', and nobody on the ' +
+          'schedule works there -- the schedule covers ' + sitesPhrase(overlap.outOfScopeSites) + '. No coverage can be ' +
+          'calculated. Export the on-premise report for the same sites as the schedule.');
+      }
+    } else mismatch = bothLoaded && overlap.matched === 0;
+    if (mismatch && presentOnly) {
+      // Said above.
+    } else if (mismatch) {
       warnings.unshift('None of the ' + overlap.scheduled + ' scheduled people appear in the on-premise ' +
         'report, so no coverage can be calculated. The schedule covers ' + sitesPhrase(overlap.scheduleSites) +
         ' and the on-premise report covers ' + sitesPhrase(overlap.presenceSites) +
         '. These are different sites -- load the schedule exported for the same site.');
-    } else if (bothLoaded && overlap.ratio < LOW_OVERLAP_RATIO) {
+    } else if (bothLoaded && !presentOnly && overlap.ratio < LOW_OVERLAP_RATIO) {
       warnings.unshift('Only ' + overlap.matched + ' of ' + overlap.scheduled + ' scheduled people appear in ' +
         'the on-premise report. The schedule covers ' + sitesPhrase(overlap.scheduleSites) +
         ' and the on-premise report covers ' + sitesPhrase(overlap.presenceSites) +
@@ -616,7 +674,7 @@
     };
   }
 
-  function evaluate(person, seen, todayKey, prevKey, nowMin, grace) {
+  function evaluate(person, seen, todayKey, prevKey, nowMin, grace, presentOnly) {
     var present = seen ? seen.present : false;
     var covering = person ? shiftsCovering(person, todayKey, prevKey) : [];
     var todayShift = person ? person.shifts[todayKey] : null;
@@ -632,7 +690,7 @@
     /* Nobody said they were absent -- the report does not mention them at all.
        Distinguished before anything else, because every branch below assumes
        the timeclock had something to say about this person. */
-    if (person && !seen && covering.length) {
+    if (person && !seen && covering.length && !presentOnly) {
       status = 'notInReport';
     } else if (active) {
       if (present) status = 'working';

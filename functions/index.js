@@ -100,7 +100,7 @@ const COLLECTIONS = {
   requisitions: { path: 'requisitions/requisitions.json', responseKey: 'requisitions',
                   fields: { title: 'str', department: 'str', shift: 'str', market: 'str', openings: 'num',
                             filled: 'num', priority: 'str', status: 'str', due: 'str', notes: 'str',
-                            building: 'str', reportTo: 'str', source: 'str',
+                            building: 'str', reportTo: 'str', source: 'str', workbookMarket: 'str',
                             /* The Beeline half of a requisition. Namespaced away from the
                                fields the PLX workbook sync writes above, so the two sources
                                land on one record without either overwriting the other. */
@@ -120,7 +120,8 @@ const COLLECTIONS = {
   // there is one, name otherwise -- see shift-key.js.
   shifts:       { path: 'shifts/assignments.json',       responseKey: 'shifts',
                   fields: { eid: 'str', nameKey: 'str', name: 'str', shift: 'str', building: 'str',
-                            dept: 'str', account: 'str', hours: 'str', badge: 'str', source: 'str' } },
+                            dept: 'str', account: 'str', hours: 'str', badge: 'str', source: 'str',
+                            workbookMarket: 'str' } },
   /* Associate phone numbers. Keyed by badge when somebody typed one in, by EID
      or name key when harvested from a sheet -- the same shape as shift tags,
      and joined onto a profile the same way. */
@@ -178,7 +179,7 @@ const COLLECTIONS = {
                   fields: { building: 'str', shift: 'str', account: 'str', accountNum: 'str',
                             job: 'str', beelineShift: 'str', hours: 'str', supervisor: 'str',
                             hoursOverride: 'str', hoursSetBy: 'str', hoursSetAt: 'str',
-                            source: 'str' } },
+                            source: 'str', workbookMarket: 'str' } },
   performance:  { path: 'performance/metrics.json',      responseKey: 'performance',
                   fields: { badge: 'str', period: 'str', quality: 'num', productivity: 'num', safety: 'num',
                             units: 'num', hours: 'num', notes: 'str' } }
@@ -232,6 +233,20 @@ const PLX_HISTORY_DIR = 'plx/history';
 const PLX_HISTORY_INDEX = PLX_HISTORY_DIR + '/index.json';
 // Headcount by site at every upload, kept for years: the week-over-week trend.
 const PLX_SERIES_PATH = 'plx/headcount-series.json';
+/* Where a market's workbook keeps its sync record, history and series. Chicago's
+   stay exactly where they always were; any other market gets its own folder, so
+   nothing it uploads can be read as -- or compared against -- Chicago's. */
+const PLX_MARKETS_PATH = 'plx/markets.json';   // the other markets that have a workbook
+function plxPaths(market) {
+  const tag = ShiftKey.workbookMarketTag(market);
+  if (!tag) {
+    return { market: ShiftKey.DEFAULT_WORKBOOK_MARKET, tag: '', meta: PLX_META_PATH,
+      historyDir: PLX_HISTORY_DIR, historyIndex: PLX_HISTORY_INDEX, series: PLX_SERIES_PATH };
+  }
+  const dir = 'plx/markets/' + tag.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return { market: tag, tag: tag, meta: dir + '/sync.json', historyDir: dir + '/history',
+    historyIndex: dir + '/history/index.json', series: dir + '/headcount-series.json' };
+}
 const PAYROLL_DIR = 'payroll/periods';    // {weekEnding}.json
 const MAX_HOURS_ROWS = 20000;
 const MAX_SNAPSHOTS = 40;
@@ -1866,8 +1881,23 @@ async function applyPlxWorkbook(buffer, opts) {
   if (!key) warnings.push('No "Geodis Key" tab was found, so shift hours are unknown.');
   else warnings.push(...key.warnings);
   const hc = ShiftKey.parseHeadcount(sheets, Sched.rosterKey);
+
+  /* Whose workbook is this? Checked before anything is written: a file loaded
+     against the wrong market would otherwise replace that market's shift tags and
+     close its open orders. */
+  const paths = plxPaths(opts.market);
+  const marketTag = paths.tag;
+  const reqSheetForCheck = sheets.filter(x => ShiftKey.REQ_SHEET.test(x.name))[0];
+  const bookSites = hc.sheets.map(x => x.building).concat(reqSheetForCheck
+    ? ShiftKey.parseRequisitions(reqSheetForCheck.aoa).rows.map(r => r.building) : []);
+  const siteMarket = ReqsCore.siteMarketIndex(await readJsonArray(COLLECTIONS.locations.path));
+  const owner = ShiftKey.checkWorkbookMarket(bookSites, paths.market, siteMarket);
+  if (!owner.ok) return { ok: false, status: 400, error: owner.error };
+  if (owner.warnings) warnings.push(...owner.warnings);
+
   warnings.push(...hc.warnings, ...ShiftKey.validateAgainstKey(hc, key));
-  const shiftRecords = ShiftKey.toShiftRecords(hc, key);
+  // Chicago's records stay untagged, exactly as before; another market's carry its name.
+  const shiftRecords = ShiftKey.toShiftRecords(hc, key).map(r => marketTag ? Object.assign({}, r, { workbookMarket: marketTag }) : r);
 
   if (shiftRecords.length) {
     /* A shift set by hand in the suite is not in the workbook, so replacing the
@@ -1882,7 +1912,9 @@ async function applyPlxWorkbook(buffer, opts) {
     const existingShifts = await readJsonArray(COLLECTIONS.shifts.path);
     const superseded = [];
     const kept = existingShifts.filter(r => {
-      if (!r || r.source === 'PLX workbook') return false;
+      if (!r) return false;
+      // Another market's workbook tags are its own, and are left exactly as they are.
+      if (r.source === 'PLX workbook') return !ShiftKey.sameWorkbookMarket(r, paths.market);
       if (r.nameKey && bookNames.has(r.nameKey)) { superseded.push(r.name || r.nameKey); return false; }
       return true;
     });
@@ -1941,7 +1973,8 @@ async function applyPlxWorkbook(buffer, opts) {
   } else {
     const parsed = ShiftKey.parseRequisitions(reqSheet.aoa);
     warnings.push(...parsed.warnings);
-    const incoming = ShiftKey.toRequisitionRecords(parsed);
+    const incoming = ShiftKey.toRequisitionRecords(parsed)
+      .map(r => marketTag ? Object.assign({}, r, { workbookMarket: marketTag }) : r);
     const existing = await readJsonArray(COLLECTIONS.requisitions.path);
     const byId = new Map(existing.map(r => [r.id, r]));
     incoming.forEach(rec => {
@@ -1961,7 +1994,9 @@ async function applyPlxWorkbook(buffer, opts) {
     // deleting it, so its history and anything filled against it survive.
     const live = new Set(incoming.map(r => r.id));
     byId.forEach((rec, id) => {
-      if (rec.source === 'PLX workbook' && !live.has(id) && rec.status !== 'Closed') {
+      // Only this market's orders: another market's are not on this file at all.
+      if (rec.source === 'PLX workbook' && ShiftKey.sameWorkbookMarket(rec, paths.market) &&
+          !live.has(id) && rec.status !== 'Closed') {
         byId.set(id, Object.assign({}, rec, { status: 'Closed', updatedAt: new Date().toISOString() }));
       }
     });
@@ -1976,13 +2011,14 @@ async function applyPlxWorkbook(buffer, opts) {
      sync that worked as one that failed. */
   let history = null;
   try {
-    history = await recordPlxHistory(buffer, sheets, opts);
+    history = await recordPlxHistory(buffer, sheets, opts, paths);
   } catch (err) {
     warnings.push('This upload could not be added to the 7-day history: ' + String(err && err.message || err));
   }
 
   const meta = {
     syncedAt: new Date().toISOString(),
+    market: paths.market,
     fileName: String(opts.fileName || '').slice(0, 300),
     modifiedAt: String(opts.modifiedAt || '').slice(0, 40),
     uploadedBy: String(opts.uploadedBy || '').slice(0, 80),
@@ -1995,10 +2031,24 @@ async function applyPlxWorkbook(buffer, opts) {
     unchanged: !!(history && history.unchanged),
     warnings: warnings.slice(0, 20)
   };
-  await bucket.file(PLX_META_PATH).save(JSON.stringify(meta), {
+  await bucket.file(paths.meta).save(JSON.stringify(meta), {
     contentType: 'application/json', metadata: { cacheControl: 'no-cache, max-age=0' }
   });
+  if (marketTag) await rememberWorkbookMarket(marketTag);
   return { ok: true, meta: meta };
+}
+
+/* The markets other than Chicago that have ever had a workbook, so "All markets"
+   knows whose history to combine. */
+async function rememberWorkbookMarket(tag) {
+  const stored = await readJsonFile(PLX_MARKETS_PATH);
+  const list = Array.isArray(stored.markets) ? stored.markets : [];
+  if (list.some(m => String(m).toLowerCase() === tag.toLowerCase())) return;
+  await saveJson(PLX_MARKETS_PATH, { markets: list.concat([tag]) });
+}
+async function workbookMarkets() {
+  const stored = await readJsonFile(PLX_MARKETS_PATH);
+  return [ShiftKey.DEFAULT_WORKBOOK_MARKET].concat(Array.isArray(stored.markets) ? stored.markets : []);
 }
 
 async function handlePlx(req, res) {
@@ -2008,9 +2058,13 @@ async function handlePlx(req, res) {
   if (req.method === 'GET') {
     if (!await requireUser(req, res, 'view')) return;
     res.set('Cache-Control', 'no-cache, max-age=0');
-    const meta = await readJsonFile(PLX_META_PATH);
+    // ?market= names whose workbook; without it, Chicago's, as it always was.
+    const paths = plxPaths(req.query.market);
+    const meta = await readJsonFile(paths.meta);
     const conf = await readJsonFile(PLX_CONFIG_PATH);
-    meta.onDemand = !!(conf && conf.flowUrl);
+    // The on-demand refresh flow reads Chicago's workbook only.
+    meta.onDemand = !paths.tag && !!(conf && conf.flowUrl);
+    meta.market = paths.market;
     res.status(200).json({ ok: true, sync: meta });
     return;
   }
@@ -2035,8 +2089,20 @@ async function handlePlx(req, res) {
 
   const b64 = String(body.fileBase64 || body.file || '');
   if (!b64) { res.status(400).json({ ok: false, error: 'Missing fileBase64' }); return; }
-  const applied = await applyPlxWorkbook(Buffer.from(b64, 'base64'), {
-    fileName: body.fileName, modifiedAt: body.modifiedAt
+  /* Decoded the way every other posted attachment is. The Mac push script sends
+     plain base64, but an Outlook attachment relayed by Power Automate can arrive
+     base64-of-base64 or inside a {"$content": …} envelope -- and read naively,
+     that is a "workbook" with none of the expected tabs. */
+  const buffer = unwrapDoubleBase64(decodeWorkbookBody(b64));
+  if (!isXlsxZip(buffer)) {
+    // Refused before anything is written, so a wrong attachment cannot touch
+    // the shift tags, open orders or history the last good workbook left.
+    res.status(400).json({ ok: false, error: 'That attachment is not an .xlsx workbook (' + buffer.length +
+      ' bytes). Nothing was changed. Check that the flow is posting the PLX spreadsheet itself.' });
+    return;
+  }
+  const applied = await applyPlxWorkbook(buffer, {
+    fileName: body.fileName, modifiedAt: body.modifiedAt, via: body.via, market: body.market
   });
   if (!applied.ok) { res.status(applied.status || 400).json({ ok: false, error: applied.error }); return; }
   res.status(200).json({ ok: true, sync: applied.meta });
@@ -2050,8 +2116,10 @@ async function handlePlx(req, res) {
    A file byte-for-byte identical to the newest one is not stored again: the
    scheduled push runs twice a day whether or not anybody edited the sheet, and
    seven days of the same file would crowd out the uploads that differ. */
-async function recordPlxHistory(buffer, sheets, opts) {
+async function recordPlxHistory(buffer, sheets, opts, paths) {
   opts = opts || {};
+  paths = paths || plxPaths();
+  const PLX_HISTORY_DIR = paths.historyDir, PLX_HISTORY_INDEX = paths.historyIndex;
   const takenAt = new Date().toISOString();
   const hash = crypto.createHash('sha256').update(buffer).digest('hex');
   const stored = await readJsonFile(PLX_HISTORY_INDEX);
@@ -2078,14 +2146,14 @@ async function recordPlxHistory(buffer, sheets, opts) {
     contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   });
   await saveJson(PLX_HISTORY_DIR + '/' + id + '.json', snap);
-  await appendHeadcountSeries(snap, d, index);
+  await appendHeadcountSeries(snap, d, index, paths);
 
   const entry = {
     id: id, takenAt: takenAt, hash: hash,
     fileName: String(opts.fileName || '').slice(0, 300),
     modifiedAt: String(opts.modifiedAt || '').slice(0, 40),
     uploadedBy: String(opts.uploadedBy || '').slice(0, 80),
-    via: opts.uploadedBy ? 'upload' : 'push',
+    via: opts.uploadedBy ? 'upload' : opts.via === 'email' ? 'email' : 'push',
     bytes: buffer.length,
     changes: changes
   };
@@ -2121,7 +2189,9 @@ function withFills(buffer, sheets) {
    week-over-week growth can be read back months later. The first time it is
    written it is seeded from the uploads already kept, so the trend starts with
    whatever history exists rather than from today. */
-async function appendHeadcountSeries(snap, d, index) {
+async function appendHeadcountSeries(snap, d, index, paths) {
+  paths = paths || plxPaths();
+  const PLX_HISTORY_DIR = paths.historyDir, PLX_SERIES_PATH = paths.series;
   const stored = await readJsonFile(PLX_SERIES_PATH);
   let points = Array.isArray(stored.points) ? stored.points : null;
   if (!points) {
@@ -2168,21 +2238,23 @@ async function handlePlxChanges(req, res) {
   res.set('Cache-Control', 'no-cache, max-age=0');
   const restricted = MarketAccess.hasRestriction(actor);
 
-  const stored = await readJsonFile(PLX_HISTORY_INDEX);
-  const entries = (Array.isArray(stored.entries) ? stored.entries : [])
-    .slice().sort((x, y) => String(x.takenAt).localeCompare(String(y.takenAt)));
-  const find = id => entries.find(e => e.id === String(id || ''));
-
   if (req.query.download !== undefined) {
-    const entry = find(req.query.download);
     if (restricted || !Auth.can(actor, 'import')) {
       res.status(403).json({ ok: false, forbidden: true,
         error: 'The workbook covers every market, so only an account with no market restriction that can import may download it.' });
       return;
     }
+    // Ids are unique across markets; look in each market's kept uploads.
+    let entry = null, dir = '';
+    for (const m of await workbookMarkets()) {
+      const paths = plxPaths(m);
+      const idx = await readJsonFile(paths.historyIndex);
+      const hit = (Array.isArray(idx.entries) ? idx.entries : []).find(e => e.id === String(req.query.download || ''));
+      if (hit) { entry = hit; dir = paths.historyDir; break; }
+    }
     if (!entry) { res.status(404).json({ ok: false, error: 'That upload is no longer kept.' }); return; }
     try {
-      const [buf] = await bucket.file(PLX_HISTORY_DIR + '/' + entry.id + '.xlsx').download();
+      const [buf] = await bucket.file(dir + '/' + entry.id + '.xlsx').download();
       res.status(200).json({ ok: true, fileName: entry.fileName || 'PLX - Geodis Spreadsheet.xlsx',
         takenAt: entry.takenAt, fileBase64: buf.toString('base64') });
     } catch (err) {
@@ -2205,51 +2277,93 @@ async function handlePlxChanges(req, res) {
     };
   }
 
-  // The list of uploads. Per-upload counts span every market, so a scoped
-  // account gets the list without them.
-  const uploads = entries.map(e => ({
-    id: e.id, takenAt: e.takenAt, lastSeenAt: e.lastSeenAt || '', fileName: e.fileName,
-    modifiedAt: e.modifiedAt, uploadedBy: e.uploadedBy, via: e.via,
-    changes: restricted ? undefined : e.changes
-  }));
-  const series = await readJsonFile(PLX_SERIES_PATH);
-  const base = { ok: true, retentionDays: PlxHistory.RETENTION_DAYS, uploads: uploads,
-    trend: PlxHistory.weekly(PlxHistory.filterSeries(series.points || [], keep), { weeks: 12 }) };
-  if (!entries.length) {
-    res.status(200).json(Object.assign(base, { comparison: null, profile: null,
-      note: 'No workbook has been uploaded since history began.' }));
-    return;
+  /* One market's workbook, or every market's together. No ?market= is Chicago's,
+     which is what this answered before there was more than one. */
+  const asked = String(req.query.market || '');
+  const all = asked.toLowerCase() === 'all';
+  const markets = all ? await workbookMarkets() : [asked];
+  const views = [];
+  for (const m of markets) {
+    const v = await plxMarketView(plxPaths(m), req.query, keep, restricted);
+    if (v.error) { if (!all) { res.status(v.status || 404).json({ ok: false, error: v.error }); return; } continue; }
+    // Asked about one market, an upload it does not have is gone, not elsewhere.
+    if (v.foreign && !all) { res.status(404).json({ ok: false, error: 'That upload is no longer kept.' }); return; }
+    views.push(v);
   }
+  const uploads = [].concat(...views.map(v => v.uploads))
+    .sort((x, y) => String(x.takenAt).localeCompare(String(y.takenAt)));
+  const withComparison = views.filter(v => v.comparison);
+  const comparison = !withComparison.length ? null : {
+    from: withComparison.map(v => v.comparison.from).sort((x, y) => String(x.takenAt).localeCompare(String(y.takenAt)))[0],
+    to: withComparison.map(v => v.comparison.to).sort((x, y) => String(y.takenAt).localeCompare(String(x.takenAt)))[0],
+    partial: withComparison.some(v => v.comparison.partial),
+    changes: PlxHistory.mergeDiffs(withComparison.map(v => v.comparison.changes))
+  };
+  const profile = PlxHistory.mergeProfiles(views.map(v => v.profile));
+  res.status(200).json({ ok: true, retentionDays: PlxHistory.RETENTION_DAYS,
+    market: all ? 'all' : (views[0] ? views[0].market : plxPaths(asked).market),
+    markets: views.map(v => v.market),
+    uploads: uploads,
+    trend: PlxHistory.mergeWeekly(views.map(v => v.trend)),
+    profile: profile,
+    comparison: comparison,
+    note: comparison ? '' : profile ? 'Only one upload is kept so far, so there is nothing to compare it with yet.'
+      : 'No workbook has been uploaded since history began.'
+  });
+}
 
-  let to = req.query.to ? find(req.query.to) : entries[entries.length - 1];
-  if (!to) { res.status(404).json({ ok: false, error: 'That upload is no longer kept.' }); return; }
-  const after = await readJsonFile(PLX_HISTORY_DIR + '/' + to.id + '.json');
-  if (!after.version) { res.status(404).json({ ok: false, error: 'That upload is no longer kept.' }); return; }
-  base.profile = PlxHistory.filterProfile(PlxHistory.profile(after), keep);
+/* One market's uploads, where it stands, its weekly trend, and the comparison
+   the query asks for. An upload id from another market is simply not found
+   here, so asking "since that upload" only ever compares within its market. */
+async function plxMarketView(paths, q, keep, restricted) {
+  const stored = await readJsonFile(paths.historyIndex);
+  const entries = (Array.isArray(stored.entries) ? stored.entries : [])
+    .slice().sort((x, y) => String(x.takenAt).localeCompare(String(y.takenAt)));
+  const find = id => entries.find(e => e.id === String(id || ''));
+  const series = await readJsonFile(paths.series);
+  const view = { market: paths.market,
+    // Per-upload counts span every site, so a scoped account gets the list without them.
+    uploads: entries.map(e => ({
+      id: e.id, takenAt: e.takenAt, lastSeenAt: e.lastSeenAt || '', fileName: e.fileName,
+      modifiedAt: e.modifiedAt, uploadedBy: e.uploadedBy, via: e.via, market: paths.market,
+      changes: restricted ? undefined : e.changes
+    })),
+    trend: PlxHistory.weekly(PlxHistory.filterSeries(series.points || [], keep), { weeks: 12 }),
+    profile: null, comparison: null };
+  if (!entries.length) return view;
 
-  if (entries.length < 2) {
-    res.status(200).json(Object.assign(base, { comparison: null,
-      note: 'Only one upload is kept so far, so there is nothing to compare it with yet.' }));
-    return;
+  const pinned = q.from || q.to;
+  if (pinned && !find(q.from || q.to)) {
+    // Somebody else's upload: this market contributes where it stands, nothing more.
+    const latest = await readJsonFile(paths.historyDir + '/' + entries[entries.length - 1].id + '.json');
+    if (latest.version) view.profile = PlxHistory.filterProfile(PlxHistory.profile(latest), keep);
+    view.foreign = true;
+    return view;
   }
+  const to = q.to ? find(q.to) : entries[entries.length - 1];
+  if (!to) return { error: 'That upload is no longer kept.', status: 404 };
+  const after = await readJsonFile(paths.historyDir + '/' + to.id + '.json');
+  if (!after.version) return { error: 'That upload is no longer kept.', status: 404 };
+  view.profile = PlxHistory.filterProfile(PlxHistory.profile(after), keep);
+  if (entries.length < 2) return view;
 
   let from = null, partial = false;
-  if (req.query.from) from = find(req.query.from);
-  else if (req.query.since) {
-    const picked = PlxHistory.baselineFor(entries, String(req.query.since));
+  if (q.from) from = find(q.from);
+  else if (q.since) {
+    const picked = PlxHistory.baselineFor(entries, String(q.since));
     from = picked && picked.entry; partial = !!(picked && picked.partial);
   } else from = entries[entries.indexOf(to) - 1] || entries[0];
-  if (!from) { res.status(404).json({ ok: false, error: 'That upload is no longer kept.' }); return; }
-  let before = from.id === to.id ? after : await readJsonFile(PLX_HISTORY_DIR + '/' + from.id + '.json');
-  if (!before.version) { res.status(404).json({ ok: false, error: 'One of those uploads is no longer kept.' }); return; }
+  if (!from) return { error: 'That upload is no longer kept.', status: 404 };
+  let before = from.id === to.id ? after : await readJsonFile(paths.historyDir + '/' + from.id + '.json');
+  if (!before.version) return { error: 'One of those uploads is no longer kept.', status: 404 };
   let older = from, newer = to, a = after;
   if (from.takenAt > to.takenAt) { older = to; newer = from; a = before; before = after; }
-  const changes = PlxHistory.filterDiff(PlxHistory.diff(before, a), keep);
-  res.status(200).json(Object.assign(base, { comparison: {
-    from: { id: older.id, takenAt: older.takenAt, fileName: older.fileName },
-    to: { id: newer.id, takenAt: newer.takenAt, fileName: newer.fileName },
-    partial: partial, changes: changes
-  } }));
+  view.comparison = {
+    from: { id: older.id, takenAt: older.takenAt, fileName: older.fileName, market: paths.market },
+    to: { id: newer.id, takenAt: newer.takenAt, fileName: newer.fileName, market: paths.market },
+    partial: partial, changes: PlxHistory.filterDiff(PlxHistory.diff(before, a), keep)
+  };
+  return view;
 }
 
 /* ---------- the shared IL PTO tracker ----------
@@ -2453,16 +2567,28 @@ async function handlePlxUpload(req, res) {
   if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
   if (req.get('origin') !== NOTES_ORIGIN) { res.status(403).json({ ok: false, error: 'Forbidden origin' }); return; }
-  if (!await requireUser(req, res, 'import')) return;
+  const actor = await requireUser(req, res, 'import');
+  if (!actor) return;
 
   const body = req.body || {};
   if (!body.fileBase64) { res.status(400).json({ ok: false, error: 'Missing fileBase64' }); return; }
   const plxBuffer = Buffer.from(body.fileBase64, 'base64');
   const redbullBuffer = body.redbullBase64 ? Buffer.from(body.redbullBase64, 'base64') : null;
 
+  /* Another market's workbook may only be uploaded by somebody who covers that
+     market. Chicago's is not checked here, so nobody who can upload it today is
+     turned away by how their account spells its market. */
+  if (!ShiftKey.isDefaultMarket(body.market) && MarketAccess.hasRestriction(actor) &&
+      MarketAccess.allowedMarkets(actor).indexOf(MarketAccess.normalizeMarket(body.market)) === -1) {
+    res.status(403).json({ ok: false, forbidden: true,
+      error: 'This account does not cover ' + String(body.market) + ', so it cannot upload its workbook.' });
+    return;
+  }
+
   // Shift tags and open orders, sharing the pipeline the automated push uses.
   const shared = await applyPlxWorkbook(plxBuffer, {
-    fileName: body.fileName, modifiedAt: body.modifiedAt, uploadedBy: String(body.uploadedBy || '').slice(0, 80)
+    fileName: body.fileName, modifiedAt: body.modifiedAt, uploadedBy: String(body.uploadedBy || '').slice(0, 80),
+    market: body.market
   });
   if (!shared.ok) { res.status(shared.status || 400).json({ ok: false, error: shared.error }); return; }
 

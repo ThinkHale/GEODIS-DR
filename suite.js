@@ -228,9 +228,31 @@
      choosing a market in the header scopes the reconciliation table too, and the
      choice survives a reload. */
   var MARKET_KEY = 'badgeCrosscheck.market';
+  /* Which market's workbook the page is about: '' is Chicago's PLX workbook --
+     what "All markets" and Chicago have always meant -- and any other market
+     has its own. */
+  function workbookMarket() {
+    return ShiftKey.isDefaultMarket(state.market) ? '' : state.market;
+  }
+  function workbookLabel() {
+    return workbookMarket() ? workbookMarket() + ' workbook' : 'PLX workbook';
+  }
+  function loadWorkbookSync() {
+    var m = workbookMarket();
+    return SuiteData.loadPlxSync(m).then(function (sync) {
+      if (m !== workbookMarket()) return;   // the picker moved on while this was loading
+      state.plx.sync = sync;
+      render();
+    }).catch(function () { render(); });
+  }
   function setMarket(m, fromRecon) {
     if (state.market === m) return;
+    var wasWorkbook = workbookMarket();
     state.market = m;
+    // Meeting Prep reads the market's own workbook history, so it reloads.
+    state.meeting.data = null;
+    state.meeting.from = '';
+    if (workbookMarket() !== wasWorkbook) { state.plx.sync = null; state.plx.note = ''; loadWorkbookSync(); }
     state.dataExport.feedback = '';
     // A site belongs to a market, so a site chosen in the previous one would filter
     // the new market to nothing and read as an empty tab.
@@ -910,11 +932,25 @@
         if (!hc.people.length) {
           throw new Error('No "<site> - HC" tabs with an "Employee  Name" column were found.');
         }
+        /* Whose workbook this is decides what it may replace. Checked before any
+           write: the save below replaces whole collections. */
+        var target = workbookMarket(), tag = ShiftKey.workbookMarketTag(target);
+        // The same check as the upload: an older server would drop the market tag.
+        if (tag && !(state.plx.sync && state.plx.sync.market && !ShiftKey.isDefaultMarket(state.plx.sync.market))) {
+          throw new Error('the server has not been updated to keep ' + tag + '\'s workbook apart from ' +
+            'Chicago\'s yet. Nothing was changed.');
+        }
+        var siteMarket = ReqsCore.siteMarketIndex(state.stores.locations);
+        var owner = ShiftKey.checkWorkbookMarket(hc.sheets.map(function (x) { return x.building; }),
+          target || ShiftKey.DEFAULT_WORKBOOK_MARKET, siteMarket);
+        if (!owner.ok) throw new Error(owner.error);
         /* Hours somebody supplied by hand outlive the import that had none.
            The Key is re-read every time; an override is a decision about a gap
            in it, and re-importing must not silently undo it. */
         var overrides = ShiftKey.overrideIndex(state.stores.shiftKey);
-        var records = ShiftKey.toShiftRecords(hc, key, overrides);
+        var records = ShiftKey.toShiftRecords(hc, key, overrides).map(function (r) {
+          return tag ? Object.assign({}, r, { workbookMarket: tag }) : r;
+        });
         var warnings = (key ? key.warnings : ['No "Geodis Key" tab was found, so shift hours are unknown.'])
           .concat(hc.warnings)
           .concat(ShiftKey.validateAgainstKey(hc, key));
@@ -925,10 +961,29 @@
           var prior = (state.stores.shiftKey || []).filter(function (x) { return x.id === r.id; })[0] || {};
           return Object.assign({}, r, { hoursOverride: manual,
             hoursSetBy: prior.hoursSetBy || '', hoursSetAt: prior.hoursSetAt || '' });
-        });
+        }).map(function (r) { return tag ? Object.assign({}, r, { workbookMarket: tag }) : r; });
+
+        /* Both saves replace their whole collection, so what belongs to another
+           market is carried over untouched. A tag somebody set by hand is kept
+           when its site is in another market; for this market it goes, as an
+           import always did. With no other market's workbook stored, Chicago's
+           import saves exactly what it always saved. */
+        var otherSite = function (b) {
+          var m = siteMarket.get(String(b || ''));
+          return !!m && !ShiftKey.sameWorkbookMarket({ workbookMarket: ShiftKey.workbookMarketTag(m) }, target);
+        };
+        var keepShift = function (r) {
+          if (!r) return false;
+          if (r.source === 'PLX workbook') return !ShiftKey.sameWorkbookMarket(r, target);
+          return tag ? !siteMarket.get(String(r.building || '')) || otherSite(r.building) : otherSite(r.building);
+        };
+        var keepKey = function (r) { return !!r && !ShiftKey.sameWorkbookMarket(r, target); };
+        var imported = records.length;
+        records = records.concat((state.stores.shifts || []).filter(keepShift));
+        var keptKeyRows = (state.stores.shiftKey || []).filter(keepKey);
 
         state.shiftKey = key;
-        state.shiftImport = { headline: 'Reading ' + records.length + ' shift tags…', warnings: [] };
+        state.shiftImport = { headline: 'Reading ' + imported + ' shift tags…', warnings: [] };
         render();
 
         /* Both halves of the workbook, stored together. The Key used to be read
@@ -938,16 +993,18 @@
            never describe different imports. */
         SuiteData.replaceCollection('shifts', records).then(function () {
           state.stores.shifts = records;
+          var allKeys = keyRecords.concat(keptKeyRows);
           return keyRecords.length
-            ? SuiteData.replaceCollection('shiftKey', keyRecords).then(function () {
-                state.stores.shiftKey = keyRecords;
+            ? SuiteData.replaceCollection('shiftKey', allKeys).then(function () {
+                state.stores.shiftKey = allKeys;
               })
             : null;
         }).then(function () {
           rebuild();
           var matched = allProfiles().filter(function (p) { return !!p.shift; }).length;
           state.shiftImport = {
-            headline: records.length + ' shift tags imported from ' + hc.sheets.length + ' site tabs · ' +
+            headline: imported + ' shift tags imported from ' + hc.sheets.length + ' site tabs' +
+              (target ? ' for ' + target : '') + ' · ' +
               matched + ' matched a roster profile by name' +
               (keyRecords.length ? ' · ' + keyRecords.length + ' shifts from the Geodis Key' : ''),
             warnings: warnings
@@ -1888,15 +1945,22 @@
     var presMeta = '';
     if (c.presence) {
       var on = c.presence.people.filter(function (p) { return p.present; }).length;
-      presMeta = c.presence.people.length + ' associates · ' + on + ' on premise';
+      // The filtered export lists only who is on premise, so its count of
+      // associates IS the count on premise; saying both would read as a total.
+      presMeta = c.presence.presentOnly
+        ? on + ' on premise · ' + (c.presence.sites || []).join(', ') + ' · anyone scheduled and not listed counts as not clocked in'
+        : c.presence.people.length + ' associates · ' + on + ' on premise';
     }
     return '<div class="cov-sources">' +
-      covDrop('workbook', 1, 'PLX workbook',
-        'The GEODIS spreadsheet. Refreshes the roster, shift tags, open orders and attendance ' +
+      covDrop('workbook', 1, workbookLabel(),
+        (workbookMarket() ? workbookMarket() + '\'s copy of the GEODIS spreadsheet, the same shape as the PLX workbook. ' +
+          'It only ever updates ' + workbookMarket() + '; Chicago\'s workbook is untouched. '
+          : 'The GEODIS spreadsheet. ') + 'Refreshes the roster, shift tags, open orders and attendance ' +
         'points in one pass. Upload it whenever you run attendance.',
         state.plx.sync && state.plx.sync.fileName, plxMeta()) +
       covDrop('presence', 2, 'On premise now',
-        'The "On Premise - Simple" export (.csv). Drop a fresh one any time to re-check the floor.',
+        'The "On Premise - Simple" export (.csv), either the full one or the one filtered to On Premises = Yes. ' +
+        'Drop a fresh one any time to re-check the floor.',
         c.presenceFile, presMeta) +
       '</div>' + covScopeNote();
   }
@@ -2143,6 +2207,17 @@
     }
     if (res.summary.noSchedule) {
       notes.push(res.summary.noSchedule + ' associate(s) on the on-premise report have no row in the weekly schedule.');
+    }
+    /* The filtered export only reaches sites somebody is clocked in at. Scheduled
+       people elsewhere are left out rather than marked absent, and said here so a
+       whole site with nobody in yet does not disappear without a word. */
+    var ov = res.overlap || {};
+    if (ov.presentOnly && ov.outOfScope && !res.mismatch) {
+      notes.push(ov.outOfScope + ' scheduled associate(s) at ' + (ov.outOfScopeSites || []).join(', ') +
+        ' were not judged: this export lists only people on premise and has nobody at ' +
+        ((ov.outOfScopeSites || []).length === 1 ? 'that site' : 'those sites') +
+        '. If ' + ((ov.outOfScopeSites || []).length === 1 ? 'it is' : 'they are') +
+        ' working now, export the on-premise report for ' + ((ov.outOfScopeSites || []).length === 1 ? 'it' : 'them') + ' too.');
     }
     var noClock = res.summary.byStatus.notInReport || 0;
     if (noClock) {
@@ -2668,6 +2743,17 @@
      be parsed server-side -- the same code path the automated push would have
      used, so an upload and a push cannot produce different results. */
   function readPlxUpload(file) {
+    /* A server from before markets ignores the market and treats every workbook
+       as Chicago's -- which would replace Chicago's shift tags and close its
+       orders. Only a server that answered for this market's workbook by name is
+       trusted with it. */
+    if (workbookMarket() && !(state.plx.sync && state.plx.sync.market &&
+        !ShiftKey.isDefaultMarket(state.plx.sync.market))) {
+      state.plx.note = 'Not uploaded: the server has not been updated to keep ' + workbookMarket() +
+        '\'s workbook apart from Chicago\'s yet, and would treat it as Chicago\'s. Nothing was changed.';
+      render();
+      return;
+    }
     state.plx.busy = true;
     state.plx.note = 'Reading ' + file.name + '…';
     render();
@@ -2686,7 +2772,9 @@
         fileBase64: btoa(parts.join('')),
         fileName: file.name,
         modifiedAt: new Date(file.lastModified).toISOString(),
-        uploadedBy: actor ? actor.name : ''
+        uploadedBy: actor ? actor.name : '',
+        // Omitted for Chicago, so its upload is the same request it always was.
+        market: workbookMarket() || undefined
       }).then(function (r) {
         state.plx.sync = r.sync || null;
         state.plx.note = plxSummary(r);
@@ -5828,9 +5916,11 @@
   ];
   function meetingQuery() {
     var m = state.meeting, hours = { '24h': 24, '7d': 24 * 7 }[m.range];
-    if (hours) return { since: new Date(Date.now() - hours * 3600 * 1000).toISOString() };
-    if (m.range === 'pick' && m.from) return { from: m.from };
-    return {};
+    // Every market's workbook together, or the chosen market's own.
+    var q = { market: state.market === 'all' ? 'all' : state.market };
+    if (hours) q.since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+    else if (m.range === 'pick' && m.from) q.from = m.from;
+    return q;
   }
   var meetingSeq = 0;
   function loadMeeting() {
@@ -6266,7 +6356,10 @@
       uploads.slice().reverse().map(function (u) {
         return '<tr><td>' + esc(meetingWhen(u.takenAt)) +
           (u.lastSeenAt ? '<div class="sub">Re-sent unchanged ' + esc(meetingWhen(u.lastSeenAt)) + '</div>' : '') +
-          '</td><td>' + esc(u.fileName || '—') + '</td><td>' + esc(u.uploadedBy || (u.via === 'push' ? 'Scheduled push' : '—')) +
+          '</td><td>' + esc(u.fileName || '—') +
+          // With several markets' uploads in one list, say whose each is.
+          ((d.markets || []).length > 1 ? '<div class="sub">' + esc(u.market || '') + '</div>' : '') +
+          '</td><td>' + esc(u.uploadedBy || (u.via === 'email' ? 'Emailed in' : u.via === 'push' ? 'Scheduled push' : '—')) +
           '</td><td>' + esc(u.changes === undefined ? '—' : meetingHeadline(u.changes)) + '</td>' +
           (mayDownloadPlx() ? '<td><button type="button" class="suite-link" data-meeting-download="' + esc(u.id) +
             '">Download</button></td>' : '') + '</tr>';
@@ -8225,7 +8318,7 @@
       if (state.view === 'timeoff') render();
     }).catch(function () { render(); }));
 
-    syncLoads.push(SuiteData.loadPlxSync().then(function (sync) {
+    syncLoads.push(SuiteData.loadPlxSync(workbookMarket()).then(function (sync) {
       state.plx.sync = sync;
       if (state.view === 'reconciliation') render();
     }).catch(function () { render(); }));

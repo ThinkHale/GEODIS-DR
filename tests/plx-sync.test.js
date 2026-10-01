@@ -62,6 +62,9 @@ const { makeAuth, reqGet } = require('./fn-auth.js');
 const auth = makeAuth();
 const consts = src.slice(src.indexOf('const COLLECTIONS = {'), src.indexOf('const NOTES_ORIGIN'));
 const helpers = src.slice(src.indexOf('async function readJsonArray'), src.indexOf('async function handleCollection'));
+// The attachment decoder every posted file goes through, so the push is tested
+// with the real one rather than a stand-in.
+const decoders = src.slice(src.indexOf('function looksLikeBase64('), src.indexOf('function normalizeUtf16('));
 // Start at the shared worker: handlePlx and the browser upload both call it, so
 // slicing from handlePlx alone leaves applyPlxWorkbook undefined.
 /* Sliced up to the auth section, not to the end of the file: past this point
@@ -92,9 +95,9 @@ const built = new Function(
   'bucket', 'readJsonFile', 'setKvCors', 'SYNC_KEY',
   'NOTES_ORIGIN', 'XLSX', 'ShiftKey', 'Sched', 'Intake', 'AttendanceImport',
   'Contacts', 'rosterProfiles', 'fetch', 'console', 'requireUser',
-  consts + helpers + handler + '\nreturn {handlePlx, handlePlxUpload, handlePlxRefresh, COLLECTIONS};'
+  'ReqsCore', consts + decoders + helpers + handler + '\nreturn {handlePlx, handlePlxUpload, handlePlxRefresh, COLLECTIONS};'
 )(bucket, readJsonFile, setKvCors, SYNC_KEY,
-  NOTES_ORIGIN, XLSX, SK, Sched, Intake, AttendanceImport, Contacts, rosterProfiles, fetchStub, console, auth.requireUser);
+  NOTES_ORIGIN, XLSX, SK, Sched, Intake, AttendanceImport, Contacts, rosterProfiles, fetchStub, console, auth.requireUser, require('../reqs-core.js'));
 const { handlePlx, handlePlxUpload, handlePlxRefresh, COLLECTIONS } = built;
 
 const mkRes = () => { const r = { code: null, body: null, set() { return r }, status(c) { r.code = c; return r }, json(b) { r.body = b; return r }, send() { return r } }; return r; };
@@ -246,6 +249,19 @@ const shifts = () => { try { return JSON.parse(files[COLLECTIONS.shifts.path]); 
   t('with a flow configured it triggers', r.body.triggered === true);
   t('calling the flow URL', fetched.u === 'https://flow.example/run');
   t('by POST', fetched.o.method === 'POST');
+
+  console.log('— the workbook emailed in, through Power Automate —');
+  const book = makeBook();
+  r = await push({ fileBase64: Buffer.from(book).toString('base64'), fileName: 'PLX - Geodis Spreadsheet.xlsx', via: 'email' });
+  t('base64-of-base64 is unwrapped', r.code === 200 && r.body.sync.shiftTags === 1);
+  r = await push({ fileBase64: JSON.stringify({ '$content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '$content': book }) });
+  t('a {"$content"} envelope is opened', r.code === 200 && r.body.sync.openOrders === 2);
+  const before = JSON.stringify(reqs());
+  r = await push({ fileBase64: Buffer.from('a,b,c\n1,2,3').toString('base64'), fileName: 'signature.csv' });
+  t('an attachment that is not a workbook is refused', r.code === 400 && /not an \.xlsx/.test(r.body.error));
+  t('and changes nothing', JSON.stringify(reqs()) === before);
+  r = await push({ fileBase64: Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]).toString('base64'), fileName: 'logo.png' });
+  t('nor does a signature image', r.code === 400 && JSON.stringify(reqs()) === before);
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

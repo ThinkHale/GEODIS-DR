@@ -713,8 +713,12 @@
   /* ---------- the PLX workbook ----------
      It lives in another Microsoft tenant, so nothing here can go and fetch it:
      somebody uploads it, and loadPlxSync() reports what that upload produced. */
-  function loadPlxSync() {
-    return getJsonSource('plxSync', API + '?plx=1', function (d) { return d.sync || {}; });
+  /* No market is Chicago's workbook, exactly the request this always made;
+     another market's is asked for by name. */
+  function loadPlxSync(market) {
+    if (!market) return getJsonSource('plxSync', API + '?plx=1', function (d) { return d.sync || {}; });
+    return getJsonSource('plxSync:' + market, API + '?plx=1&market=' + encodeURIComponent(market),
+      function (d) { return d.sync || {}; });
   }
   /* ---------- the shared IL PTO tracker ----------
      Watched on SharePoint by a flow that fires when the file changes, so unlike
@@ -732,7 +736,7 @@
      { since } or { from, to }; empty means the newest against the one before. */
   function loadPlxChanges(q) {
     q = q || {};
-    var qs = ['since', 'from', 'to'].filter(function (k) { return q[k]; }).map(function (k) {
+    var qs = ['market', 'since', 'from', 'to'].filter(function (k) { return q[k]; }).map(function (k) {
       return '&' + k + '=' + encodeURIComponent(q[k]);
     }).join('');
     // One source for every window: a slower request for the window somebody

@@ -768,6 +768,60 @@
     return out;
   }
 
+  /* ---------- several markets at once ----------
+     Each market's workbook is compared only with its own uploads; "All markets"
+     is the sum of those comparisons, never one market's upload against
+     another's. Site numbers do not repeat across markets, so lists simply join. */
+  function mergeDiffs(list) {
+    list = (list || []).filter(Boolean);
+    if (!list.length) return null;
+    var out = JSON.parse(JSON.stringify(list[0]));
+    list.slice(1).forEach(function (d) {
+      ['assignments', 'walkthroughs', 'orders', 'attendance'].forEach(function (g) {
+        Object.keys(d[g] || {}).forEach(function (k) { out[g][k] = (out[g][k] || []).concat(d[g][k]); });
+      });
+      out.headcount = out.headcount.concat(d.headcount || []);
+      out.openSlots = out.openSlots.concat(d.openSlots || []);
+      out.highlights = out.highlights && d.highlights;
+    });
+    out.counts = counts(out);
+    return out;
+  }
+  function mergeProfiles(list) {
+    list = (list || []).filter(Boolean);
+    if (!list.length) return null;
+    var sort = function (x, y) {
+      return String(x.location).localeCompare(String(y.location)) || String(x.customer || '').localeCompare(String(y.customer || ''));
+    };
+    return {
+      takenAt: list.map(function (p) { return p.takenAt; }).sort().pop(),
+      highlights: list.some(function (p) { return p.highlights; }),
+      rows: [].concat.apply([], list.map(function (p) { return p.rows; })).sort(sort),
+      sites: [].concat.apply([], list.map(function (p) { return p.sites; })).sort(sort),
+      starts: [].concat.apply([], list.map(function (p) { return p.starts || []; }))
+    };
+  }
+  /* Weekly rows from several markets, by week. A market with no reading yet in
+     a week adds nothing to it; a change is only summed where it is known. */
+  function mergeWeekly(lists) {
+    var byWeek = {};
+    (lists || []).forEach(function (weeks) {
+      (weeks || []).forEach(function (w) {
+        var x = byWeek[w.week] || (byWeek[w.week] = { week: w.week, sites: {}, onRoster: 0, expected: null,
+          added: 0, removed: 0, readings: 0, known: false, change: null });
+        Object.keys(w.sites || {}).forEach(function (loc) { x.sites[loc] = w.sites[loc]; });
+        if (!w.known) return;
+        x.known = true;
+        x.readings += w.readings || 0;
+        x.onRoster += w.onRoster || 0; x.added += w.added || 0; x.removed += w.removed || 0;
+        if (w.expected != null) x.expected = (x.expected || 0) + w.expected;
+        if (w.open != null) { x.open = (x.open || 0) + w.open; x.identified = (x.identified || 0) + (w.identified || 0); }
+        if (w.change != null) x.change = (x.change || 0) + w.change;
+      });
+    });
+    return Object.keys(byWeek).sort().map(function (k) { return byWeek[k]; });
+  }
+
   /* ---------- the history index ----------
      A list of uploads, newest last. Anything older than the retention window is
      dropped -- except the newest, which is kept however old it is, because it is
@@ -812,6 +866,7 @@
     rowFills: rowFills, parseDay: parseDay, weekOf: weekOf,
     snapshot: snapshot, diff: diff, filterDiff: filterDiff, changed: changed,
     profile: profile, filterProfile: filterProfile,
+    mergeDiffs: mergeDiffs, mergeProfiles: mergeProfiles, mergeWeekly: mergeWeekly,
     seriesPoint: seriesPoint, pruneSeries: pruneSeries, filterSeries: filterSeries, weekly: weekly,
     prune: prune, baselineFor: baselineFor, idFor: idFor
   };

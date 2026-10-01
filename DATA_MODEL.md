@@ -355,6 +355,30 @@ customer at a site) and `trend` (12 weeks of headcount, newest last), neither of
 which needs two uploads. Beeline's own figures are joined in the browser, by Req #,
 from the exports the Beeline Requests page already loads.
 
+### One workbook per market
+
+The PLX workbook is Chicago's. Another market (St. Louis first) keeps a workbook
+of the same shape and uploads it with that market chosen in the picker. The rule
+everything follows: **nothing another market uploads may touch Chicago's data.**
+
+- **Chicago's records carry no tag**, exactly as before, so nothing stored was
+  migrated. Every other market's shift tags, open orders and Geodis Key rows carry
+  `workbookMarket` (e.g. `"St. Louis"`). Replacing tags and closing orders that
+  left the sheet only ever touch records of the uploading market.
+- **Chicago's files stay where they were** (`plx/sync.json`, `plx/history/`,
+  `plx/headcount-series.json`). Another market's live under
+  `plx/markets/<market>/`, and `plx/markets.json` lists the markets that have one.
+- **Each upload is checked against its market** from its site numbers and
+  Settings > Locations, before anything is written. Another market's workbook must
+  have its sites listed under that market. Chicago's is only refused when every
+  listed site belongs elsewhere, because its sites may not be in Locations at all.
+- The push endpoint, the browser upload, `GET ?plx=1` and `GET ?plxChanges=1`
+  take `market`. Without it they mean Chicago, as they always did; Meeting Prep's
+  `market=all` combines every market, each compared only with its own uploads.
+- The browser refuses another market's upload or import until the server answers
+  for that market by name, so a page published before the function is deployed
+  cannot send St. Louis's workbook to a server that would read it as Chicago's.
+
 ### An upload never wipes a person's work
 
 The sheet does not track `filled` or where a requisition stands, so those are

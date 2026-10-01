@@ -328,6 +328,9 @@ const { makeAuth, reqGet } = require('./fn-auth.js');
 const auth = makeAuth();
 const consts = src.slice(src.indexOf('const COLLECTIONS = {'), src.indexOf('const NOTES_ORIGIN'));
 const helpers = src.slice(src.indexOf('async function readJsonArray'), src.indexOf('async function handleCollection'));
+// The attachment decoder every posted file goes through, so the push is tested
+// with the real one rather than a stand-in.
+const decoders = src.slice(src.indexOf('function looksLikeBase64('), src.indexOf('function normalizeUtf16('));
 const handler = src.slice(src.indexOf('async function applyPlxWorkbook('), src.indexOf('/* ---------- who is calling ----------'));
 
 let files = {};
@@ -345,11 +348,11 @@ const built = new Function(
   'bucket', 'readJsonFile', 'setKvCors', 'SYNC_KEY', 'NOTES_ORIGIN', 'XLSX', 'ShiftKey', 'Sched', 'Intake',
   'AttendanceImport', 'Contacts', 'rosterProfiles', 'fetch', 'console', 'requireUser',
   'PlxHistory', 'crypto', 'MarketAccess', 'Auth', 'SNAPSHOT_PATH',
-  consts + helpers + handler + '\nreturn {handlePlx, handlePlxChanges, PLX_HISTORY_INDEX, COLLECTIONS};'
+  'ReqsCore', consts + decoders + helpers + handler + '\nreturn {handlePlx, handlePlxChanges, PLX_HISTORY_INDEX, COLLECTIONS};'
 )(bucket, readJsonFile, () => {}, { value: () => 'k' }, 'https://geodis.ebtools.pro', XLSX, SK,
   require('../schedule-core.js'), require('../form-intake.js'), require('../functions/attendance-import.js'),
   require('../contacts-core.js'), async () => [], async () => ({ ok: true }), console, auth.requireUser,
-  H, require('crypto'), MarketAccess, auth.Auth, 'snapshots/latest.json');
+  H, require('crypto'), MarketAccess, auth.Auth, 'snapshots/latest.json', require('../reqs-core.js'));
 const { handlePlx, handlePlxChanges, PLX_HISTORY_INDEX, COLLECTIONS } = built;
 // The real market lookup reads Settings > Locations from the bucket.
 files[COLLECTIONS.locations.path] = JSON.stringify(LOCATIONS);
@@ -430,13 +433,17 @@ const index = () => JSON.parse(files[PLX_HISTORY_INDEX]).entries;
   t('signed out is refused', (await changes()).code === 401);
   auth.as({});
 
+  r = await call(handlePlx, { method: 'POST', query: {}, body: { fileBase64: toBook({ qty: '7' }), via: 'email' },
+    get: h => (h === 'x-sync-key' ? 'k' : '') });
+  t('an emailed upload is recorded as one', index()[index().length - 1].via === 'email');
+
   console.log('— older than 7 days is pruned —');
   const aged = index().map((x, i) => Object.assign({}, x, { takenAt: '2026-01-0' + (i + 1) + 'T00:00:00Z' }));
   files[PLX_HISTORY_INDEX] = JSON.stringify({ entries: aged });
   r = await push({ filled: true });
   t('only the new upload and nothing stale remain', index().length === 1 && index()[0].id === r.body.sync.historyId);
-  // 110150 filled, and 111000 -- added by the upload before -- gone again.
-  t('it was still compared with the old newest', r.body.sync.changes && r.body.sync.changes.ordersClosed === 2);
+  // The old newest is the emailed upload, which still listed 110150; it is filled now.
+  t('it was still compared with the old newest', r.body.sync.changes && r.body.sync.changes.ordersClosed === 1);
   t('the old files are deleted', aged.every(x => !files['plx/history/' + x.id + '.xlsx'] && !files['plx/history/' + x.id + '.json']));
 
   console.log('— the headcount series and the profile —');

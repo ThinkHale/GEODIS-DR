@@ -316,6 +316,85 @@ curl -s -X POST "https://syncreport-eusvh7xq5q-uc.a.run.app/?reqSync=1" \
 The manual **Add an export by hand** panel stays exactly as it is, for a report
 that did not arrive or an off-cycle pull.
 
+## Automating the Chicago PLX workbook by email
+
+The workbook lives on GEODIS's SharePoint, in another Microsoft tenant, so no
+flow here can read it directly. A PC with access downloads a copy and emails it
+to an inbox in this tenant; a flow watching that inbox posts it to the suite.
+Each upload refreshes shift tags, open orders and phone numbers, is kept in the
+7-day history, and feeds Meeting Prep -- exactly as an upload from the browser
+does, except attendance, which still comes from the browser upload.
+
+### 1. The folder
+
+An Outlook rule moves the emailed copy into a folder named **Automation**.
+Nothing else needs to land there, but anything that does is harmless: the flow
+only posts attachments named like the workbook, and the endpoint refuses
+anything that is not an `.xlsx` **without touching what is already stored**.
+
+### 2. The flow
+
+**Trigger:** *When a new email arrives (V3)* -- Folder: `Automation`,
+**Only with attachments: Yes**, **Include Attachments: Yes**. Set **From** to
+the address the PC sends from, so nobody else's mail can feed it.
+
+**Action:** *Apply to each* over `triggerOutputs()?['body/attachments']`, with a
+**Condition** inside it and the **HTTP** action in its *If yes* branch.
+
+The condition is two rows joined by **And**, built with the card's own controls
+(see the Beeline section above for why not a pasted expression), each picking
+**Name** from the dynamic content panel:
+
+- **Name** *starts with* `PLX`
+- **Name** *ends with* `.xlsx`
+
+That keeps signature logos, which arrive as attachments too, from being posted.
+
+**HTTP:**
+
+- Method: `POST`
+- URI: `https://syncreport-eusvh7xq5q-uc.a.run.app/?plx=1`
+- Headers: `x-sync-key: <the SYNC_KEY secret>`, `Content-Type: application/json`
+- Body:
+
+```json
+{
+  "fileBase64": "@{items('Apply_to_each')?['contentBytes']}",
+  "fileName":   "@{items('Apply_to_each')?['name']}",
+  "modifiedAt": "@{triggerOutputs()?['body/receivedDateTime']}",
+  "via":        "email"
+}
+```
+
+`contentBytes` may come back as raw base64, base64-of-base64, or a
+`{"$content": …}` envelope; the endpoint reads all three.
+
+**Cloning the RC flow instead** works too. That flow fetches each attachment with
+*Get Attachment (V2)* and posts `base64(body('Get_Attachment_(V2)')?['contentBytes'])`,
+which is the base64-of-base64 shape above. Keep its structure; change the URI to
+`?plx=1` and, optionally, add the other fields:
+
+```json
+{
+  "fileBase64": "@{base64(body('Get_Attachment_(V2)')?['contentBytes'])}",
+  "fileName":   "@{body('Get_Attachment_(V2)')?['name']}",
+  "modifiedAt": "@{triggerOutputs()?['body/receivedDateTime']}",
+  "via":        "email"
+}
+``` `via: "email"` is
+what makes the upload read **Emailed in** under Meeting Prep › Uploads kept.
+
+### 3. Check it
+
+Send the email once by hand. In the run history, the HTTP action's output should
+read `{"ok":true,"sync":{"shiftTags":…,"openOrders":…}}`. A `400` names what was
+wrong with the file and changed nothing; a `401` is the sync key. Then Meeting
+Prep's "Uploads kept" lists it as *Emailed in*.
+
+The same file emailed twice is stored once: an identical workbook only notes
+that it was re-sent. This replaces `scripts/push-plx.sh`, which read a synced
+OneDrive copy on a Mac; that script still works and posts to the same place.
+
 ## Turning sign-in on
 
 Every read and every write now needs a signed-in account. This is the part of the
